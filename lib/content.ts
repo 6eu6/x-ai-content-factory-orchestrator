@@ -1,6 +1,20 @@
 import OpenAI from 'openai';
 import { optionalEnv, requiredEnv } from './env';
 
+function buildClient() {
+  const baseURL = optionalEnv('OPENAI_BASE_URL');
+  return new OpenAI({
+    apiKey: requiredEnv('OPENAI_API_KEY'),
+    baseURL: baseURL || undefined,
+    defaultHeaders: baseURL.includes('openrouter.ai')
+      ? {
+          'HTTP-Referer': optionalEnv('OPENROUTER_REFERER', 'https://x.com/30piq'),
+          'X-OpenRouter-Title': optionalEnv('OPENROUTER_TITLE', 'X AI Content Factory')
+        }
+      : undefined
+  });
+}
+
 export async function generateDailyContentPack(input: {
   accountState: unknown;
   targets: unknown;
@@ -8,8 +22,8 @@ export async function generateDailyContentPack(input: {
   recentContent: unknown;
   creatorIntel: unknown;
 }) {
-  const client = new OpenAI({ apiKey: requiredEnv('OPENAI_API_KEY') });
-  const model = optionalEnv('OPENAI_MODEL', 'gpt-4.1');
+  const client = buildClient();
+  const model = optionalEnv('OPENAI_MODEL', optionalEnv('OPENAI_BASE_URL').includes('openrouter.ai') ? 'openai/gpt-5.2-mini' : 'gpt-4.1-mini');
   const prompt = `
 You are the X AI Content Factory operator for @${optionalEnv('X_USERNAME', '30piq')}.
 Create a practical daily mission for an English X account about AI x productivity x career growth.
@@ -39,8 +53,16 @@ Return JSON with:
   "quality_checks": ["..."],
   "human_checklist": ["..."]
 }`;
-  const response = await client.responses.create({ model, input: prompt, temperature: 0.7 });
-  const text = response.output_text || '{}';
+  const response = await client.chat.completions.create({
+    model,
+    temperature: 0.7,
+    response_format: { type: 'json_object' },
+    messages: [
+      { role: 'system', content: 'You are a strict JSON-producing content operations agent.' },
+      { role: 'user', content: prompt }
+    ]
+  });
+  const text = response.choices[0]?.message?.content || '{}';
   try {
     return JSON.parse(text);
   } catch {
