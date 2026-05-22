@@ -15,8 +15,17 @@ function buildClient() {
   });
 }
 
+function cleanAscii(text: string): string {
+  return String(text || '')
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2013\u2014]/g, '-')
+    .replace(/[^\x00-\x7F]/g, '')
+    .trim();
+}
+
 function containsUnsafeClaim(text: string): boolean {
-  const t = text.toLowerCase();
+  const t = cleanAscii(text).toLowerCase();
   const badPatterns = [
     /\bi\b/,
     /\bmy\b/,
@@ -34,23 +43,9 @@ function containsUnsafeClaim(text: string): boolean {
     /improved/,
     /doubling/,
     /recruiters notice/,
-    /â/,
-    /—/,
-    /’/,
-    /“/,
-    /”/
+    /#/
   ];
   return badPatterns.some((p) => p.test(t));
-}
-
-function cleanAscii(text: string): string {
-  return text
-    .replace(/[\u2018\u2019]/g, "'")
-    .replace(/[\u201C\u201D]/g, '"')
-    .replace(/[\u2013\u2014]/g, '-')
-    .replace(/â€”/g, '-')
-    .replace(/[^\x00-\x7F]/g, '')
-    .trim();
 }
 
 function fallbackPack() {
@@ -117,41 +112,74 @@ function fallbackPack() {
   };
 }
 
+function valueFrom(item: any, keys: string[], fallback: string): string {
+  if (typeof item === 'string') return item;
+  if (!item || typeof item !== 'object') return fallback;
+  for (const key of keys) {
+    if (typeof item[key] === 'string' && item[key].trim()) return item[key];
+  }
+  return fallback;
+}
+
+function normalizeReply(item: any, index: number) {
+  const fallbackTargets = ['creator', 'topic', 'topic'];
+  const prepared = cleanAscii(valueFrom(item, ['prepared_reply', 'reply', 'text', 'content'], ''));
+  const angle = cleanAscii(valueFrom(item, ['reply_angle', 'angle'], 'Add a useful perspective.'));
+  const target = cleanAscii(valueFrom(item, ['target_type', 'target'], fallbackTargets[index] || 'topic'));
+  return { target_type: target, reply_angle: angle, prepared_reply: prepared.slice(0, 280) };
+}
+
+function normalizeQuote(item: any) {
+  const prepared = cleanAscii(valueFrom(item, ['prepared_quote', 'quote', 'text', 'content'], ''));
+  const angle = cleanAscii(valueFrom(item, ['quote_angle', 'angle'], 'Add a practical framework.'));
+  const target = cleanAscii(valueFrom(item, ['target_type', 'target'], 'post/topic'));
+  return { target_type: target, quote_angle: angle, prepared_quote: prepared.slice(0, 280) };
+}
+
 function normalizePack(pack: any) {
+  const safe = fallbackPack();
   const tweets = Array.isArray(pack?.single_tweets) ? pack.single_tweets : [];
+  const repliesRaw = Array.isArray(pack?.reply_targets_strategy) ? pack.reply_targets_strategy : [];
+  const quotesRaw = Array.isArray(pack?.quote_tweet_strategy) ? pack.quote_tweet_strategy : [];
   const allText = [
-    ...tweets.map((t: any) => String(t.text || '')),
-    ...(Array.isArray(pack?.reply_targets_strategy) ? pack.reply_targets_strategy.map((r: any) => String(r.prepared_reply || '')) : []),
-    ...(Array.isArray(pack?.quote_tweet_strategy) ? pack.quote_tweet_strategy.map((q: any) => String(q.prepared_quote || '')) : [])
+    ...tweets.map((t: any) => String(t?.text || '')),
+    ...repliesRaw.map((r: any) => valueFrom(r, ['prepared_reply', 'reply', 'text', 'content'], '')),
+    ...quotesRaw.map((q: any) => valueFrom(q, ['prepared_quote', 'quote', 'text', 'content'], ''))
   ];
 
   if (tweets.length !== 3 || allText.some(containsUnsafeClaim)) {
-    return fallbackPack();
+    return safe;
   }
 
-  pack.single_tweets = tweets.slice(0, 3).map((t: any) => ({
-    ...t,
-    text: cleanAscii(String(t.text || '')).slice(0, 240),
-    why_it_works: cleanAscii(String(t.why_it_works || '')),
-    originality_element: cleanAscii(String(t.originality_element || 'Original framework')),
-    best_time_utc: cleanAscii(String(t.best_time_utc || '15:00'))
+  const cleanedTweets = tweets.slice(0, 3).map((t: any) => ({
+    text: cleanAscii(String(t?.text || '')).slice(0, 240),
+    why_it_works: cleanAscii(String(t?.why_it_works || '')),
+    originality_element: cleanAscii(String(t?.originality_element || t?.element || 'Original framework')),
+    best_time_utc: cleanAscii(String(t?.best_time_utc || '15:00'))
   }));
 
-  pack.reply_targets_strategy = (Array.isArray(pack.reply_targets_strategy) ? pack.reply_targets_strategy : []).slice(0, 3).map((r: any) => ({
-    ...r,
-    reply_angle: cleanAscii(String(r.reply_angle || 'Add a useful perspective.')),
-    prepared_reply: cleanAscii(String(r.prepared_reply || '')).slice(0, 280)
-  }));
+  const cleanedReplies = repliesRaw.slice(0, 3).map(normalizeReply).filter((r: any) => r.prepared_reply && !containsUnsafeClaim(r.prepared_reply));
+  const cleanedQuotes = quotesRaw.slice(0, 1).map(normalizeQuote).filter((q: any) => q.prepared_quote && !containsUnsafeClaim(q.prepared_quote));
 
-  pack.quote_tweet_strategy = (Array.isArray(pack.quote_tweet_strategy) ? pack.quote_tweet_strategy : []).slice(0, 1).map((q: any) => ({
-    ...q,
-    quote_angle: cleanAscii(String(q.quote_angle || 'Add a practical framework.')),
-    prepared_quote: cleanAscii(String(q.prepared_quote || '')).slice(0, 280)
-  }));
+  const githubDecision = typeof pack?.github_decision === 'object' && pack.github_decision !== null && !Array.isArray(pack.github_decision)
+    ? {
+        needed: Boolean(pack.github_decision.needed),
+        repo_name: cleanAscii(String(pack.github_decision.repo_name || '')),
+        asset_type: cleanAscii(String(pack.github_decision.asset_type || '')),
+        readme_outline: cleanAscii(String(pack.github_decision.readme_outline || ''))
+      }
+    : safe.github_decision;
 
-  pack.human_checklist = (Array.isArray(pack.human_checklist) ? pack.human_checklist : []).slice(0, 4).map((x: any) => cleanAscii(String(x)));
-  pack.quality_checks = (Array.isArray(pack.quality_checks) ? pack.quality_checks : []).slice(0, 5).map((x: any) => cleanAscii(String(x)));
-  return pack;
+  return {
+    mode: cleanAscii(String(pack?.mode || 'bootstrap')),
+    today_goal: cleanAscii(String(pack?.today_goal || safe.today_goal)),
+    single_tweets: cleanedTweets,
+    reply_targets_strategy: cleanedReplies.length ? cleanedReplies : safe.reply_targets_strategy,
+    quote_tweet_strategy: cleanedQuotes.length ? cleanedQuotes : safe.quote_tweet_strategy,
+    github_decision: githubDecision,
+    quality_checks: (Array.isArray(pack?.quality_checks) ? pack.quality_checks : safe.quality_checks).slice(0, 5).map((x: any) => cleanAscii(String(x))),
+    human_checklist: (Array.isArray(pack?.human_checklist) ? pack.human_checklist : safe.human_checklist).slice(0, 4).map((x: any) => cleanAscii(String(x)))
+  };
 }
 
 export async function generateDailyContentPack(input: {
@@ -170,6 +198,7 @@ Create a practical daily mission for an English X account about AI x productivit
 Critical rules:
 - Output valid JSON only.
 - Use plain ASCII punctuation only.
+- Do not use hashtags.
 - Do not invent personal experiences, test results, percentages, revenue, job outcomes, or tool performance.
 - Do not write first-person claims unless the provided state contains proof.
 - Do not copy creators and do not create engagement bait.
@@ -187,10 +216,10 @@ creatorIntel=${JSON.stringify(input.creatorIntel)}
 Return JSON with keys: mode, today_goal, single_tweets, reply_targets_strategy, quote_tweet_strategy, github_decision, quality_checks, human_checklist.`;
   const response = await client.chat.completions.create({
     model,
-    temperature: 0.35,
+    temperature: 0.25,
     response_format: { type: 'json_object' },
     messages: [
-      { role: 'system', content: 'You are a strict JSON-producing editor. Never invent personal proof or metrics.' },
+      { role: 'system', content: 'You are a strict JSON-producing editor. Never invent personal proof, fake metrics, hashtags, or first-person experience claims.' },
       { role: 'user', content: prompt }
     ]
   });
