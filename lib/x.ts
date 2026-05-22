@@ -59,6 +59,21 @@ export async function fetchTwitterApiJson(url: string) {
   return json;
 }
 
+function extractTweets(json: any) {
+  const candidates = [
+    json?.tweets,
+    json?.data?.tweets,
+    json?.result?.tweets,
+    json?.results,
+    json?.data,
+    json?.result
+  ];
+  for (const item of candidates) {
+    if (Array.isArray(item)) return item;
+  }
+  return [];
+}
+
 function userFromAuthor(username: string, author: any): XAccountSnapshot {
   return {
     username: author?.userName || author?.username || username,
@@ -82,20 +97,20 @@ function normalizeTwitterApiUser(username: string, json: any): XAccountSnapshot 
 
 function normalizeTwitterApiTweet(t: any) {
   return {
-    id: String(t.id || ''),
-    text: t.text || '',
-    created_at: t.createdAt || t.created_at,
+    id: String(t.id || t.tweetId || t.rest_id || ''),
+    text: t.text || t.full_text || t.content || '',
+    created_at: t.createdAt || t.created_at || t.created_at_iso,
     public_metrics: {
-      like_count: Number(t.likeCount || 0),
-      reply_count: Number(t.replyCount || 0),
-      retweet_count: Number(t.retweetCount || 0),
-      quote_count: Number(t.quoteCount || 0),
-      bookmark_count: Number(t.bookmarkCount || 0),
-      view_count: Number(t.viewCount || 0)
+      like_count: Number(t.likeCount || t.likes || t.favorite_count || 0),
+      reply_count: Number(t.replyCount || t.replies || t.reply_count || 0),
+      retweet_count: Number(t.retweetCount || t.retweets || t.retweet_count || 0),
+      quote_count: Number(t.quoteCount || t.quotes || t.quote_count || 0),
+      bookmark_count: Number(t.bookmarkCount || t.bookmarks || 0),
+      view_count: Number(t.viewCount || t.views || 0)
     },
     entities: t.entities || {},
-    is_reply: Boolean(t.isReply),
-    author: t.author,
+    is_reply: Boolean(t.isReply || t.in_reply_to_status_id),
+    author: t.author || t.user,
     raw: t
   };
 }
@@ -106,6 +121,15 @@ export async function getXUserByUsername(username = optionalEnv('X_USERNAME', '3
   return normalizeTwitterApiUser(username, await fetchTwitterApiJson(url.toString()));
 }
 
+export async function searchXTweets(query: string, queryType: 'Latest' | 'Top' = 'Top', maxResults = 20) {
+  const safeMax = Math.min(Math.max(Number(maxResults) || 20, 1), 20);
+  const url = new URL(`${twitterApiBase()}/twitter/tweet/advanced_search`);
+  url.searchParams.set('query', query);
+  url.searchParams.set('queryType', queryType);
+  const json = await fetchTwitterApiJson(url.toString());
+  return extractTweets(json).slice(0, safeMax).map(normalizeTwitterApiTweet);
+}
+
 export async function getXUserTimeline(user: string | XAccountSnapshot, maxResults = 5, includeReplies = false) {
   const username = typeof user === 'string' ? user : user.username;
   const safeMax = Math.min(Math.max(Number(maxResults) || 5, 5), 20);
@@ -113,8 +137,9 @@ export async function getXUserTimeline(user: string | XAccountSnapshot, maxResul
   url.searchParams.set('userName', username.replace(/^@/, ''));
   url.searchParams.set('includeReplies', String(Boolean(includeReplies)));
   const json = await fetchTwitterApiJson(url.toString());
-  const arr = Array.isArray(json.tweets) ? json.tweets : [];
-  return arr.slice(0, safeMax).map(normalizeTwitterApiTweet);
+  const fromTimeline = extractTweets(json).slice(0, safeMax).map(normalizeTwitterApiTweet);
+  if (fromTimeline.length > 0) return fromTimeline;
+  return searchXTweets(`from:${username.replace(/^@/, '')}`, 'Latest', safeMax);
 }
 
 export async function getXUserAndTimeline(username: string, maxResults = 5, includeReplies = false) {
@@ -122,16 +147,6 @@ export async function getXUserAndTimeline(username: string, maxResults = 5, incl
   const author = tweets.find((t: any) => t.author)?.author;
   const user = author ? userFromAuthor(username, author) : await getXUserByUsername(username);
   return { user, tweets };
-}
-
-export async function searchXTweets(query: string, queryType: 'Latest' | 'Top' = 'Top', maxResults = 20) {
-  const safeMax = Math.min(Math.max(Number(maxResults) || 20, 1), 20);
-  const url = new URL(`${twitterApiBase()}/twitter/tweet/advanced_search`);
-  url.searchParams.set('query', query);
-  url.searchParams.set('queryType', queryType);
-  const json = await fetchTwitterApiJson(url.toString());
-  const arr = Array.isArray(json.tweets) ? json.tweets : [];
-  return arr.slice(0, safeMax).map(normalizeTwitterApiTweet);
 }
 
 export function scoreXTweet(tweet: any) {
