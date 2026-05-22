@@ -1,9 +1,9 @@
 import OpenAI from 'openai';
 import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
-import { getXUserByUsername, getXUserTimeline, analyzeXTweet } from '../../../lib/x';
+import { getXUserAndTimeline, analyzeXTweet } from '../../../lib/x';
 
-const VERSION = 'viral-account-scan-v3-budget-mode';
+const VERSION = 'viral-account-scan-v4-twitterapi-single-call';
 
 function client() {
   const baseURL = optionalEnv('OPENAI_BASE_URL');
@@ -53,7 +53,7 @@ async function run(req: Request) {
       try { body = await req.json(); } catch {}
     }
 
-    const maxAccounts = numParam(body.max_accounts || url.searchParams.get('max_accounts') || optionalEnv('X_SCAN_MAX_ACCOUNTS', '3'), 3, 1, 10);
+    const maxAccounts = numParam(body.max_accounts || url.searchParams.get('max_accounts') || optionalEnv('X_SCAN_MAX_ACCOUNTS', '2'), 2, 1, 10);
     const tweetsPerAccount = numParam(body.tweets_per_account || url.searchParams.get('tweets_per_account') || optionalEnv('X_SCAN_TWEETS_PER_ACCOUNT', '5'), 5, 5, 20);
     const dryRun = String(body.dry_run || url.searchParams.get('dry_run') || '').toLowerCase() === 'true';
 
@@ -65,21 +65,18 @@ async function run(req: Request) {
     const budget = {
       max_accounts: maxAccounts,
       tweets_per_account: tweetsPerAccount,
-      estimated_x_requests: handles.length * 2,
-      dry_run: dryRun
+      estimated_twitterapi_requests: handles.length,
+      dry_run: dryRun,
+      note: 'Uses TwitterAPI.io last_tweets only, deriving author data from tweet author when available.'
     };
 
-    if (dryRun) {
-      return Response.json({ ok: true, version: VERSION, budget, handles, note: 'Dry run only. No X API calls were made.' });
-    }
+    if (dryRun) return Response.json({ ok: true, version: VERSION, budget, handles, note: 'Dry run only. No TwitterAPI.io calls were made.' });
 
     const scanResults: any[] = [];
     const errors: any[] = [];
     for (const handle of handles) {
       try {
-        const user = await getXUserByUsername(handle);
-        if (!user.id) throw new Error('User id not returned from X.');
-        const tweets = await getXUserTimeline(user.id, tweetsPerAccount);
+        const { user, tweets } = await getXUserAndTimeline(handle, tweetsPerAccount, false);
         const analyzed = tweets.map((t: any) => analyzeXTweet(t, user)).sort((a: any, b: any) => (b.engagement_per_1k_followers || 0) - (a.engagement_per_1k_followers || 0));
         scanResults.push({ user, top_tweets: analyzed.slice(0, tweetsPerAccount), all_tweets_count: tweets.length });
       } catch (err: any) {
