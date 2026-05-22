@@ -1,4 +1,4 @@
-export const GROWTH_OPERATOR_VERSION = 'safe-v6-growth-operator';
+export const GROWTH_OPERATOR_VERSION = 'safe-v7-growth-operator-unique';
 
 export function fallbackGrowthReplies() {
   return [
@@ -26,14 +26,41 @@ export function fallbackGrowthReplies() {
       target_type: 'learning or upskilling post',
       reply_angle: 'Learning loop',
       prepared_reply: 'The best use case is turning learning into a loop: ask, apply, review, and refine. AI helps most when it shortens that loop without removing the thinking.'
+    },
+    {
+      target_type: 'AI workflow thread',
+      reply_angle: 'Decision quality angle',
+      prepared_reply: 'The useful test is not whether AI makes the workflow faster. It is whether the output gets easier to review, improve, and repeat.'
+    },
+    {
+      target_type: 'productivity advice post',
+      reply_angle: 'Bottleneck framing',
+      prepared_reply: 'A good first step is naming the bottleneck. Once that is clear, AI can help with the repeatable parts instead of adding another layer of complexity.'
     }
   ];
+}
+
+function normalizeReplyKey(reply: any) {
+  return String(reply?.prepared_reply || '').trim().toLowerCase();
+}
+
+function uniqueReplies(primary: any[], fallback: any[]) {
+  const seen = new Set<string>();
+  const result: any[] = [];
+  for (const reply of [...primary, ...fallback]) {
+    const key = normalizeReplyKey(reply);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(reply);
+    if (result.length === 5) break;
+  }
+  return result;
 }
 
 export function enrichGrowthOperatorPack(pack: any) {
   const tweets = Array.isArray(pack?.single_tweets) ? pack.single_tweets : [];
   const rawReplies = Array.isArray(pack?.reply_targets_strategy) ? pack.reply_targets_strategy : [];
-  const replies = [...rawReplies, ...fallbackGrowthReplies()].slice(0, 5);
+  const replies = uniqueReplies(rawReplies, fallbackGrowthReplies());
   const quotes = Array.isArray(pack?.quote_tweet_strategy) ? pack.quote_tweet_strategy : [];
   const githubNeeded = Boolean(pack?.github_decision?.needed);
   const articleNeeded = Boolean(pack?.article_decision?.needed);
