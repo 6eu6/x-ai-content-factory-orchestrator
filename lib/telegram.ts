@@ -4,8 +4,9 @@ export const MAIN_KEYBOARD = {
   keyboard: [
     [{ text: '📊 حالة الحساب' }, { text: '🧠 حالة التعلم' }],
     [{ text: '➕ إضافة حساب للتعلم' }, { text: '🔗 إضافة تغريدة للتعلم' }],
+    [{ text: '🔍 دورة تعلم ذكية' }, { text: '🚀 تشغيل فحص تعلم' }],
     [{ text: '📋 المهام اليومية' }, { text: '✅ محتوى جاهز للنشر' }],
-    [{ text: '🚀 تشغيل فحص تعلم' }, { text: '🧪 تشغيل خطة اليوم' }]
+    [{ text: '🧪 تشغيل خطة اليوم' }]
   ],
   resize_keyboard: true,
   one_time_keyboard: false
