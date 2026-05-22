@@ -3,7 +3,7 @@ import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 import { getXUserByUsername } from '../../../lib/x';
 import { generateDailyContentPack } from '../../../lib/content';
 
-const ORCHESTRATOR_VERSION = 'safe-v3-normalized-content';
+const ORCHESTRATOR_VERSION = 'safe-v4-publish-ready';
 
 export async function POST(req: Request) { return run(req); }
 export async function GET(req: Request) { return run(req); }
