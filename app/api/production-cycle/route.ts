@@ -3,7 +3,7 @@ import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 import { evaluateContentQuality } from '../../../lib/quality';
 
-const VERSION = 'production-cycle-v1';
+const VERSION = 'production-cycle-v1.1-format-aware';
 
 function client() {
   const baseURL = optionalEnv('OPENAI_BASE_URL');
@@ -23,6 +23,73 @@ function safeType(value: any) {
   return allowed.has(type) ? type : 'single_tweet';
 }
 
+function compactText(value: any) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function formatQuality(card: any, productionType: string) {
+  const sourceUrls = asArray(card.source_urls).map((x) => String(x || '').trim()).filter(Boolean);
+  const reasons: string[] = [];
+  const viralMechanic = card.viral_mechanic || card.mechanic_used || card.viral_pattern_basis;
+  const originalAngle = card.original_angle || card.why_original || card.why_this_is_not_generic;
+  const audiencePain = card.audience_pain;
+
+  if (!sourceUrls.length) reasons.push('missing_source_urls');
+  if (!viralMechanic) reasons.push('missing_viral_mechanic');
+  if (!originalAngle) reasons.push('missing_original_angle');
+  if (!audiencePain) reasons.push('missing_audience_pain');
+
+  if (productionType === 'single_tweet' || productionType === 'reply' || productionType === 'quote') {
+    const quality = evaluateContentQuality({
+      ...card,
+      text: card.final_text,
+      mechanic_used: viralMechanic,
+      viral_pattern_basis: viralMechanic,
+      why_this_is_not_generic: originalAngle,
+      reply_trigger: card.why_replyable || card.reply_trigger || viralMechanic,
+      bookmark_trigger: card.why_bookmarkable || card.bookmark_trigger || viralMechanic
+    });
+    return { status: quality.reasons.length || reasons.length ? 'needs_review' : 'ready', reasons: [...quality.reasons, ...reasons] };
+  }
+
+  if (productionType === 'thread') {
+    const items = asArray(card.thread_items).map(compactText).filter(Boolean);
+    if (items.length < 5 || items.length > 9) reasons.push('thread_items_must_be_5_to_9');
+    const longItems = items.filter((x) => x.length > 280).length;
+    if (longItems) reasons.push('thread_item_over_280_chars');
+    if (items.some((x) => /^thread\b|^🧵/i.test(x))) reasons.push('thread_opener_too_generic');
+    if (items.some((x) => /share your thoughts|what do you think/i.test(x))) reasons.push('generic_engagement_bait');
+    if (!items.some((x) => /because|means|instead|problem|risk|example|pattern/i.test(x))) reasons.push('missing_explanatory_value');
+    return { status: reasons.length ? 'needs_review' : 'ready', reasons };
+  }
+
+  if (productionType === 'article') {
+    const outline = card.article_outline || {};
+    if (!Object.keys(outline).length && !card.final_text) reasons.push('missing_article_outline');
+    if (!card.final_text && !outline.title) reasons.push('missing_article_title_or_summary');
+    return { status: reasons.length ? 'needs_review' : 'ready', reasons };
+  }
+
+  if (productionType === 'github_repo' || productionType === 'tool') {
+    const plan = card.repo_plan || {};
+    if (!Object.keys(plan).length) reasons.push('missing_repo_plan');
+    if (!JSON.stringify(plan).toLowerCase().includes('test')) reasons.push('missing_test_plan');
+    return { status: reasons.length ? 'needs_review' : 'ready', reasons };
+  }
+
+  if (productionType === 'video') {
+    if (!Object.keys(card.video_script || {}).length) reasons.push('missing_video_script');
+    return { status: reasons.length ? 'needs_review' : 'ready', reasons };
+  }
+
+  if (productionType === 'carousel') {
+    if (!Object.keys(card.carousel_plan || {}).length) reasons.push('missing_carousel_plan');
+    return { status: reasons.length ? 'needs_review' : 'ready', reasons };
+  }
+
+  return { status: reasons.length ? 'needs_review' : 'ready', reasons };
+}
+
 export async function GET(req: Request) { return run(req); }
 export async function POST(req: Request) { return run(req); }
 
@@ -40,16 +107,15 @@ async function run(req: Request) {
       .order('created_at', { ascending: false })
       .limit(limit);
 
-    if (!decisions?.length) {
-      return Response.json({ ok: true, version: VERSION, cards: [], note: 'No selected format decisions. Run format-decision first.' });
-    }
+    if (!decisions?.length) return Response.json({ ok: true, version: VERSION, cards: [], note: 'No selected format decisions. Run format-decision first.' });
 
-    const [hypotheses, rawResearch, viralTweets, viralPatterns, recentContent] = await Promise.all([
+    const [hypotheses, rawResearch, viralTweets, viralPatterns, recentContent, repoRules] = await Promise.all([
       supabase.from('original_content_hypotheses').select('*').order('created_at', { ascending: false }).limit(30),
       supabase.from('raw_research_items').select('*').order('source_quality_score', { ascending: false }).limit(50),
       supabase.from('viral_tweet_analyses').select('*').order('engagement_per_1k_followers', { ascending: false }).limit(20),
       supabase.from('viral_account_patterns').select('*').order('confidence_score', { ascending: false }).limit(20),
-      supabase.from('content_log').select('final_text,publish_status,created_at').order('created_at', { ascending: false }).limit(30)
+      supabase.from('content_log').select('final_text,publish_status,created_at').order('created_at', { ascending: false }).limit(30),
+      supabase.from('repo_extracted_rules').select('*').order('confidence_score', { ascending: false }).limit(30)
     ]);
 
     const prompt = `You are the Production Engine for @${optionalEnv('X_USERNAME', '30piq')}.
@@ -57,29 +123,28 @@ Niche: AI x Productivity x Career Growth. English only. Human, casual expert voi
 
 Create production cards from selected format decisions.
 Rules:
-- Facts may only come from content_opportunities.source_urls and rawResearch.
+- Facts may only come from content_opportunities.source_urls, rawResearch, or repoRules.
 - Viral data is for mechanics only, never for factual claims.
 - Do not copy creator wording.
-- Avoid corporate/slop language.
+- Avoid corporate/slop language and generic engagement bait.
 - Early account: avoid spammy external links unless format is article/github_repo/tool.
 - For single_tweet: max 240 chars.
-- For thread: 5-9 varied tweets, no standalone "Thread" opener.
+- For thread: 5-9 varied tweets, each <= 280 chars, no standalone "Thread" opener, no "share your thoughts" ending.
 - For article: provide outline, not full article yet.
-- For github_repo: provide repo plan, not files yet.
-- For video: provide script with first 3 seconds keyword-rich and captions plan.
-- For carousel: provide slide-by-slide plan.
+- For github_repo/tool: provide repo_plan with files, tests, README sections, examples, and maintenance notes.
 Return strict JSON:
-{"cards":[{"format_decision_id":"...","content_opportunity_id":"...","production_type":"...","final_text":"...","thread_items":["..."],"article_outline":{},"repo_plan":{},"video_script":{},"carousel_plan":{},"source_urls":["..."],"viral_mechanic":"...","original_angle":"...","audience_pain":"...","why_ready_or_not":"..."}]}
+{"cards":[{"format_decision_id":"...","content_opportunity_id":"...","production_type":"...","final_text":"...","thread_items":["..."],"article_outline":{},"repo_plan":{},"video_script":{},"carousel_plan":{},"source_urls":["..."],"viral_mechanic":"...","original_angle":"...","audience_pain":"...","algorithm_basis":"...","source_basis":"...","format_basis":"...","quality_basis":"...","why_ready_or_not":"..."}]}
 decisions=${JSON.stringify(decisions)}
 hypotheses=${JSON.stringify(hypotheses.data || [])}
 rawResearch=${JSON.stringify(rawResearch.data || [])}
+repoRules=${JSON.stringify(repoRules.data || [])}
 viralTweets=${JSON.stringify(viralTweets.data || [])}
 viralPatterns=${JSON.stringify(viralPatterns.data || [])}
 recentContent=${JSON.stringify(recentContent.data || [])}`;
 
     const completion = await client().chat.completions.create({
       model: optionalEnv('OPENAI_MODEL', 'gpt-4.1-mini'),
-      temperature: 0.12,
+      temperature: 0.1,
       response_format: { type: 'json_object' },
       messages: [
         { role: 'system', content: 'Produce structured content cards from decisions. Facts need source URLs. Return JSON only.' },
@@ -93,14 +158,8 @@ recentContent=${JSON.stringify(recentContent.data || [])}`;
 
     for (const card of cards) {
       const productionType = safeType(card.production_type);
-      const textForQuality = productionType === 'single_tweet' || productionType === 'reply' || productionType === 'quote'
-        ? card.final_text
-        : [card.final_text, ...asArray(card.thread_items)].join('\n');
-      const quality = evaluateContentQuality({ ...card, text: textForQuality });
-      const sourceUrls = asArray(card.source_urls);
-      const finalQualityStatus = sourceUrls.length || !/research|study|data|report|recent/i.test(String(textForQuality || '')) ? quality.status : 'needs_review';
-      const qualityReasons = finalQualityStatus === quality.status ? quality.reasons : [...quality.reasons, 'missing_source_urls_for_claim'];
-
+      const sourceUrls = asArray(card.source_urls).map((x) => String(x || '').trim()).filter(Boolean);
+      const quality = formatQuality(card, productionType);
       const { data, error } = await supabase.from('content_production_cards').insert({
         format_decision_id: card.format_decision_id || null,
         content_opportunity_id: card.content_opportunity_id || null,
@@ -115,13 +174,18 @@ recentContent=${JSON.stringify(recentContent.data || [])}`;
         viral_mechanic: card.viral_mechanic || null,
         original_angle: card.original_angle || null,
         audience_pain: card.audience_pain || null,
-        quality_status: finalQualityStatus,
-        quality_reasons: qualityReasons,
-        publish_status: finalQualityStatus,
-        status: finalQualityStatus === 'ready' ? 'ready' : 'needs_review'
+        algorithm_basis: card.algorithm_basis || null,
+        source_basis: card.source_basis || null,
+        format_basis: card.format_basis || null,
+        quality_basis: card.quality_basis || null,
+        quality_status: quality.status,
+        quality_reasons: quality.reasons,
+        publish_status: quality.status,
+        status: quality.status === 'ready' ? 'ready' : 'needs_review'
       }).select('*').single();
 
-      if (!error && data) {
+      if (error) throw error;
+      if (data) {
         inserted.push(data);
         await supabase.from('content_format_decisions').update({ status: 'produced', updated_at: new Date().toISOString() }).eq('id', data.format_decision_id);
         if (data.production_type === 'single_tweet' && data.final_text) {
@@ -132,8 +196,8 @@ recentContent=${JSON.stringify(recentContent.data || [])}`;
             final_text: data.final_text,
             source_used: VERSION,
             source_urls: sourceUrls,
-            publish_status: finalQualityStatus,
-            quality_reasons: qualityReasons,
+            publish_status: quality.status,
+            quality_reasons: quality.reasons,
             content_opportunity_id: data.content_opportunity_id,
             notes: JSON.stringify({ production_card_id: data.id, viral_mechanic: data.viral_mechanic, original_angle: data.original_angle })
           });
