@@ -23,17 +23,22 @@ export async function generateDailyContentPack(input: {
   creatorIntel: unknown;
 }) {
   const client = buildClient();
-  const model = optionalEnv('OPENAI_MODEL', optionalEnv('OPENAI_BASE_URL').includes('openrouter.ai') ? 'openai/gpt-5.2-mini' : 'gpt-4.1-mini');
+  const model = optionalEnv('OPENAI_MODEL', optionalEnv('OPENAI_BASE_URL').includes('openrouter.ai') ? 'openai/gpt-4.1-mini' : 'gpt-4.1-mini');
   const prompt = `
 You are the X AI Content Factory operator for @${optionalEnv('X_USERNAME', '30piq')}.
 Create a practical daily mission for an English X account about AI x productivity x career growth.
 
-Rules:
-- Do not copy creators.
-- No engagement bait.
-- Every post needs originality: opinion, workflow, comparison, experiment, caveat, or proof.
-- Posting remains manual by the human.
+Critical rules:
 - Output valid JSON only.
+- Use plain ASCII punctuation only. Do not use curly quotes, em dashes, or special symbols.
+- Do not invent personal experiences, test results, percentages, revenue, job outcomes, or tool performance.
+- Do not write "I tried", "I found", "my experience", or any first-person claim unless the provided state contains proof.
+- Do not copy creators and do not create engagement bait.
+- Keep each tweet under 240 characters.
+- Each tweet must contain one original element: useful framework, contrarian opinion, comparison, checklist, caveat, or practical workflow.
+- Replies must be specific but safe: no fake personal claims.
+- If live X data is unavailable, operate in bootstrap mode and say so in the goal.
+- Prefer quality over volume: create exactly 3 single tweets, 3 reply templates, and 1 quote template.
 
 State:
 accountState=${JSON.stringify(input.accountState)}
@@ -42,7 +47,7 @@ requirements=${JSON.stringify(input.requirements)}
 recentContent=${JSON.stringify(input.recentContent)}
 creatorIntel=${JSON.stringify(input.creatorIntel)}
 
-Return JSON with:
+Return JSON with this shape:
 {
   "mode": "bootstrap|partial|live",
   "today_goal": "...",
@@ -55,10 +60,10 @@ Return JSON with:
 }`;
   const response = await client.chat.completions.create({
     model,
-    temperature: 0.7,
+    temperature: 0.45,
     response_format: { type: 'json_object' },
     messages: [
-      { role: 'system', content: 'You are a strict JSON-producing content operations agent.' },
+      { role: 'system', content: 'You are a strict JSON-producing editor. Never invent personal proof or metrics.' },
       { role: 'user', content: prompt }
     ]
   });
