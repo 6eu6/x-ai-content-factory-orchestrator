@@ -25,7 +25,7 @@ async function run(req: Request) {
         posts_count: xSnapshot.tweet_count ?? null,
         bio_text: xSnapshot.description ?? null,
         display_name: xSnapshot.name ?? null,
-        profile_image_set: Boolean(snapshot?.profile_image_url),
+        profile_image_set: Boolean(xSnapshot?.profile_image_url),
         verified_status: xSnapshot.verified === undefined ? 'unknown' : String(xSnapshot.verified),
         last_live_check_at: new Date().toISOString(),
         last_known_source: 'daily_run_x_api'
