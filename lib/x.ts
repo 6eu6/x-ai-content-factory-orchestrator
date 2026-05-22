@@ -46,9 +46,10 @@ export async function getXUserByUsername(username = optionalEnv('X_USERNAME', '3
   };
 }
 
-export async function getXUserTimeline(userId: string) {
+export async function getXUserTimeline(userId: string, maxResults = 5) {
+  const safeMax = Math.min(Math.max(Number(maxResults) || 5, 5), 20);
   const params = new URLSearchParams({
-    max_results: '20',
+    max_results: String(safeMax),
     exclude: 'retweets,replies',
     'tweet.fields': 'created_at,public_metrics,conversation_id,lang,entities,referenced_tweets'
   });
