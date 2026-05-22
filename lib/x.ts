@@ -36,7 +36,7 @@ function twitterApiHeaders() {
 }
 
 export function twitterApiBase() {
-  return optionalEnv('TWITTERAPI_IO_BASE_URL', 'https://api.twitterapi.io');
+  return optionalEnv('TWITTERAPI_IO_BASE_URL', 'https://api.twitterapi.io').replace(/\/+$/, '');
 }
 
 async function sleep(ms: number) {
