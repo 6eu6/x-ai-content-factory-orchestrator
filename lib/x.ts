@@ -14,38 +14,57 @@ export type XAccountSnapshot = {
   raw?: unknown;
 };
 
+let lastRequestAt = 0;
+
 function twitterApiHeaders() {
   const key = optionalEnv('TWITTERAPI_IO_KEY') || optionalEnv('TWITTERAPI_KEY');
   if (!key) throw new Error('TWITTERAPI_IO_KEY missing. Add it in Vercel env.');
-  return { 'x-api-key': key };
+  return { 'X-API-Key': key, 'x-api-key': key };
 }
 
 function twitterApiBase() {
   return optionalEnv('TWITTERAPI_IO_BASE_URL', 'https://api.twitterapi.io');
 }
 
+async function sleep(ms: number) {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function throttle() {
+  const delay = Number(optionalEnv('TWITTERAPI_IO_MIN_DELAY_MS', '5200'));
+  const now = Date.now();
+  const wait = Math.max(0, lastRequestAt + delay - now);
+  if (wait > 0) await sleep(wait);
+  lastRequestAt = Date.now();
+}
+
 async function fetchJson(url: string) {
+  await throttle();
   const res = await fetch(url, { headers: twitterApiHeaders(), cache: 'no-store' });
   const json = await res.json();
   if (!res.ok || json?.status === 'error' || json?.error) throw new Error(`${res.status} ${JSON.stringify(json)}`);
   return json;
 }
 
+function userFromAuthor(username: string, author: any): XAccountSnapshot {
+  return {
+    username: author?.userName || author?.username || username,
+    id: String(author?.id || ''),
+    name: author?.name,
+    description: author?.description || author?.profile_bio?.description || '',
+    followers_count: Number(author?.followers || 0),
+    following_count: Number(author?.following || 0),
+    tweet_count: Number(author?.statusesCount || 0),
+    verified: Boolean(author?.isBlueVerified || author?.verified),
+    verified_type: author?.verifiedType,
+    profile_image_url: author?.profilePicture,
+    raw: author
+  };
+}
+
 function normalizeTwitterApiUser(username: string, json: any): XAccountSnapshot {
   const u = json.data || json.user || json.result || json;
-  return {
-    username: u.userName || u.username || username,
-    id: String(u.id || ''),
-    name: u.name,
-    description: u.description || u.profile_bio?.description || '',
-    followers_count: Number(u.followers || 0),
-    following_count: Number(u.following || 0),
-    tweet_count: Number(u.statusesCount || u.statuses_count || 0),
-    verified: Boolean(u.isBlueVerified || u.verified),
-    verified_type: u.verifiedType,
-    profile_image_url: u.profilePicture,
-    raw: json
-  };
+  return userFromAuthor(username, u);
 }
 
 function normalizeTwitterApiTweet(t: any) {
@@ -85,6 +104,13 @@ export async function getXUserTimeline(user: string | XAccountSnapshot, maxResul
   const json = await fetchJson(url.toString());
   const arr = Array.isArray(json.tweets) ? json.tweets : [];
   return arr.slice(0, safeMax).map(normalizeTwitterApiTweet);
+}
+
+export async function getXUserAndTimeline(username: string, maxResults = 5, includeReplies = false) {
+  const tweets = await getXUserTimeline(username, maxResults, includeReplies);
+  const author = tweets.find((t: any) => t.author)?.author;
+  const user = author ? userFromAuthor(username, author) : await getXUserByUsername(username);
+  return { user, tweets };
 }
 
 export async function searchXTweets(query: string, queryType: 'Latest' | 'Top' = 'Top', maxResults = 20) {
