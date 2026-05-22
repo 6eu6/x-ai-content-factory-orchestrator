@@ -4,10 +4,10 @@ export const MAIN_KEYBOARD = {
   keyboard: [
     [{ text: '📊 حالة الحساب' }, { text: '🧠 حالة التعلم' }],
     [{ text: '➕ إضافة حساب للتعلم' }, { text: '🔗 إضافة تغريدة للتعلم' }],
-    [{ text: '🔍 دورة تعلم ذكية' }, { text: '🧭 محرك القرار' }],
-    [{ text: '🏭 إنتاج المحتوى' }, { text: '🚀 تشغيل فحص تعلم' }],
-    [{ text: '📋 المهام اليومية' }, { text: '✅ محتوى جاهز للنشر' }],
-    [{ text: '🧪 تشغيل خطة اليوم' }]
+    [{ text: '📦 زحف مستودع' }, { text: '🔍 دورة تعلم ذكية' }],
+    [{ text: '🧭 محرك القرار' }, { text: '🏭 إنتاج المحتوى' }],
+    [{ text: '🚀 تشغيل فحص تعلم' }, { text: '📋 المهام اليومية' }],
+    [{ text: '✅ محتوى جاهز للنشر' }, { text: '🧪 تشغيل خطة اليوم' }]
   ],
   resize_keyboard: true,
   one_time_keyboard: false
@@ -74,4 +74,12 @@ export function extractHandle(text: string) {
 export function extractTweetUrl(text: string) {
   const match = String(text || '').match(/https?:\/\/(?:x|twitter)\.com\/[^\s]+\/status\/\d+/i);
   return match ? match[0] : '';
+}
+
+export function extractGitHubRepo(text: string) {
+  const value = String(text || '').trim();
+  const urlMatch = value.match(/https?:\/\/github\.com\/[^\s/]+\/[^\s/#?]+/i);
+  if (urlMatch) return urlMatch[0];
+  const shortMatch = value.match(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/);
+  return shortMatch ? value : '';
 }
