@@ -3,7 +3,7 @@ import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 import { getXUserByUsername, getXUserTimeline, analyzeXTweet } from '../../../lib/x';
 
-const VERSION = 'viral-account-scan-v2-safe-arrays';
+const VERSION = 'viral-account-scan-v3-budget-mode';
 
 function client() {
   const baseURL = optionalEnv('OPENAI_BASE_URL');
@@ -34,6 +34,12 @@ function normalizeIntel(raw: any) {
   };
 }
 
+function numParam(value: any, fallback: number, min: number, max: number) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(Math.max(Math.floor(n), min), max);
+}
+
 export async function GET(req: Request) { return run(req); }
 export async function POST(req: Request) { return run(req); }
 
@@ -47,10 +53,25 @@ async function run(req: Request) {
       try { body = await req.json(); } catch {}
     }
 
+    const maxAccounts = numParam(body.max_accounts || url.searchParams.get('max_accounts') || optionalEnv('X_SCAN_MAX_ACCOUNTS', '3'), 3, 1, 10);
+    const tweetsPerAccount = numParam(body.tweets_per_account || url.searchParams.get('tweets_per_account') || optionalEnv('X_SCAN_TWEETS_PER_ACCOUNT', '5'), 5, 5, 20);
+    const dryRun = String(body.dry_run || url.searchParams.get('dry_run') || '').toLowerCase() === 'true';
+
     const manualHandles = body.handles || url.searchParams.getAll('handle');
-    const { data: accountRows } = await supabase.from('accounts').select('*').order('tier', { ascending: true }).limit(25);
+    const { data: accountRows } = await supabase.from('accounts').select('*').order('tier', { ascending: true }).limit(maxAccounts);
     const dbHandles = (accountRows || []).map((a: any) => a.handle || a.username || a.account_handle).filter(Boolean);
-    const handles = Array.from(new Set([...manualHandles, ...dbHandles].map(cleanHandle))).slice(0, 25);
+    const handles = Array.from(new Set([...manualHandles, ...dbHandles].map(cleanHandle))).slice(0, maxAccounts);
+
+    const budget = {
+      max_accounts: maxAccounts,
+      tweets_per_account: tweetsPerAccount,
+      estimated_x_requests: handles.length * 2,
+      dry_run: dryRun
+    };
+
+    if (dryRun) {
+      return Response.json({ ok: true, version: VERSION, budget, handles, note: 'Dry run only. No X API calls were made.' });
+    }
 
     const scanResults: any[] = [];
     const errors: any[] = [];
@@ -58,9 +79,9 @@ async function run(req: Request) {
       try {
         const user = await getXUserByUsername(handle);
         if (!user.id) throw new Error('User id not returned from X.');
-        const tweets = await getXUserTimeline(user.id);
+        const tweets = await getXUserTimeline(user.id, tweetsPerAccount);
         const analyzed = tweets.map((t: any) => analyzeXTweet(t, user)).sort((a: any, b: any) => (b.engagement_per_1k_followers || 0) - (a.engagement_per_1k_followers || 0));
-        scanResults.push({ user, top_tweets: analyzed.slice(0, 10), all_tweets_count: tweets.length });
+        scanResults.push({ user, top_tweets: analyzed.slice(0, tweetsPerAccount), all_tweets_count: tweets.length });
       } catch (err: any) {
         errors.push({ handle, error: err.message });
       }
@@ -70,6 +91,7 @@ async function run(req: Request) {
 Goal: understand how high-performing accounts in AI x Productivity x Career Growth get engagement: what they post, when they post, how they phrase hooks, why people reply, repost, quote, or bookmark, and how @30piq should adapt without copying.
 Use only scanResults and errors. Do not invent tweets or metrics. Analyze timing, format, tone, hook, simplicity, controversy, social proof, utility, reply triggers, and bookmark triggers.
 IMPORTANT: Return these fields as arrays even if there is only one item: account_patterns, cross_account_patterns, timing_rules, reply_rules, quote_rules, post_rules, needs_more_data.
+budget=${JSON.stringify(budget)}
 scanResults=${JSON.stringify(scanResults)}
 errors=${JSON.stringify(errors)}
 Return strict JSON with keys: mode, data_quality, account_patterns, cross_account_patterns, timing_rules, reply_rules, quote_rules, post_rules, today_content_brief, needs_more_data.`;
@@ -111,8 +133,8 @@ Return strict JSON with keys: mode, data_quality, account_patterns, cross_accoun
       next_recommendation: 'Run daily-run after viral-account-scan so final content uses timing, tone, and engagement mechanics.'
     });
 
-    return Response.json({ ok: true, version: VERSION, handles, errors, scanResults, intel, sessionLog: log });
+    return Response.json({ ok: true, version: VERSION, budget, handles, errors, scanResults, intel, sessionLog: log });
   } catch (err: any) {
-    return Response.json({ ok: false, version: VERSION, error: err.message }, { status: 500 });
+    return Response.json({ ok: false, version: VERSION, error: err.message });
   }
 }
