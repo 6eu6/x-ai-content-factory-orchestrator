@@ -3,7 +3,7 @@ import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 import { getXUserByUsername, getXUserTimeline, analyzeXTweet } from '../../../lib/x';
 
-const VERSION = 'viral-account-scan-v1';
+const VERSION = 'viral-account-scan-v2-safe-arrays';
 
 function client() {
   const baseURL = optionalEnv('OPENAI_BASE_URL');
@@ -12,6 +12,26 @@ function client() {
 
 function cleanHandle(value: string) {
   return String(value || '').replace(/^@/, '').trim();
+}
+
+function asArray(value: any) {
+  if (Array.isArray(value)) return value;
+  if (value === null || value === undefined) return [];
+  if (typeof value === 'object') return Object.values(value);
+  return [value];
+}
+
+function normalizeIntel(raw: any) {
+  return {
+    ...raw,
+    account_patterns: asArray(raw.account_patterns),
+    cross_account_patterns: asArray(raw.cross_account_patterns),
+    timing_rules: asArray(raw.timing_rules),
+    reply_rules: asArray(raw.reply_rules),
+    quote_rules: asArray(raw.quote_rules),
+    post_rules: asArray(raw.post_rules),
+    needs_more_data: asArray(raw.needs_more_data)
+  };
 }
 
 export async function GET(req: Request) { return run(req); }
@@ -49,6 +69,7 @@ async function run(req: Request) {
     const prompt = `You are the Deep Viral Mechanics Analyst for @${optionalEnv('X_USERNAME', '30piq')}.
 Goal: understand how high-performing accounts in AI x Productivity x Career Growth get engagement: what they post, when they post, how they phrase hooks, why people reply, repost, quote, or bookmark, and how @30piq should adapt without copying.
 Use only scanResults and errors. Do not invent tweets or metrics. Analyze timing, format, tone, hook, simplicity, controversy, social proof, utility, reply triggers, and bookmark triggers.
+IMPORTANT: Return these fields as arrays even if there is only one item: account_patterns, cross_account_patterns, timing_rules, reply_rules, quote_rules, post_rules, needs_more_data.
 scanResults=${JSON.stringify(scanResults)}
 errors=${JSON.stringify(errors)}
 Return strict JSON with keys: mode, data_quality, account_patterns, cross_account_patterns, timing_rules, reply_rules, quote_rules, post_rules, today_content_brief, needs_more_data.`;
@@ -58,35 +79,35 @@ Return strict JSON with keys: mode, data_quality, account_patterns, cross_accoun
       temperature: 0.1,
       response_format: { type: 'json_object' },
       messages: [
-        { role: 'system', content: 'Analyze real engagement mechanics from supplied X timeline metrics only. No invented claims.' },
+        { role: 'system', content: 'Analyze real engagement mechanics from supplied X timeline metrics only. No invented claims. Array fields must always be arrays.' },
         { role: 'user', content: prompt }
       ]
     });
-    const intel = JSON.parse(completion.choices[0]?.message?.content || '{}');
+    const intel = normalizeIntel(JSON.parse(completion.choices[0]?.message?.content || '{}'));
 
-    if (Array.isArray(intel.cross_account_patterns) && intel.cross_account_patterns.length) {
+    if (intel.cross_account_patterns.length) {
       await supabase.from('creator_intel').insert(intel.cross_account_patterns.slice(0, 10).map((p: any) => ({
         creator_handle: 'account_scan',
         post_url: null,
         topic: 'deep_viral_pattern',
-        hook_pattern: p.pattern || null,
-        format_pattern: p.evidence || null,
-        why_it_worked: p.evidence || null,
-        adaptation_idea: p.adaptation_for_30piq || null,
+        hook_pattern: p.pattern || p.rule || null,
+        format_pattern: p.evidence || p.mechanism || null,
+        why_it_worked: p.evidence || p.why || null,
+        adaptation_idea: p.adaptation_for_30piq || p.adaptation || null,
         status: intel.data_quality || 'new'
       })));
     }
 
     const trendRows = [
-      ...(intel.timing_rules || []).slice(0, 5).map((r: any) => ({ topic: 'timing_rule', source: 'viral-account-scan', heat_score: 8, content_type_suggestion: 'timing', notes: `${r.rule || ''} Evidence: ${r.evidence || ''}` })),
-      ...(intel.post_rules || []).slice(0, 5).map((r: any) => ({ topic: 'post_rule', source: 'viral-account-scan', heat_score: 8, content_type_suggestion: 'post_rule', notes: `${r.rule || ''} Why: ${r.why || ''}` }))
+      ...intel.timing_rules.slice(0, 5).map((r: any) => ({ topic: 'timing_rule', source: 'viral-account-scan', heat_score: 8, content_type_suggestion: 'timing', notes: `${r.rule || r.timing || String(r)} Evidence: ${r.evidence || ''}` })),
+      ...intel.post_rules.slice(0, 5).map((r: any) => ({ topic: 'post_rule', source: 'viral-account-scan', heat_score: 8, content_type_suggestion: 'post_rule', notes: `${r.rule || String(r)} Why: ${r.why || ''}` }))
     ];
     if (trendRows.length) await supabase.from('trends').insert(trendRows);
 
     const log = await insertSessionLog({
       actions_completed: ['viral_account_scan', VERSION],
       decisions_made: [intel.today_content_brief || {}],
-      pending_tasks: [...(intel.post_rules || []), ...(intel.reply_rules || [])],
+      pending_tasks: [...intel.post_rules, ...intel.reply_rules],
       next_recommendation: 'Run daily-run after viral-account-scan so final content uses timing, tone, and engagement mechanics.'
     });
 
