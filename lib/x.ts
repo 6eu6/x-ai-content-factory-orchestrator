@@ -17,7 +17,7 @@ export type XAccountSnapshot = {
 function twitterApiHeaders() {
   const key = optionalEnv('TWITTERAPI_IO_KEY') || optionalEnv('TWITTERAPI_KEY');
   if (!key) throw new Error('TWITTERAPI_IO_KEY missing. Add it in Vercel env.');
-  return { 'X-API-Key': key };
+  return { 'x-api-key': key };
 }
 
 function twitterApiBase() {
@@ -33,75 +33,74 @@ async function fetchJson(url: string) {
 
 function normalizeTwitterApiUser(username: string, json: any): XAccountSnapshot {
   const u = json.data || json.user || json.result || json;
-  const metrics = u.public_metrics || u.metrics || {};
   return {
     username: u.userName || u.username || username,
-    id: String(u.id || u.rest_id || u.userId || ''),
+    id: String(u.id || ''),
     name: u.name,
-    description: u.description || u.bio,
-    followers_count: Number(u.followers || u.followers_count || metrics.followers_count || 0),
-    following_count: Number(u.following || u.following_count || metrics.following_count || 0),
-    tweet_count: Number(u.statuses_count || u.tweet_count || metrics.tweet_count || 0),
-    verified: Boolean(u.verified || u.isBlueVerified),
-    profile_image_url: u.profilePicture || u.profile_image_url,
+    description: u.description || u.profile_bio?.description || '',
+    followers_count: Number(u.followers || 0),
+    following_count: Number(u.following || 0),
+    tweet_count: Number(u.statusesCount || u.statuses_count || 0),
+    verified: Boolean(u.isBlueVerified || u.verified),
+    verified_type: u.verifiedType,
+    profile_image_url: u.profilePicture,
     raw: json
   };
 }
 
 function normalizeTwitterApiTweet(t: any) {
-  const m = t.public_metrics || t.metrics || {};
   return {
-    id: String(t.id || t.tweetId || t.rest_id || ''),
-    text: t.text || t.full_text || t.content || '',
-    created_at: t.created_at || t.createdAt,
+    id: String(t.id || ''),
+    text: t.text || '',
+    created_at: t.createdAt || t.created_at,
     public_metrics: {
-      like_count: Number(t.likeCount || t.likes || m.like_count || 0),
-      reply_count: Number(t.replyCount || t.replies || m.reply_count || 0),
-      retweet_count: Number(t.retweetCount || t.retweets || m.retweet_count || 0),
-      quote_count: Number(t.quoteCount || t.quotes || m.quote_count || 0)
+      like_count: Number(t.likeCount || 0),
+      reply_count: Number(t.replyCount || 0),
+      retweet_count: Number(t.retweetCount || 0),
+      quote_count: Number(t.quoteCount || 0),
+      bookmark_count: Number(t.bookmarkCount || 0),
+      view_count: Number(t.viewCount || 0)
     },
     entities: t.entities || {},
+    is_reply: Boolean(t.isReply),
+    author: t.author,
     raw: t
   };
 }
 
 export async function getXUserByUsername(username = optionalEnv('X_USERNAME', '30piq')): Promise<XAccountSnapshot> {
   const base = twitterApiBase();
-  const candidates = [
-    `${base}/twitter/user/info?userName=${encodeURIComponent(username)}`,
-    `${base}/twitter/user/info?username=${encodeURIComponent(username)}`,
-    `${base}/twitter/user/by_username?username=${encodeURIComponent(username)}`
-  ];
-  let last = '';
-  for (const url of candidates) {
-    try { return normalizeTwitterApiUser(username, await fetchJson(url)); } catch (e: any) { last = e.message; }
-  }
-  throw new Error(`TwitterAPI.io user lookup failed: ${last}`);
+  const url = new URL(`${base}/twitter/user/info`);
+  url.searchParams.set('userName', username.replace(/^@/, ''));
+  return normalizeTwitterApiUser(username, await fetchJson(url.toString()));
 }
 
-export async function getXUserTimeline(user: string | XAccountSnapshot, maxResults = 5) {
+export async function getXUserTimeline(user: string | XAccountSnapshot, maxResults = 5, includeReplies = false) {
   const username = typeof user === 'string' ? user : user.username;
-  const safeMax = Math.min(Math.max(Number(maxResults) || 5, 5), 50);
+  const safeMax = Math.min(Math.max(Number(maxResults) || 5, 5), 20);
   const base = twitterApiBase();
-  const candidates = [
-    `${base}/twitter/user/last_tweets?userName=${encodeURIComponent(username)}&count=${safeMax}`,
-    `${base}/twitter/user/last_tweets?username=${encodeURIComponent(username)}&count=${safeMax}`,
-    `${base}/twitter/tweet/advanced_search?query=from:${encodeURIComponent(username)}&queryType=Latest&count=${safeMax}`
-  ];
-  let last = '';
-  for (const url of candidates) {
-    try {
-      const json = await fetchJson(url);
-      const arr = json.tweets || json.data || json.results || json.result?.tweets || [];
-      return (Array.isArray(arr) ? arr : []).slice(0, safeMax).map(normalizeTwitterApiTweet);
-    } catch (e: any) { last = e.message; }
-  }
-  throw new Error(`TwitterAPI.io timeline failed: ${last}`);
+  const url = new URL(`${base}/twitter/user/last_tweets`);
+  url.searchParams.set('userName', username.replace(/^@/, ''));
+  url.searchParams.set('includeReplies', String(Boolean(includeReplies)));
+  const json = await fetchJson(url.toString());
+  const arr = Array.isArray(json.tweets) ? json.tweets : [];
+  return arr.slice(0, safeMax).map(normalizeTwitterApiTweet);
+}
+
+export async function searchXTweets(query: string, queryType: 'Latest' | 'Top' = 'Top', maxResults = 20) {
+  const safeMax = Math.min(Math.max(Number(maxResults) || 20, 1), 20);
+  const base = twitterApiBase();
+  const url = new URL(`${base}/twitter/tweet/advanced_search`);
+  url.searchParams.set('query', query);
+  url.searchParams.set('queryType', queryType);
+  const json = await fetchJson(url.toString());
+  const arr = Array.isArray(json.tweets) ? json.tweets : [];
+  return arr.slice(0, safeMax).map(normalizeTwitterApiTweet);
 }
 
 export function scoreXTweet(tweet: any) {
   const m = tweet.public_metrics || {};
-  return (m.like_count || 0) + (m.reply_count || 0) * 2 + (m.retweet_count || 0) * 3 + (m.quote_count || 0) * 4;
+  return (m.like_count || 0) + (m.reply_count || 0) * 2 + (m.retweet_count || 0) * 3 + (m.quote_count || 0) * 4 + (m.bookmark_count || 0) * 2 + Math.min(m.view_count || 0, 100000) / 1000;
 }
 
 export function analyzeXTweet(tweet: any, user: any) {
@@ -125,6 +124,7 @@ export function analyzeXTweet(tweet: any, user: any) {
     line_count: text.split('\n').length,
     has_question: text.includes('?'),
     has_link: Boolean(tweet.entities?.urls?.length),
-    has_list: /(^|\n)\s*(\d+\.|-|•)/.test(text)
+    has_list: /(^|\n)\s*(\d+\.|-|•)/.test(text),
+    is_reply: Boolean(tweet.is_reply)
   };
 }
