@@ -1,23 +1,9 @@
 import OpenAI from 'openai';
 import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
+import { webSearch } from '../../../lib/web-search';
 
-const VERSION = 'research-v1-intel-engine';
-
-async function webSearch(query: string) {
-  const provider = optionalEnv('SEARCH_PROVIDER', '').toLowerCase();
-  if (provider !== 'serper') return [];
-  const key = optionalEnv('SERPER_API_KEY');
-  if (!key) return [];
-  const res = await fetch('https://google.serper.dev/search', {
-    method: 'POST',
-    headers: { 'X-API-KEY': key, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ q: query, num: 5 })
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(`Serper error: ${res.status} ${JSON.stringify(data)}`);
-  return (data.organic || []).slice(0, 5).map((x: any) => ({ title: x.title || '', url: x.link || '', snippet: x.snippet || '' }));
-}
+const VERSION = 'research-v2-dual-search';
 
 function openaiClient() {
   const baseURL = optionalEnv('OPENAI_BASE_URL');
@@ -40,7 +26,7 @@ async function run(req: Request) {
     ];
 
     const searchResults = [];
-    for (const q of queries) searchResults.push({ query: q, results: await webSearch(q) });
+    for (const q of queries) searchResults.push({ query: q, results: await webSearch(q, 5) });
 
     const [accounts, sources, trends, accountState, recentContent] = await Promise.all([
       supabase.from('accounts').select('*').order('tier', { ascending: true }).limit(30),
@@ -52,10 +38,7 @@ async function run(req: Request) {
 
     const prompt = `You are the research and growth intelligence engine for @30piq.
 Goal: grow an English AI x Productivity x Career Growth account toward 10K-20K real followers and test monetization with original proof-based content.
-
-Use the inputs to find high-leverage opportunities, not generic tweets.
-Return strict JSON only.
-
+Use the inputs to find high-leverage opportunities, not generic tweets. Return strict JSON only.
 Inputs:
 searchResults=${JSON.stringify(searchResults)}
 accounts=${JSON.stringify(accounts.data)}
@@ -63,30 +46,14 @@ sources=${JSON.stringify(sources.data)}
 trends=${JSON.stringify(trends.data)}
 accountState=${JSON.stringify(accountState.data)}
 recentContent=${JSON.stringify(recentContent.data)}
+Return JSON with keys: mode, market_read, viral_patterns, opportunities, recommended_today, github_asset_plan, article_plan, creator_intel_updates, trend_updates, daily_run_brief, quality_bar.`;
 
-Required JSON shape:
-{
-  "mode":"research_intel",
-  "market_read":"...",
-  "viral_patterns":[{"pattern":"...","why_it_spreads":"...","risk":"..."}],
-  "opportunities":[{"title":"...","angle":"...","content_type":"tweet|thread|article|github_asset|tool","why_now":"...","original_asset":"...","github_needed":false,"article_needed":false,"media_needed":false}],
-  "recommended_today":{"action":"...","reason":"...","priority_opportunity":"..."},
-  "github_asset_plan":{"needed":false,"repo_name":"","asset_type":"","problem_solved":"","readme_outline":""},
-  "article_plan":{"needed":false,"title":"","outline":[],"draft_summary":""},
-  "creator_intel_updates":[{"creator_handle":"unknown","post_url":"","topic":"...","hook_pattern":"...","format_pattern":"...","why_it_worked":"...","adaptation_idea":"..."}],
-  "trend_updates":[{"topic":"...","source":"research-intel-run","heat_score":1,"content_type_suggestion":"...","notes":"..."}],
-  "daily_run_brief":"...",
-  "quality_bar":{"minimum_originality":"...","avoid":"...","must_include":"..."}
-}`;
-
-    const client = openaiClient();
-    const model = optionalEnv('OPENAI_MODEL', 'gpt-4.1-mini');
-    const completion = await client.chat.completions.create({
-      model,
+    const completion = await openaiClient().chat.completions.create({
+      model: optionalEnv('OPENAI_MODEL', 'gpt-4.1-mini'),
       temperature: 0.25,
       response_format: { type: 'json_object' },
       messages: [
-        { role: 'system', content: 'You produce research-backed growth intelligence. Do not invent metrics or claim web access beyond provided search results.' },
+        { role: 'system', content: 'Produce research-backed growth intelligence. Do not invent metrics or claim web access beyond provided search results.' },
         { role: 'user', content: prompt }
       ]
     });
