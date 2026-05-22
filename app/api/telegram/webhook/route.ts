@@ -51,6 +51,8 @@ export async function POST(req: Request) {
     if (text === '📋 المهام اليومية') return dailyTasks(supabase, chatId);
     if (text === '✅ محتوى جاهز للنشر') return readyContent(supabase, chatId);
     if (text === '🔍 دورة تعلم ذكية') return triggerEndpoint(req, chatId, '/api/learning-cycle');
+    if (text === '🧭 محرك القرار') return triggerEndpoint(req, chatId, '/api/format-decision');
+    if (text === '🏭 إنتاج المحتوى') return triggerEndpoint(req, chatId, '/api/production-cycle');
     if (text === '🚀 تشغيل فحص تعلم') return triggerEndpoint(req, chatId, '/api/viral-account-scan?max_accounts=2&tweets_per_account=8');
     if (text === '🧪 تشغيل خطة اليوم') return triggerEndpoint(req, chatId, '/api/daily-run');
 
@@ -78,31 +80,37 @@ async function startFlow(supabase: any, chatId: string, flow: string, text: stri
 }
 
 async function accountStatus(supabase: any, chatId: string) {
-  const [account, content, actions] = await Promise.all([
+  const [account, content, actions, cards] = await Promise.all([
     supabase.from('account_state').select('*').order('last_live_check_at', { ascending: false }).limit(1).maybeSingle(),
     supabase.from('content_log').select('publish_status', { count: 'exact', head: false }).limit(200),
-    supabase.from('action_queue').select('status', { count: 'exact', head: false }).eq('status', 'pending').limit(200)
+    supabase.from('action_queue').select('status', { count: 'exact', head: false }).eq('status', 'pending').limit(200),
+    supabase.from('content_production_cards').select('quality_status').limit(200)
   ]);
   const rows = content.data || [];
   const ready = rows.filter((x: any) => x.publish_status === 'ready').length;
   const review = rows.filter((x: any) => x.publish_status === 'needs_review').length;
+  const readyCards = (cards.data || []).filter((x: any) => x.quality_status === 'ready').length;
   const a = account.data || {};
-  return reply(chatId, `<b>حالة الحساب @${htmlEscape(a.account_handle || '30piq')}</b>\nالمتابعين: ${a.followers_count ?? 0}\nالمنشورات: ${a.posts_count ?? 0}\nالمحتوى الجاهز: ${ready}\nيحتاج مراجعة: ${review}\nالمهام المعلقة: ${actions.count ?? actions.data?.length ?? 0}\nآخر فحص: ${htmlEscape(a.last_live_check_at || '-')}`);
+  return reply(chatId, `<b>حالة الحساب @${htmlEscape(a.account_handle || '30piq')}</b>\nالمتابعين: ${a.followers_count ?? 0}\nالمنشورات: ${a.posts_count ?? 0}\nالمحتوى الجاهز: ${ready}\nبطاقات إنتاج جاهزة: ${readyCards}\nيحتاج مراجعة: ${review}\nالمهام المعلقة: ${actions.count ?? actions.data?.length ?? 0}\nآخر فحص: ${htmlEscape(a.last_live_check_at || '-')}`);
 }
 
 async function learningStatus(supabase: any, chatId: string) {
-  const [accounts, runs, tweets, queued, cycles, opps, hyps] = await Promise.all([
+  const [accounts, runs, tweets, queued, cycles, opps, hyps, decisions, cards] = await Promise.all([
     supabase.from('accounts').select('id', { count: 'exact', head: true }),
     supabase.from('viral_scan_runs').select('id', { count: 'exact', head: true }),
     supabase.from('viral_tweet_analyses').select('id', { count: 'exact', head: true }),
     supabase.from('learning_tweet_queue').select('status').limit(100),
     supabase.from('learning_cycles').select('id', { count: 'exact', head: true }),
     supabase.from('content_opportunities').select('id', { count: 'exact', head: true }),
-    supabase.from('original_content_hypotheses').select('quality_status').limit(200)
+    supabase.from('original_content_hypotheses').select('quality_status').limit(200),
+    supabase.from('content_format_decisions').select('status', { count: 'exact', head: false }).limit(200),
+    supabase.from('content_production_cards').select('quality_status').limit(200)
   ]);
   const pendingTweets = (queued.data || []).filter((x: any) => x.status === 'pending').length;
   const readyHyps = (hyps.data || []).filter((x: any) => x.quality_status === 'ready').length;
-  return reply(chatId, `<b>حالة التعلم</b>\nحسابات التعلم: ${accounts.count ?? 0}\nعمليات فحص X: ${runs.count ?? 0}\nتغريدات محللة: ${tweets.count ?? 0}\nدورات تعلم ذكية: ${cycles.count ?? 0}\nفرص محتوى: ${opps.count ?? 0}\nفرضيات جاهزة: ${readyHyps}\nتغريدات بانتظار التعلم: ${pendingTweets}`);
+  const selectedDecisions = (decisions.data || []).filter((x: any) => x.status === 'selected').length;
+  const readyCards = (cards.data || []).filter((x: any) => x.quality_status === 'ready').length;
+  return reply(chatId, `<b>حالة التعلم</b>\nحسابات التعلم: ${accounts.count ?? 0}\nعمليات فحص X: ${runs.count ?? 0}\nتغريدات محللة: ${tweets.count ?? 0}\nدورات تعلم ذكية: ${cycles.count ?? 0}\nفرص محتوى: ${opps.count ?? 0}\nفرضيات جاهزة: ${readyHyps}\nقرارات بانتظار الإنتاج: ${selectedDecisions}\nبطاقات إنتاج جاهزة: ${readyCards}\nتغريدات بانتظار التعلم: ${pendingTweets}`);
 }
 
 async function dailyTasks(supabase: any, chatId: string) {
@@ -113,8 +121,13 @@ async function dailyTasks(supabase: any, chatId: string) {
 }
 
 async function readyContent(supabase: any, chatId: string) {
+  const { data: cards } = await supabase.from('content_production_cards').select('*').eq('quality_status', 'ready').order('created_at', { ascending: false }).limit(5);
+  if (cards?.length) {
+    const lines = cards.map((x: any, i: number) => `${i + 1}. <b>${htmlEscape(x.production_type)}</b>\n${htmlEscape(shortText(x.final_text || JSON.stringify(x.thread_items || x.article_outline || x.repo_plan || x.video_script || x.carousel_plan), 320))}`);
+    return reply(chatId, `<b>بطاقات محتوى جاهزة</b>\n\n${lines.join('\n\n')}`);
+  }
   const { data } = await supabase.from('content_log').select('id,content_type,final_text,publish_status,notes,created_at').eq('publish_status', 'ready').order('created_at', { ascending: false }).limit(5);
-  if (!data?.length) return reply(chatId, 'لا يوجد محتوى مصفى وجاهز للنشر الآن. شغّل 🔍 دورة تعلم ذكية ثم 🧪 خطة اليوم.');
+  if (!data?.length) return reply(chatId, 'لا يوجد محتوى مصفى وجاهز للنشر الآن. شغّل 🔍 دورة تعلم ذكية ثم 🧭 محرك القرار ثم 🏭 إنتاج المحتوى.');
   const lines = data.map((x: any, i: number) => `${i + 1}. <b>${htmlEscape(x.content_type)}</b>\n${htmlEscape(shortText(x.final_text, 260))}`);
   return reply(chatId, `<b>محتوى جاهز للنشر</b>\n\n${lines.join('\n\n')}`);
 }
@@ -128,6 +141,8 @@ async function triggerEndpoint(req: Request, chatId: string, path: string) {
   const json = await res.json().catch(() => ({}));
   if (!res.ok || !json.ok) return reply(chatId, `فشل التشغيل: ${htmlEscape(json.error || res.statusText)}`);
   if (path.includes('learning-cycle')) return reply(chatId, `تمت دورة التعلم الذكية.\nالفرص: ${json.inserted?.opportunities ?? 0}\nالفرضيات: ${json.inserted?.hypotheses ?? 0}\nجاهز مبدئيًا: ${json.inserted?.ready_hypotheses ?? 0}`);
+  if (path.includes('format-decision')) return reply(chatId, `تم تشغيل محرك القرار.\nقرارات جديدة: ${json.inserted?.length ?? 0}`);
+  if (path.includes('production-cycle')) return reply(chatId, `تم إنتاج بطاقات المحتوى.\nالبطاقات: ${json.inserted?.cards ?? 0}\nجاهز للنشر: ${json.inserted?.ready ?? 0}`);
   if (path.includes('viral-account-scan')) return reply(chatId, `تم فحص التعلم.\nالحسابات: ${json.handles?.length ?? 0}\nالمحفوظ: ${json.persisted?.length ?? 0}\nالأخطاء: ${json.errors?.length ?? 0}`);
   const ready = json.contentPack?.ready_count ?? 0;
   const safe = json.contentPack?.safe_to_publish ? 'نعم' : 'لا';
