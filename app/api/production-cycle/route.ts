@@ -3,7 +3,7 @@ import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 import { evaluateContentQuality } from '../../../lib/quality';
 
-const VERSION = 'production-cycle-v1.1-format-aware';
+const VERSION = 'production-cycle-v1.2-thread-quality';
 
 function client() {
   const baseURL = optionalEnv('OPENAI_BASE_URL');
@@ -59,7 +59,8 @@ function formatQuality(card: any, productionType: string) {
     if (longItems) reasons.push('thread_item_over_280_chars');
     if (items.some((x) => /^thread\b|^🧵/i.test(x))) reasons.push('thread_opener_too_generic');
     if (items.some((x) => /share your thoughts|what do you think/i.test(x))) reasons.push('generic_engagement_bait');
-    if (!items.some((x) => /because|means|instead|problem|risk|example|pattern/i.test(x))) reasons.push('missing_explanatory_value');
+    const explanatoryItems = items.filter((x) => /because|means|instead|problem|risk|example|pattern|uses|allows|enables|helps|shows|turns|reduces|prevents|build|design|architecture|pipeline|workflow|system|signal|score|rank|why|how/i.test(x)).length;
+    if (items.length && explanatoryItems < Math.min(3, Math.ceil(items.length / 3))) reasons.push('missing_explanatory_value');
     return { status: reasons.length ? 'needs_review' : 'ready', reasons };
   }
 
