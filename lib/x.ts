@@ -14,19 +14,9 @@ export type XAccountSnapshot = {
   raw?: unknown;
 };
 
-function provider() {
-  return optionalEnv('X_DATA_PROVIDER', 'auto').toLowerCase();
-}
-
-function officialHeaders() {
-  const bearer = process.env.X_BEARER_TOKEN;
-  if (!bearer) throw new Error('X_BEARER_TOKEN missing.');
-  return { Authorization: `Bearer ${bearer}` };
-}
-
 function twitterApiHeaders() {
   const key = optionalEnv('TWITTERAPI_IO_KEY') || optionalEnv('TWITTERAPI_KEY');
-  if (!key) throw new Error('TWITTERAPI_IO_KEY missing.');
+  if (!key) throw new Error('TWITTERAPI_IO_KEY missing. Add it in Vercel env.');
   return { 'X-API-Key': key };
 }
 
@@ -34,8 +24,8 @@ function twitterApiBase() {
   return optionalEnv('TWITTERAPI_IO_BASE_URL', 'https://api.twitterapi.io');
 }
 
-async function fetchJson(url: string, headers: Record<string, string>) {
-  const res = await fetch(url, { headers, cache: 'no-store' });
+async function fetchJson(url: string) {
+  const res = await fetch(url, { headers: twitterApiHeaders(), cache: 'no-store' });
   const json = await res.json();
   if (!res.ok || json?.status === 'error' || json?.error) throw new Error(`${res.status} ${JSON.stringify(json)}`);
   return json;
@@ -70,30 +60,12 @@ function normalizeTwitterApiTweet(t: any) {
       retweet_count: Number(t.retweetCount || t.retweets || m.retweet_count || 0),
       quote_count: Number(t.quoteCount || t.quotes || m.quote_count || 0)
     },
-    entities: t.entities || {}
+    entities: t.entities || {},
+    raw: t
   };
 }
 
-async function getOfficialUser(username: string): Promise<XAccountSnapshot> {
-  const params = new URLSearchParams({ 'user.fields': 'description,public_metrics,verified,verified_type,profile_image_url,created_at' });
-  const json = await fetchJson(`https://api.x.com/2/users/by/username/${encodeURIComponent(username)}?${params}`, officialHeaders());
-  const u = json.data || {};
-  return {
-    username,
-    id: u.id,
-    name: u.name,
-    description: u.description,
-    followers_count: u.public_metrics?.followers_count,
-    following_count: u.public_metrics?.following_count,
-    tweet_count: u.public_metrics?.tweet_count,
-    verified: u.verified,
-    verified_type: u.verified_type,
-    profile_image_url: u.profile_image_url,
-    raw: json
-  };
-}
-
-async function getTwitterApiUser(username: string): Promise<XAccountSnapshot> {
+export async function getXUserByUsername(username = optionalEnv('X_USERNAME', '30piq')): Promise<XAccountSnapshot> {
   const base = twitterApiBase();
   const candidates = [
     `${base}/twitter/user/info?userName=${encodeURIComponent(username)}`,
@@ -102,26 +74,12 @@ async function getTwitterApiUser(username: string): Promise<XAccountSnapshot> {
   ];
   let last = '';
   for (const url of candidates) {
-    try { return normalizeTwitterApiUser(username, await fetchJson(url, twitterApiHeaders())); } catch (e: any) { last = e.message; }
+    try { return normalizeTwitterApiUser(username, await fetchJson(url)); } catch (e: any) { last = e.message; }
   }
   throw new Error(`TwitterAPI.io user lookup failed: ${last}`);
 }
 
-export async function getXUserByUsername(username = optionalEnv('X_USERNAME', '30piq')): Promise<XAccountSnapshot> {
-  const p = provider();
-  if (p === 'twitterapi') return getTwitterApiUser(username);
-  if (p === 'x_official') return getOfficialUser(username);
-  try { return await getTwitterApiUser(username); } catch { return getOfficialUser(username); }
-}
-
-async function getOfficialTimeline(userId: string, maxResults = 5) {
-  const safeMax = Math.min(Math.max(Number(maxResults) || 5, 5), 20);
-  const params = new URLSearchParams({ max_results: String(safeMax), exclude: 'retweets,replies', 'tweet.fields': 'created_at,public_metrics,conversation_id,lang,entities,referenced_tweets' });
-  const json = await fetchJson(`https://api.x.com/2/users/${encodeURIComponent(userId)}/tweets?${params}`, officialHeaders());
-  return json.data || [];
-}
-
-async function getTwitterApiTimeline(user: XAccountSnapshot | string, maxResults = 5) {
+export async function getXUserTimeline(user: string | XAccountSnapshot, maxResults = 5) {
   const username = typeof user === 'string' ? user : user.username;
   const safeMax = Math.min(Math.max(Number(maxResults) || 5, 5), 50);
   const base = twitterApiBase();
@@ -133,19 +91,12 @@ async function getTwitterApiTimeline(user: XAccountSnapshot | string, maxResults
   let last = '';
   for (const url of candidates) {
     try {
-      const json = await fetchJson(url, twitterApiHeaders());
+      const json = await fetchJson(url);
       const arr = json.tweets || json.data || json.results || json.result?.tweets || [];
       return (Array.isArray(arr) ? arr : []).slice(0, safeMax).map(normalizeTwitterApiTweet);
     } catch (e: any) { last = e.message; }
   }
   throw new Error(`TwitterAPI.io timeline failed: ${last}`);
-}
-
-export async function getXUserTimeline(userIdOrUser: string | XAccountSnapshot, maxResults = 5) {
-  const p = provider();
-  if (p === 'twitterapi') return getTwitterApiTimeline(userIdOrUser, maxResults);
-  if (p === 'x_official') return getOfficialTimeline(String(userIdOrUser), maxResults);
-  try { return await getTwitterApiTimeline(userIdOrUser, maxResults); } catch { return getOfficialTimeline(typeof userIdOrUser === 'string' ? userIdOrUser : String(userIdOrUser.id), maxResults); }
 }
 
 export function scoreXTweet(tweet: any) {
