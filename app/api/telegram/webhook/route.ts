@@ -5,9 +5,7 @@ import { assertTelegramChat, extractHandle, extractTweetUrl, htmlEscape, MAIN_KE
 export async function POST(req: Request) {
   try {
     const secret = optionalEnv('TELEGRAM_WEBHOOK_SECRET');
-    if (secret && req.headers.get('x-telegram-bot-api-secret-token') !== secret) {
-      return Response.json({ ok: false, error: 'Unauthorized' }, { status: 401 });
-    }
+    if (secret && req.headers.get('x-telegram-bot-api-secret-token') !== secret) return Response.json({ ok: false, error: 'Unauthorized' }, { status: 401 });
 
     const update = await req.json();
     const message = update?.message;
@@ -15,20 +13,12 @@ export async function POST(req: Request) {
     const userId = String(message?.from?.id || '');
     const username = String(message?.from?.username || '');
     const text = String(message?.text || '').trim();
-
     if (!chatId || !text) return Response.json({ ok: true, ignored: true });
     assertTelegramChat(chatId);
 
     const supabase = supabaseAdmin();
     const { data: state } = await supabase.from('telegram_bot_state').select('*').eq('chat_id', chatId).maybeSingle();
-
-    await supabase.from('telegram_bot_state').upsert({
-      chat_id: chatId,
-      user_id: userId,
-      username,
-      last_message: text,
-      updated_at: new Date().toISOString()
-    }, { onConflict: 'chat_id' });
+    await supabase.from('telegram_bot_state').upsert({ chat_id: chatId, user_id: userId, username, last_message: text, updated_at: new Date().toISOString() }, { onConflict: 'chat_id' });
 
     if (text === '/start' || text === 'القائمة' || text === 'Menu') {
       await clearFlow(supabase, chatId);
@@ -41,7 +31,7 @@ export async function POST(req: Request) {
       if (!handle) return reply(chatId, 'أرسل اليوزر فقط مثل: emollick أو @emollick');
       await supabase.from('accounts').upsert({ handle, username: handle, tier: 2, active: true, notes: 'Added from Telegram learning flow.' }, { onConflict: 'handle' });
       await clearFlow(supabase, chatId);
-      await reply(chatId, `تمت إضافة حساب التعلم: @${htmlEscape(handle)}\n\nشغّل الآن: 🚀 تشغيل فحص تعلم`);
+      await reply(chatId, `تمت إضافة حساب التعلم: @${htmlEscape(handle)}\n\nشغّل الآن: 🚀 تشغيل فحص تعلم أو 🔍 دورة تعلم ذكية`);
       return Response.json({ ok: true });
     }
 
@@ -60,6 +50,7 @@ export async function POST(req: Request) {
     if (text === '🔗 إضافة تغريدة للتعلم') return startFlow(supabase, chatId, 'awaiting_learning_tweet', 'أرسل رابط تغريدة X ليتم إدخالها في قائمة التعلم.');
     if (text === '📋 المهام اليومية') return dailyTasks(supabase, chatId);
     if (text === '✅ محتوى جاهز للنشر') return readyContent(supabase, chatId);
+    if (text === '🔍 دورة تعلم ذكية') return triggerEndpoint(req, chatId, '/api/learning-cycle');
     if (text === '🚀 تشغيل فحص تعلم') return triggerEndpoint(req, chatId, '/api/viral-account-scan?max_accounts=2&tweets_per_account=8');
     if (text === '🧪 تشغيل خطة اليوم') return triggerEndpoint(req, chatId, '/api/daily-run');
 
@@ -70,9 +61,7 @@ export async function POST(req: Request) {
   }
 }
 
-export async function GET() {
-  return Response.json({ ok: true, endpoint: 'telegram-webhook' });
-}
+export async function GET() { return Response.json({ ok: true, endpoint: 'telegram-webhook' }); }
 
 async function reply(chatId: string, text: string) {
   await sendTelegramMessage(chatId, text, MAIN_KEYBOARD);
@@ -102,14 +91,18 @@ async function accountStatus(supabase: any, chatId: string) {
 }
 
 async function learningStatus(supabase: any, chatId: string) {
-  const [accounts, runs, tweets, queued] = await Promise.all([
+  const [accounts, runs, tweets, queued, cycles, opps, hyps] = await Promise.all([
     supabase.from('accounts').select('id', { count: 'exact', head: true }),
     supabase.from('viral_scan_runs').select('id', { count: 'exact', head: true }),
     supabase.from('viral_tweet_analyses').select('id', { count: 'exact', head: true }),
-    supabase.from('learning_tweet_queue').select('status').limit(100)
+    supabase.from('learning_tweet_queue').select('status').limit(100),
+    supabase.from('learning_cycles').select('id', { count: 'exact', head: true }),
+    supabase.from('content_opportunities').select('id', { count: 'exact', head: true }),
+    supabase.from('original_content_hypotheses').select('quality_status').limit(200)
   ]);
   const pendingTweets = (queued.data || []).filter((x: any) => x.status === 'pending').length;
-  return reply(chatId, `<b>حالة التعلم</b>\nحسابات التعلم: ${accounts.count ?? 0}\nعمليات الفحص: ${runs.count ?? 0}\nتغريدات محللة: ${tweets.count ?? 0}\nتغريدات بانتظار التعلم: ${pendingTweets}`);
+  const readyHyps = (hyps.data || []).filter((x: any) => x.quality_status === 'ready').length;
+  return reply(chatId, `<b>حالة التعلم</b>\nحسابات التعلم: ${accounts.count ?? 0}\nعمليات فحص X: ${runs.count ?? 0}\nتغريدات محللة: ${tweets.count ?? 0}\nدورات تعلم ذكية: ${cycles.count ?? 0}\nفرص محتوى: ${opps.count ?? 0}\nفرضيات جاهزة: ${readyHyps}\nتغريدات بانتظار التعلم: ${pendingTweets}`);
 }
 
 async function dailyTasks(supabase: any, chatId: string) {
@@ -121,7 +114,7 @@ async function dailyTasks(supabase: any, chatId: string) {
 
 async function readyContent(supabase: any, chatId: string) {
   const { data } = await supabase.from('content_log').select('id,content_type,final_text,publish_status,notes,created_at').eq('publish_status', 'ready').order('created_at', { ascending: false }).limit(5);
-  if (!data?.length) return reply(chatId, 'لا يوجد محتوى مصفى وجاهز للنشر الآن. شغّل البحث أو خطة اليوم بعد توفر مصادر أقوى.');
+  if (!data?.length) return reply(chatId, 'لا يوجد محتوى مصفى وجاهز للنشر الآن. شغّل 🔍 دورة تعلم ذكية ثم 🧪 خطة اليوم.');
   const lines = data.map((x: any, i: number) => `${i + 1}. <b>${htmlEscape(x.content_type)}</b>\n${htmlEscape(shortText(x.final_text, 260))}`);
   return reply(chatId, `<b>محتوى جاهز للنشر</b>\n\n${lines.join('\n\n')}`);
 }
@@ -134,9 +127,8 @@ async function triggerEndpoint(req: Request, chatId: string, path: string) {
   const res = await fetch(`${origin}${path}${separator}secret=${encodeURIComponent(secret)}`, { method: 'GET' });
   const json = await res.json().catch(() => ({}));
   if (!res.ok || !json.ok) return reply(chatId, `فشل التشغيل: ${htmlEscape(json.error || res.statusText)}`);
-  if (path.includes('viral-account-scan')) {
-    return reply(chatId, `تم فحص التعلم.\nالحسابات: ${json.handles?.length ?? 0}\nالمحفوظ: ${json.persisted?.length ?? 0}\nالأخطاء: ${json.errors?.length ?? 0}`);
-  }
+  if (path.includes('learning-cycle')) return reply(chatId, `تمت دورة التعلم الذكية.\nالفرص: ${json.inserted?.opportunities ?? 0}\nالفرضيات: ${json.inserted?.hypotheses ?? 0}\nجاهز مبدئيًا: ${json.inserted?.ready_hypotheses ?? 0}`);
+  if (path.includes('viral-account-scan')) return reply(chatId, `تم فحص التعلم.\nالحسابات: ${json.handles?.length ?? 0}\nالمحفوظ: ${json.persisted?.length ?? 0}\nالأخطاء: ${json.errors?.length ?? 0}`);
   const ready = json.contentPack?.ready_count ?? 0;
   const safe = json.contentPack?.safe_to_publish ? 'نعم' : 'لا';
   return reply(chatId, `تم تشغيل خطة اليوم.\nجاهز للنشر: ${ready}\nآمن للنشر: ${safe}\nالنسخة: ${htmlEscape(json.orchestrator_version || '-')}`);
