@@ -48,10 +48,28 @@ function containsUnsafeClaim(text: string): boolean {
   return badPatterns.some((p) => p.test(t));
 }
 
+function isInstructionInsteadOfContent(text: string): boolean {
+  const t = cleanAscii(text).toLowerCase();
+  const instructionStarts = [
+    'offer ',
+    'suggest ',
+    'highlight ',
+    'provide ',
+    'share ',
+    'create ',
+    'write ',
+    'discuss ',
+    'explain ',
+    'clarify ',
+    'mention '
+  ];
+  return instructionStarts.some((s) => t.startsWith(s));
+}
+
 function fallbackPack() {
   return {
     mode: 'bootstrap',
-    today_goal: 'Publish safe, original bootstrap content without unverified personal claims or fake metrics.',
+    today_goal: 'Publish 3 safe, original posts and use practical replies to start real conversations around AI, productivity, and career growth.',
     single_tweets: [
       {
         text: 'Most AI productivity advice starts with tools. Better starting point: pick one recurring workflow, write the decision steps, then use AI to reduce the busywork without hiding the reasoning.',
@@ -74,19 +92,19 @@ function fallbackPack() {
     ],
     reply_targets_strategy: [
       {
-        target_type: 'creator',
-        reply_angle: 'Add a workflow-first perspective without claiming personal metrics.',
-        prepared_reply: 'Useful point. One filter that helps: before adding an AI tool, map the workflow bottleneck first. Otherwise the tool becomes another tab instead of real leverage.'
+        target_type: 'AI productivity creator',
+        reply_angle: 'Workflow-first reply',
+        prepared_reply: 'Strong point. The part many people miss is mapping the workflow before picking the AI tool. Otherwise the tool becomes another tab, not real leverage.'
       },
       {
-        target_type: 'topic',
-        reply_angle: 'Add a balanced career growth caveat.',
-        prepared_reply: 'The career upside is strongest when AI removes repeatable work but keeps the judgment loop visible. Automating the wrong step can make people faster but not better.'
+        target_type: 'career growth discussion',
+        reply_angle: 'Career leverage caveat',
+        prepared_reply: 'The career upside is strongest when AI removes repeatable work but keeps the judgment loop visible. Faster output matters less if the decisions do not improve.'
       },
       {
-        target_type: 'topic',
-        reply_angle: 'Offer a simple evaluation checklist.',
-        prepared_reply: 'A simple test: does the tool reduce a bottleneck, improve quality, or speed up learning? If none of those happen, it is probably just productivity theatre.'
+        target_type: 'AI tools announcement',
+        reply_angle: 'Tool evaluation filter',
+        prepared_reply: 'Useful launch. The filter I would use is simple: does it reduce a bottleneck, improve quality, or speed up learning? If not, it is probably just novelty.'
       }
     ],
     quote_tweet_strategy: [
@@ -101,6 +119,7 @@ function fallbackPack() {
       'No fake personal claims.',
       'No unverified numbers or percentages.',
       'ASCII punctuation only.',
+      'Replies are actual publish-ready text, not instructions.',
       'Each tweet has a framework, caveat, checklist, or workflow.'
     ],
     human_checklist: [
@@ -122,18 +141,21 @@ function valueFrom(item: any, keys: string[], fallback: string): string {
 }
 
 function normalizeReply(item: any, index: number) {
-  const fallbackTargets = ['creator', 'topic', 'topic'];
-  const prepared = cleanAscii(valueFrom(item, ['prepared_reply', 'reply', 'text', 'content'], ''));
-  const angle = cleanAscii(valueFrom(item, ['reply_angle', 'angle'], 'Add a useful perspective.'));
-  const target = cleanAscii(valueFrom(item, ['target_type', 'target'], fallbackTargets[index] || 'topic'));
-  return { target_type: target, reply_angle: angle, prepared_reply: prepared.slice(0, 280) };
+  const safeReplies = fallbackPack().reply_targets_strategy;
+  const rawPrepared = cleanAscii(valueFrom(item, ['prepared_reply', 'reply', 'text', 'content'], ''));
+  const prepared = rawPrepared && !isInstructionInsteadOfContent(rawPrepared) ? rawPrepared : safeReplies[index]?.prepared_reply || safeReplies[0].prepared_reply;
+  const angle = cleanAscii(valueFrom(item, ['reply_angle', 'angle'], safeReplies[index]?.reply_angle || 'Add a useful perspective.'));
+  const target = cleanAscii(valueFrom(item, ['target_type', 'target'], safeReplies[index]?.target_type || 'topic'));
+  return { target_type: target, reply_angle: angle, prepared_reply: cleanAscii(prepared).slice(0, 280) };
 }
 
 function normalizeQuote(item: any) {
-  const prepared = cleanAscii(valueFrom(item, ['prepared_quote', 'quote', 'text', 'content'], ''));
-  const angle = cleanAscii(valueFrom(item, ['quote_angle', 'angle'], 'Add a practical framework.'));
-  const target = cleanAscii(valueFrom(item, ['target_type', 'target'], 'post/topic'));
-  return { target_type: target, quote_angle: angle, prepared_quote: prepared.slice(0, 280) };
+  const safe = fallbackPack().quote_tweet_strategy[0];
+  const rawPrepared = cleanAscii(valueFrom(item, ['prepared_quote', 'quote', 'text', 'content'], ''));
+  const prepared = rawPrepared && !isInstructionInsteadOfContent(rawPrepared) ? rawPrepared : safe.prepared_quote;
+  const angle = cleanAscii(valueFrom(item, ['quote_angle', 'angle'], safe.quote_angle));
+  const target = cleanAscii(valueFrom(item, ['target_type', 'target'], safe.target_type));
+  return { target_type: target, quote_angle: angle, prepared_quote: cleanAscii(prepared).slice(0, 280) };
 }
 
 function normalizePack(pack: any) {
@@ -174,7 +196,7 @@ function normalizePack(pack: any) {
     mode: cleanAscii(String(pack?.mode || 'bootstrap')),
     today_goal: cleanAscii(String(pack?.today_goal || safe.today_goal)),
     single_tweets: cleanedTweets,
-    reply_targets_strategy: cleanedReplies.length ? cleanedReplies : safe.reply_targets_strategy,
+    reply_targets_strategy: cleanedReplies.length === 3 ? cleanedReplies : safe.reply_targets_strategy,
     quote_tweet_strategy: cleanedQuotes.length ? cleanedQuotes : safe.quote_tweet_strategy,
     github_decision: githubDecision,
     quality_checks: (Array.isArray(pack?.quality_checks) ? pack.quality_checks : safe.quality_checks).slice(0, 5).map((x: any) => cleanAscii(String(x))),
@@ -192,19 +214,23 @@ export async function generateDailyContentPack(input: {
   const client = buildClient();
   const model = optionalEnv('OPENAI_MODEL', optionalEnv('OPENAI_BASE_URL').includes('openrouter.ai') ? 'openai/gpt-4.1-mini' : 'gpt-4.1-mini');
   const prompt = `
-You are the X AI Content Factory operator for @${optionalEnv('X_USERNAME', '30piq')}.
-Create a practical daily mission for an English X account about AI x productivity x career growth.
+You are the operator for @${optionalEnv('X_USERNAME', '30piq')}, an English X account about AI x Productivity x Career Growth.
+The account goal is to grow real followers with useful original content, not generic AI noise.
+
+Create one practical daily mission.
 
 Critical rules:
 - Output valid JSON only.
 - Use plain ASCII punctuation only.
 - Do not use hashtags.
-- Do not invent personal experiences, test results, percentages, revenue, job outcomes, or tool performance.
+- Do not invent personal experiences, tests, percentages, revenue, job outcomes, or tool performance.
 - Do not write first-person claims unless the provided state contains proof.
 - Do not copy creators and do not create engagement bait.
 - Keep each tweet under 240 characters.
 - Create exactly 3 single tweets, 3 reply templates, and 1 quote template.
+- Replies must be actual publish-ready replies, not instructions. Do not start replies with Offer, Suggest, Highlight, Provide, Share, Create, Write, Discuss, Explain, Clarify, or Mention.
 - Each tweet must contain one original element: useful framework, contrarian opinion, comparison, checklist, caveat, or practical workflow.
+- Content must help the audience use AI for better work systems, better decisions, and career leverage.
 
 State:
 accountState=${JSON.stringify(input.accountState)}
@@ -213,13 +239,23 @@ requirements=${JSON.stringify(input.requirements)}
 recentContent=${JSON.stringify(input.recentContent)}
 creatorIntel=${JSON.stringify(input.creatorIntel)}
 
-Return JSON with keys: mode, today_goal, single_tweets, reply_targets_strategy, quote_tweet_strategy, github_decision, quality_checks, human_checklist.`;
+Return JSON with this exact shape:
+{
+  "mode": "daily_mission",
+  "today_goal": "...",
+  "single_tweets": [{"text":"...","why_it_works":"...","originality_element":"...","best_time_utc":"..."}],
+  "reply_targets_strategy": [{"target_type":"...","reply_angle":"...","prepared_reply":"..."}],
+  "quote_tweet_strategy": [{"target_type":"post/topic","quote_angle":"...","prepared_quote":"..."}],
+  "github_decision": {"needed":false,"repo_name":"","asset_type":"","readme_outline":""},
+  "quality_checks": ["..."],
+  "human_checklist": ["..."]
+}`;
   const response = await client.chat.completions.create({
     model,
-    temperature: 0.25,
+    temperature: 0.2,
     response_format: { type: 'json_object' },
     messages: [
-      { role: 'system', content: 'You are a strict JSON-producing editor. Never invent personal proof, fake metrics, hashtags, or first-person experience claims.' },
+      { role: 'system', content: 'You write publish-ready X content. Never output instructions where the user asked for the final reply. Never invent proof, metrics, hashtags, or first-person experience claims.' },
       { role: 'user', content: prompt }
     ]
   });
