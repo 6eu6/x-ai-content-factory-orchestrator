@@ -16,9 +16,23 @@ export type XAccountSnapshot = {
 
 let lastRequestAt = 0;
 
-function twitterApiHeaders() {
-  const key = optionalEnv('TWITTERAPI_IO_KEY') || optionalEnv('TWITTERAPI_KEY');
+function cleanApiKey(raw: string) {
+  return String(raw || '')
+    .trim()
+    .replace(/^Bearer\s+/i, '')
+    .replace(/^['"]|['"]$/g, '')
+    .trim();
+}
+
+function twitterApiKey() {
+  const raw = optionalEnv('TWITTERAPI_IO_KEY') || optionalEnv('TWITTERAPI_IO_API_KEY') || optionalEnv('TWITTERAPI_KEY');
+  const key = cleanApiKey(raw);
   if (!key) throw new Error('TWITTERAPI_IO_KEY missing. Add it in Vercel env.');
+  return key;
+}
+
+function twitterApiHeaders() {
+  const key = twitterApiKey();
   return { 'X-API-Key': key, 'x-api-key': key };
 }
 
