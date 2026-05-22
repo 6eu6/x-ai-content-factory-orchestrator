@@ -3,7 +3,7 @@ import crypto from 'crypto';
 import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 
-const VERSION = 'repo-artifact-writer-v1';
+const VERSION = 'repo-artifact-writer-v1.1-no-embed';
 
 function client() {
   const baseURL = optionalEnv('OPENAI_BASE_URL');
@@ -51,7 +51,7 @@ async function run(req: Request) {
 
     let query = supabase
       .from('repo_build_plans')
-      .select('*, repo_creation_decisions(*, repo_sources(*))')
+      .select('*')
       .in('status', ['planned', 'artifact_needs_review', 'artifacts_ready'])
       .order('readiness_score', { ascending: false })
       .order('created_at', { ascending: true })
@@ -61,16 +61,31 @@ async function run(req: Request) {
     if (plansError) throw plansError;
     if (!plans?.length) return Response.json({ ok: true, version: VERSION, inserted: { plans: 0, artifacts: 0 }, note: 'No repo build plans found.' });
 
-    const [repoRules, learningRules, existingArtifacts] = await Promise.all([
+    const decisionIds = plans.map((p: any) => p.repo_creation_decision_id).filter(Boolean);
+    const [repoRules, learningRules, existingArtifacts, decisions] = await Promise.all([
       supabase.from('repo_extracted_rules').select('*').order('confidence_score', { ascending: false }).limit(40),
       supabase.from('system_learning_rules').select('*').eq('status', 'active').order('confidence_score', { ascending: false }).limit(40),
-      supabase.from('repo_build_artifacts').select('*').in('repo_build_plan_id', plans.map((p: any) => p.id))
+      supabase.from('repo_build_artifacts').select('*').in('repo_build_plan_id', plans.map((p: any) => p.id)),
+      decisionIds.length ? supabase.from('repo_creation_decisions').select('*').in('id', decisionIds) : Promise.resolve({ data: [], error: null })
     ]);
+    if (decisions.error) throw decisions.error;
+
+    const sourceIds = (decisions.data || []).map((d: any) => d.repo_source_id).filter(Boolean);
+    const sources = sourceIds.length
+      ? await supabase.from('repo_sources').select('*').in('id', sourceIds)
+      : { data: [], error: null };
+    if (sources.error) throw sources.error;
+
+    const decisionsById = new Map((decisions.data || []).map((d: any) => [d.id, d]));
+    const sourcesById = new Map((sources.data || []).map((s: any) => [s.id, s]));
 
     let totalArtifacts = 0;
     const writtenPlans: any[] = [];
 
     for (const plan of plans) {
+      const decision = decisionsById.get(plan.repo_creation_decision_id) || null;
+      const source = decision?.repo_source_id ? sourcesById.get(decision.repo_source_id) : null;
+      const planContext = { ...plan, repo_creation_decision: decision, repo_source: source };
       const prompt = `You are writing files for a small, useful, testable GitHub repository.
 Repository name: ${plan.proposed_repo_name}
 Description: ${plan.repo_description || ''}
@@ -85,7 +100,7 @@ Rules:
 - If this is not a code repo, tests can be checklist validation files.
 Return strict JSON:
 {"artifacts":[{"path":"README.md","type":"file","purpose":"...","content":"..."}]}
-Plan=${JSON.stringify(plan)}
+Plan=${JSON.stringify(planContext)}
 ExistingArtifacts=${JSON.stringify(existingArtifacts.data || [])}
 RepoRules=${JSON.stringify(repoRules.data || [])}
 SystemLearningRules=${JSON.stringify(learningRules.data || [])}`;
