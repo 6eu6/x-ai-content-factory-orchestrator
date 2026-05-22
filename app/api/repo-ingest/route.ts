@@ -2,7 +2,7 @@ import OpenAI from 'openai';
 import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 
-const VERSION = 'repo-ingest-v1';
+const VERSION = 'repo-ingest-v1.1-persisted';
 
 function ai() {
   const baseURL = optionalEnv('OPENAI_BASE_URL');
@@ -58,6 +58,26 @@ function arr(v: any) {
   return [v];
 }
 
+function score(v: any, fallback = 7) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  const scaled = n > 0 && n <= 1 ? n * 10 : n;
+  return Math.min(10, Math.max(1, Math.round(scaled)));
+}
+
+function sourceUrls(value: any, repoUrl: string) {
+  const urls = arr(value).map((x) => String(x || '').trim()).filter(Boolean);
+  const normalized = urls.map((x) => x.startsWith('http') ? x : repoUrl).filter(Boolean);
+  return Array.from(new Set(normalized.length ? normalized : [repoUrl]));
+}
+
+function scoreFromObject(scores: any, keys: string[], fallback = 7) {
+  for (const key of keys) {
+    if (scores && scores[key] !== undefined) return score(scores[key], fallback);
+  }
+  return fallback;
+}
+
 export async function GET(req: Request) { return run(req); }
 export async function POST(req: Request) { return run(req); }
 
@@ -100,11 +120,13 @@ async function run(req: Request) {
       const c = await gh(`/repos/${r.owner}/${r.repo}/contents/${encodeURIComponent(f.path)}?ref=${meta.default_branch}`);
       const text = c.download_url ? await getText(c.download_url) : '';
       docs.push({ path: f.path, role: role(f.path), sha: f.sha, excerpt: text.slice(0, 5000) });
-      await supabase.from('repo_source_files').upsert({ repo_source_id: repoRow.id, path: f.path, file_type: 'markdown', content_sha: f.sha, content_excerpt: text.slice(0, 5000), file_role: role(f.path), analysis_status: 'loaded', updated_at: new Date().toISOString() }, { onConflict: 'repo_source_id,path' });
+      const { error } = await supabase.from('repo_source_files').upsert({ repo_source_id: repoRow.id, path: f.path, file_type: 'markdown', content_sha: f.sha, content_excerpt: text.slice(0, 5000), file_role: role(f.path), analysis_status: 'loaded', updated_at: new Date().toISOString() }, { onConflict: 'repo_source_id,path' });
+      if (error) throw error;
     }
 
     const prompt = `Analyze this GitHub repository for technical learning and content planning. Do not copy text. Create original content opportunities and maintainable repo ideas.
 Return JSON only with: repo_summary, scores, rules, content_opportunities, repo_creation_decisions.
+Scores must be integers 1-10. Confidence values must be integers 1-10.
 Each rule: rule_type, rule, evidence, source_paths, apply_to_30piq, content_use_case, confidence_score.
 Each opportunity: opportunity_type, topic, angle, audience_pain, source_urls, evidence_notes, originality_notes, risk_notes, confidence_score, priority_score.
 Each repo decision: repo_type, proposed_name, repo_goal, why_this_must_be_repo, documentation_plan, test_plan, maintenance_plan, localization_plan, decision_confidence.
@@ -120,19 +142,80 @@ Docs: ${JSON.stringify(docs)}`;
     });
     const intel = JSON.parse(out.choices[0]?.message?.content || '{}');
     const scores = intel.scores || {};
-    await supabase.from('repo_sources').update({ technical_depth_score: Number(scores.technical_depth_score || 5), content_potential_score: Number(scores.content_potential_score || 5), repo_creation_potential_score: Number(scores.repo_creation_potential_score || 5), status: 'analyzed', updated_at: new Date().toISOString() }).eq('id', repoRow.id);
+    await supabase.from('repo_sources').update({
+      technical_depth_score: scoreFromObject(scores, ['technical_depth_score', 'content_depth', 'learning_potential'], 7),
+      content_potential_score: scoreFromObject(scores, ['content_potential_score', 'content_opportunity', 'documentation_quality'], 7),
+      repo_creation_potential_score: scoreFromObject(scores, ['repo_creation_potential_score', 'test_coverage_potential', 'code_modularity'], 7),
+      status: 'analyzed',
+      updated_at: new Date().toISOString()
+    }).eq('id', repoRow.id);
 
     const rules = arr(intel.rules).slice(0, 40);
-    if (rules.length) await supabase.from('repo_extracted_rules').insert(rules.map((x: any) => ({ repo_source_id: repoRow.id, rule_type: x.rule_type || 'repo_learning', rule: x.rule || 'repo rule', evidence: x.evidence || null, source_paths: arr(x.source_paths), apply_to_30piq: x.apply_to_30piq || null, content_use_case: x.content_use_case || null, confidence_score: Number(x.confidence_score || 5), status: 'active' })));
+    let rulesInserted = 0;
+    if (rules.length) {
+      const { data, error } = await supabase.from('repo_extracted_rules').insert(rules.map((x: any) => ({
+        repo_source_id: repoRow.id,
+        rule_type: String(x.rule_type || 'repo_learning').slice(0, 120),
+        rule: x.rule || 'repo rule',
+        evidence: x.evidence || null,
+        source_paths: arr(x.source_paths),
+        apply_to_30piq: typeof x.apply_to_30piq === 'string' ? x.apply_to_30piq : x.apply_to_30piq ? 'Applicable to 30piq.' : null,
+        content_use_case: x.content_use_case || null,
+        confidence_score: score(x.confidence_score, 7),
+        status: 'active'
+      }))).select('id');
+      if (error) throw error;
+      rulesInserted = data?.length || 0;
+    }
 
     const opportunities = arr(intel.content_opportunities).slice(0, 12);
-    if (opportunities.length) await supabase.from('content_opportunities').insert(opportunities.map((x: any) => ({ opportunity_type: x.opportunity_type || 'thread', topic: x.topic || r.full, angle: x.angle || null, audience_pain: x.audience_pain || null, source_urls: arr(x.source_urls).length ? arr(x.source_urls) : [meta.html_url], evidence_notes: x.evidence_notes || null, originality_notes: x.originality_notes || null, risk_notes: x.risk_notes || null, confidence_score: Number(x.confidence_score || 6), priority_score: Number(x.priority_score || 6), status: 'candidate' })));
+    let opportunitiesInserted = 0;
+    if (opportunities.length) {
+      const { data, error } = await supabase.from('content_opportunities').insert(opportunities.map((x: any) => ({
+        opportunity_type: String(x.opportunity_type || 'thread').slice(0, 80),
+        topic: x.topic || r.full,
+        angle: x.angle || null,
+        audience_pain: x.audience_pain || null,
+        source_urls: sourceUrls(x.source_urls, meta.html_url),
+        evidence_notes: x.evidence_notes || null,
+        originality_notes: x.originality_notes || null,
+        risk_notes: x.risk_notes || null,
+        confidence_score: score(x.confidence_score, 7),
+        priority_score: score(x.priority_score, 7),
+        status: 'candidate'
+      }))).select('id');
+      if (error) throw error;
+      opportunitiesInserted = data?.length || 0;
+    }
 
     const decisions = arr(intel.repo_creation_decisions).slice(0, 5);
-    if (decisions.length) await supabase.from('repo_creation_decisions').insert(decisions.map((x: any) => ({ repo_source_id: repoRow.id, decision: 'create_repo', decision_confidence: Number(x.decision_confidence || 10), repo_type: x.repo_type || 'guide', proposed_name: x.proposed_name || `${r.repo}-notes`, repo_goal: x.repo_goal || `Create a useful original repo inspired by ${r.full}`, why_this_must_be_repo: x.why_this_must_be_repo || 'The topic benefits from structured, maintained documentation or tooling.', documentation_plan: x.documentation_plan || {}, test_plan: x.test_plan || {}, maintenance_plan: x.maintenance_plan || {}, localization_plan: x.localization_plan || {}, status: 'approved_for_build' })));
+    let decisionsInserted = 0;
+    if (decisions.length) {
+      const { data, error } = await supabase.from('repo_creation_decisions').insert(decisions.map((x: any) => ({
+        repo_source_id: repoRow.id,
+        decision: 'create_repo',
+        decision_confidence: score(x.decision_confidence, 10),
+        repo_type: String(x.repo_type || 'guide').slice(0, 80),
+        proposed_name: x.proposed_name || `${r.repo}-notes`,
+        repo_goal: x.repo_goal || `Create a useful original repo inspired by ${r.full}`,
+        why_this_must_be_repo: x.why_this_must_be_repo || 'The topic benefits from structured, maintained documentation or tooling.',
+        documentation_plan: x.documentation_plan || {},
+        test_plan: x.test_plan || {},
+        maintenance_plan: x.maintenance_plan || {},
+        localization_plan: x.localization_plan || {},
+        status: 'approved_for_build'
+      }))).select('id');
+      if (error) throw error;
+      decisionsInserted = data?.length || 0;
+    }
 
-    const log = await insertSessionLog({ actions_completed: ['repo_ingest', VERSION, r.full, `files:${docs.length}`, `rules:${rules.length}`, `opportunities:${opportunities.length}`, `repo_decisions:${decisions.length}`], decisions_made: [intel.repo_summary || {}, { scores }], pending_tasks: decisions.map((x: any) => `Build repo: ${x.proposed_name}`), next_recommendation: 'Run format-decision for opportunities or build approved repo decisions.' });
-    return Response.json({ ok: true, version: VERSION, repo: repoRow, files_loaded: docs.length, inserted: { rules: rules.length, opportunities: opportunities.length, repo_creation_decisions: decisions.length }, intel, sessionLog: log });
+    const log = await insertSessionLog({
+      actions_completed: ['repo_ingest', VERSION, r.full, `files:${docs.length}`, `rules:${rulesInserted}`, `opportunities:${opportunitiesInserted}`, `repo_decisions:${decisionsInserted}`],
+      decisions_made: [intel.repo_summary || {}, { scores }],
+      pending_tasks: decisions.map((x: any) => `Build repo: ${x.proposed_name}`),
+      next_recommendation: 'Run format-decision for opportunities or build approved repo decisions.'
+    });
+    return Response.json({ ok: true, version: VERSION, repo: { id: repoRow.id, repo_url: meta.html_url, github_full_name: r.full }, files_loaded: docs.length, inserted: { rules: rulesInserted, opportunities: opportunitiesInserted, repo_creation_decisions: decisionsInserted }, intel, sessionLog: log });
   } catch (err: any) {
     return Response.json({ ok: false, version: VERSION, error: err.message }, { status: 500 });
   }
