@@ -3,7 +3,7 @@ import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 import { getXUserByUsername } from '../../../lib/x';
 import { generateDailyContentPack } from '../../../lib/content';
 
-const ORCHESTRATOR_VERSION = 'safe-v2-no-fake-metrics';
+const ORCHESTRATOR_VERSION = 'safe-v3-normalized-content';
 
 export async function POST(req: Request) { return run(req); }
 export async function GET(req: Request) { return run(req); }
@@ -34,13 +34,12 @@ async function run(req: Request) {
       xSnapshot = { warning: 'X live check failed or skipped', error: e.message };
     }
 
-    const [accountState, requirements, targets, recentContent, creatorIntel, pendingActions] = await Promise.all([
+    const [accountState, requirements, targets, recentContent, creatorIntel] = await Promise.all([
       supabase.from('account_state').select('*').eq('account_handle', username).maybeSingle(),
       supabase.from('requirement_status').select('*').order('priority', { ascending: true }).limit(50),
       supabase.from('target_plans').select('*').eq('active', true).order('priority', { ascending: true }).limit(50),
       supabase.from('content_log').select('*').order('published_at', { ascending: false }).limit(20),
-      supabase.from('creator_intel').select('*').order('created_at', { ascending: false }).limit(20),
-      supabase.from('action_queue').select('id,priority,action_type,title,instruction,status,assigned_to,created_at').in('status', ['pending', 'in_progress']).order('priority', { ascending: true }).limit(10)
+      supabase.from('creator_intel').select('*').order('created_at', { ascending: false }).limit(20)
     ]);
 
     const contentPack = await generateDailyContentPack({
@@ -81,7 +80,7 @@ async function run(req: Request) {
         final_text: t.text || null,
         target_audience: 'English-speaking AI productivity career growth audience',
         originality_element: t.originality_element || 'Original safe angle',
-        source_used: 'daily_run_safe_v2',
+        source_used: ORCHESTRATOR_VERSION,
         publish_status: 'ready',
         created_by_ai_tool: ORCHESTRATOR_VERSION,
         notes: t.why_it_works || null
@@ -101,6 +100,15 @@ async function run(req: Request) {
       })));
     }
 
+    const { data: pendingActions } = await supabase
+      .from('action_queue')
+      .select('id,priority,action_type,title,instruction,status,assigned_to,created_at')
+      .eq('status', 'pending')
+      .ilike('title', 'Safe daily action%')
+      .order('created_at', { ascending: false })
+      .order('priority', { ascending: true })
+      .limit(4);
+
     const sessionLog = await insertSessionLog({
       actions_completed: ['daily_run', ORCHESTRATOR_VERSION, 'x_check_attempted', 'generated_content_pack', 'updated_daily_checkin'],
       content_created: singleTweets,
@@ -109,7 +117,7 @@ async function run(req: Request) {
       next_recommendation: 'Publish approved content manually, then log URLs with log-user-action.'
     });
 
-    return Response.json({ ok: true, orchestrator_version: ORCHESTRATOR_VERSION, xSnapshot, contentPack, daily_checkin: runRow, sessionLog, pendingActions: pendingActions.data });
+    return Response.json({ ok: true, orchestrator_version: ORCHESTRATOR_VERSION, xSnapshot, contentPack, daily_checkin: runRow, sessionLog, pendingActions: pendingActions || [] });
   } catch (err: any) {
     return Response.json({ ok: false, orchestrator_version: ORCHESTRATOR_VERSION, error: err.message }, { status: 500 });
   }
