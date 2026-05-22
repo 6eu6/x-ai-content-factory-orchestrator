@@ -16,7 +16,7 @@ export type XAccountSnapshot = {
 
 let lastRequestAt = 0;
 
-function cleanApiKey(raw: string) {
+export function cleanTwitterApiKey(raw: string) {
   return String(raw || '')
     .trim()
     .replace(/^Bearer\s+/i, '')
@@ -24,19 +24,18 @@ function cleanApiKey(raw: string) {
     .trim();
 }
 
-function twitterApiKey() {
+export function getTwitterApiKey() {
   const raw = optionalEnv('TWITTERAPI_IO_KEY') || optionalEnv('TWITTERAPI_IO_API_KEY') || optionalEnv('TWITTERAPI_KEY');
-  const key = cleanApiKey(raw);
+  const key = cleanTwitterApiKey(raw);
   if (!key) throw new Error('TWITTERAPI_IO_KEY missing. Add it in Vercel env.');
   return key;
 }
 
 function twitterApiHeaders() {
-  const key = twitterApiKey();
-  return { 'X-API-Key': key, 'x-api-key': key };
+  return { 'X-API-Key': getTwitterApiKey() };
 }
 
-function twitterApiBase() {
+export function twitterApiBase() {
   return optionalEnv('TWITTERAPI_IO_BASE_URL', 'https://api.twitterapi.io');
 }
 
@@ -52,7 +51,7 @@ async function throttle() {
   lastRequestAt = Date.now();
 }
 
-async function fetchJson(url: string) {
+export async function fetchTwitterApiJson(url: string) {
   await throttle();
   const res = await fetch(url, { headers: twitterApiHeaders(), cache: 'no-store' });
   const json = await res.json();
@@ -102,20 +101,18 @@ function normalizeTwitterApiTweet(t: any) {
 }
 
 export async function getXUserByUsername(username = optionalEnv('X_USERNAME', '30piq')): Promise<XAccountSnapshot> {
-  const base = twitterApiBase();
-  const url = new URL(`${base}/twitter/user/info`);
+  const url = new URL(`${twitterApiBase()}/twitter/user/info`);
   url.searchParams.set('userName', username.replace(/^@/, ''));
-  return normalizeTwitterApiUser(username, await fetchJson(url.toString()));
+  return normalizeTwitterApiUser(username, await fetchTwitterApiJson(url.toString()));
 }
 
 export async function getXUserTimeline(user: string | XAccountSnapshot, maxResults = 5, includeReplies = false) {
   const username = typeof user === 'string' ? user : user.username;
   const safeMax = Math.min(Math.max(Number(maxResults) || 5, 5), 20);
-  const base = twitterApiBase();
-  const url = new URL(`${base}/twitter/user/last_tweets`);
+  const url = new URL(`${twitterApiBase()}/twitter/user/last_tweets`);
   url.searchParams.set('userName', username.replace(/^@/, ''));
   url.searchParams.set('includeReplies', String(Boolean(includeReplies)));
-  const json = await fetchJson(url.toString());
+  const json = await fetchTwitterApiJson(url.toString());
   const arr = Array.isArray(json.tweets) ? json.tweets : [];
   return arr.slice(0, safeMax).map(normalizeTwitterApiTweet);
 }
@@ -129,11 +126,10 @@ export async function getXUserAndTimeline(username: string, maxResults = 5, incl
 
 export async function searchXTweets(query: string, queryType: 'Latest' | 'Top' = 'Top', maxResults = 20) {
   const safeMax = Math.min(Math.max(Number(maxResults) || 20, 1), 20);
-  const base = twitterApiBase();
-  const url = new URL(`${base}/twitter/tweet/advanced_search`);
+  const url = new URL(`${twitterApiBase()}/twitter/tweet/advanced_search`);
   url.searchParams.set('query', query);
   url.searchParams.set('queryType', queryType);
-  const json = await fetchJson(url.toString());
+  const json = await fetchTwitterApiJson(url.toString());
   const arr = Array.isArray(json.tweets) ? json.tweets : [];
   return arr.slice(0, safeMax).map(normalizeTwitterApiTweet);
 }
