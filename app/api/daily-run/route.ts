@@ -10,28 +10,105 @@ import { prepareAndDeliverDailyPack } from '../../../lib/publishing-pipeline';
 
 const ORCHESTRATOR_VERSION = `${GROWTH_OPERATOR_VERSION}+model-router+shield-v2+content-types-v2+media-pipeline-v2+publishing-v2+learning-loop-v2`;
 
-function uniqueActions(actions: string[]) {
+/**
+ * نوع المهمة الذكي — يحمل action_type صحيح حسب المحتوى
+ */
+type SmartAction = {
+  action_type: string;
+  instruction: string;
+  priority: number;
+};
+
+function uniqueSmartActions(actions: SmartAction[]): SmartAction[] {
   const seen = new Set<string>();
   return actions.filter((action) => {
-    const key = String(action || '').trim().toLowerCase();
+    const key = String(action.instruction || '').trim().toLowerCase();
     if (!key || seen.has(key)) return false;
     seen.add(key);
     return true;
   });
 }
 
-function qualityAwareActions(actions: string[], qualityResults: any[]) {
+/**
+ * qualityAwareSmartActions — يولد مهام ذكية حسب نتيجة الجودة
+ *
+ * بدل ما يرمي تحذيرات عامة لما الجودة تفشل، يولد:
+ * 1. مهام إصلاح محددة (أي تغريدة فيها مشكلة وليش)
+ * 2. خطوات عملية للإصلاح
+ * 3. مهام النشر لو فيه شيء جاهز
+ */
+function qualityAwareSmartActions(
+  rawActions: any[],
+  qualityResults: any[],
+  singleTweets: any[],
+  shieldResults: any[],
+  contentPack: any
+): SmartAction[] {
   const readyCount = qualityResults.filter((q) => q?.status === 'ready').length;
-  if (readyCount === 0) {
-    const reasons = Array.from(new Set(qualityResults.flatMap((q) => q?.reasons || []))).join(', ') || 'quality gate failed';
-    return [
-      `Do not publish generated tweets. Quality gate failed: ${reasons}.`,
-      'Run research-intel-v4 or add source-backed evidence before regenerating daily-run.',
-      'Rewrite needs_review tweets into source-backed or opinion-only content, then re-run daily-run.',
-      'Use viral memory only as structure; do not publish factual claims without source URLs.'
-    ];
+  const needsReviewCount = qualityResults.filter((q) => q?.status === 'needs_review').length;
+  const actions: SmartAction[] = [];
+
+  // ═══ لو فيه محتوى جاهز، أضف مهام النشر ═══
+  if (readyCount > 0) {
+    const readyTweets = singleTweets.filter((_: any, i: number) => qualityResults[i]?.status === 'ready');
+    const times = readyTweets.map((t: any, i: number) => t.best_time_utc || ['13:00','15:00','17:00'][i]).join(', ');
+    actions.push({
+      action_type: 'publish',
+      instruction: `Publish ${readyCount} ready tweet${readyCount > 1 ? 's' : ''} at UTC: ${times}. Text delivered to Telegram.`,
+      priority: 1
+    });
   }
-  return uniqueActions(actions).filter((action) => !/publish the 3 approved tweets/i.test(action) || readyCount === 3);
+
+  // ═══ لو فيه محتوى يحتاج مراجعة، أضف مهام إصلاح محددة ═══
+  if (needsReviewCount > 0) {
+    for (let i = 0; i < singleTweets.length; i++) {
+      const q = qualityResults[i];
+      if (q?.status !== 'needs_review') continue;
+      const reasons = (q.reasons || []).join(', ');
+      const tweetPreview = (singleTweets[i]?.text || '').slice(0, 60);
+      actions.push({
+        action_type: 'review',
+        instruction: `Review tweet "${tweetPreview}..." — issues: ${reasons}. Fix and publish manually.`,
+        priority: 2
+      });
+    }
+  }
+
+  // ═══ لو كل شيء فشل — أضف خطوات عملية ═══
+  if (readyCount === 0 && needsReviewCount > 0) {
+    const allReasons = Array.from(new Set(qualityResults.flatMap((q: any) => q?.reasons || [])));
+    actions.push({
+      action_type: 'research',
+      instruction: `No tweets passed quality gate. Common issues: ${allReasons.join(', ')}. Run 🔎 اكتشاف تلقائي to gather source-backed research, then re-run 🧪 تشغيل خطة اليوم.`,
+      priority: 1
+    });
+  }
+
+  // ═══ أضف مهام من content pack (اللي فيها أنواع ذكية) ═══
+  if (Array.isArray(rawActions)) {
+    for (const raw of rawActions) {
+      // الشكل الجديد: كائن فيه action_type + instruction
+      if (typeof raw === 'object' && raw.instruction) {
+        actions.push({
+          action_type: raw.action_type || 'engage',
+          instruction: raw.instruction,
+          priority: raw.priority || actions.length + 3
+        });
+      }
+      // الشكل القديم: نص فقط
+      else if (typeof raw === 'string' && raw.trim()) {
+        // لا نضيف مهام نشر عامة لو أضفناها بالفعل
+        if (/publish the \d+ (approved|safe|ready) tweets/i.test(raw) && readyCount > 0) continue;
+        actions.push({
+          action_type: readyCount > 0 ? 'engage' : 'research',
+          instruction: raw,
+          priority: actions.length + 3
+        });
+      }
+    }
+  }
+
+  return uniqueSmartActions(actions).slice(0, 8);
 }
 
 export async function POST(req: Request) { return run(req); }
@@ -192,7 +269,13 @@ async function run(req: Request) {
     });
 
     const readyCount = combinedResults.filter((q) => q.status === 'ready').length;
-    const actions = qualityAwareActions(Array.isArray(contentPack.next_actions) ? contentPack.next_actions : [], combinedResults);
+    const actions = qualityAwareSmartActions(
+      Array.isArray(contentPack.next_actions) ? contentPack.next_actions : [],
+      combinedResults,
+      singleTweets,
+      shieldResults,
+      contentPack
+    );
 
     // ═══ 6. تسجيل ═══
     const { data: runRow, error: runError } = await supabase.from('daily_checkins').upsert({
@@ -262,19 +345,18 @@ async function run(req: Request) {
     }
 
     if (actions.length) {
-      // حذف المهام اليومية القديمة المعلقة قبل إضافة الجديدة (لتجنب التكرار)
-      // تحسين: نحذف كل المهام المعلقة القديمة من أي مصدر (أقدم من ساعتين)
+      // حذف ALL المهام المعلقة القديمة — مو بس القديمة أكثر من ساعتين
+      // هذا يمنع تراكم المهام من تشغيلات سابقة
       try {
-        await supabase.from('action_queue').delete().eq('status', 'pending').lt('created_at', new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString());
+        await supabase.from('action_queue').delete().eq('status', 'pending');
       } catch {}
-      // إزالة التكرار من القائمة الجديدة أيضاً
-      const uniqueActionList = uniqueActions(actions);
-      await supabase.from('action_queue').insert(uniqueActionList.map((instruction: string, index: number) => ({
-        priority: index + 1,
-        action_type: readyCount ? 'human_publish_or_engage' : 'quality_review_or_research',
-        title: `Growth daily action ${index + 1}`,
-        instruction,
-        prepared_content: JSON.stringify({ ...contentPack, quality_gate: combinedResults, shield_results: shieldResults.map(s => ({ passed: s.passed, risk: s.risk_level, summary: s.summary })), ready_count: readyCount }),
+      // إدراج المهام الجديدة — كل مهمة بنوعها الصحيح
+      await supabase.from('action_queue').insert(actions.map((action: SmartAction, index: number) => ({
+        priority: action.priority || index + 1,
+        action_type: action.action_type,
+        title: `Daily: ${action.action_type}`,
+        instruction: action.instruction,
+        prepared_content: JSON.stringify({ ready_count: readyCount, quality_issues: combinedResults.filter(q => q.status === 'needs_review').flatMap((q: any) => q.reasons || []) }),
         status: 'pending',
         assigned_to: 'human_operator'
       })));
@@ -284,10 +366,8 @@ async function run(req: Request) {
       .from('action_queue')
       .select('id,priority,action_type,title,instruction,status,assigned_to,created_at')
       .eq('status', 'pending')
-      .ilike('title', 'Growth daily action%')
-      .order('created_at', { ascending: false })
       .order('priority', { ascending: true })
-      .limit(7);
+      .limit(8);
 
     const sessionLog = await insertSessionLog({
       actions_completed: ['daily_run', ORCHESTRATOR_VERSION, 'x_check_attempted', 'used_research_intel', 'used_viral_memory', 'quality_gate_applied', 'shield_applied', 'content_type_engine', 'model_router_active', 'media_pipeline', 'publishing_pipeline'],

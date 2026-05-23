@@ -303,17 +303,25 @@ export async function shieldCheck(
   }
 
   // ═══ 5. First-Person Claim Check ═══
-  const firstPersonMatches = text.match(/\bI\b|\bmy\b|\bme\b/i);
-  if (firstPersonMatches) {
+  // فقط الادعاءات غير الموثقة — الاستخدام العادي مثل "I think" أو "my approach" مسموح
+  const FIRST_PERSON_CLAIM_PATTERNS = [
+    /i (saved|boosted|increased|improved|doubled|reduced|grew|cut|achieved)\b/i,
+    /my (results?|experience|outcome|experiment|test|data|findings?) (show|prove|confirm|suggest|reveal|demonstrate)\b/i,
+    /i (found|discovered|tested|proved|confirmed|measured|verified)\b/i,
+    /i (got|achieved|reached|hit) \d+/i,
+    /my \w+ (increased|improved|grew|doubled|reduced|boosted) (by )?\d+/i
+  ];
+  const hasFirstPersonClaim = FIRST_PERSON_CLAIM_PATTERNS.some(p => p.test(text));
+  if (hasFirstPersonClaim) {
     checks.push({
-      name: 'first_person_claims',
+      name: 'first_person_unverified_claim',
       passed: false,
       severity: 'warn',
-      detail: 'Contains first-person claims (I/my/me) — risky if not backed by real experience'
+      detail: 'Contains first-person claims that may need verification (I saved/improved/achieved... etc)'
     });
-    suggestions.push('Remove first-person claims unless they are genuinely true. Use "this approach" or general framing instead.');
+    suggestions.push('Remove unverified first-person claims. Use general framing like "this approach" or add a source URL.');
   } else {
-    checks.push({ name: 'first_person_claims', passed: true, severity: 'info', detail: 'No first-person claims' });
+    checks.push({ name: 'first_person_claims', passed: true, severity: 'info', detail: 'No unverified first-person claims' });
   }
 
   // ═══ 6. Unsourced Claims Check ═══
@@ -466,7 +474,15 @@ export function quickShieldCheck(text: string, item?: any): { safe: boolean; rea
   if (hasSlopPatterns(text).length) reasons.push('slop_forbidden_patterns');
   if (checkSymmetry(text) && text.split('\n').length >= 3) reasons.push('symmetric_structure');
   if (/#/.test(text)) reasons.push('has_hashtag');
-  if (/\bI\b|\bmy\b|\bme\b/i.test(text)) reasons.push('first_person_claim_risk');
+  // فقط ادعاءات أول شخص غير موثقة — الاستخدام العادي مسموح
+  const FIRST_PERSON_CLAIM_PATTERNS = [
+    /i (saved|boosted|increased|improved|doubled|reduced|grew|cut|achieved)\b/i,
+    /my (results?|experience|outcome|experiment|test|data|findings?) (show|prove|confirm|suggest|reveal|demonstrate)\b/i,
+    /i (found|discovered|tested|proved|confirmed|measured|verified)\b/i,
+    /i (got|achieved|reached|hit) \d+/i,
+    /my \w+ (increased|improved|grew|doubled|reduced|boosted) (by )?\d+/i
+  ];
+  if (FIRST_PERSON_CLAIM_PATTERNS.some(p => p.test(text))) reasons.push('first_person_unverified_claim');
   if (hasUnsourcedClaims(text).length) reasons.push('unsourced_numeric_claims');
   if (!item?.originality_element && !item?.mechanic_used) reasons.push('missing_originality');
 

@@ -127,14 +127,78 @@ export function enrichGrowthOperatorPack(pack: any) {
       after_metrics: ['content_log.views', 'content_log.likes', 'content_log.replies', 'content_log.reposts', 'content_log.bookmarks', 'content_log.performance_score'],
       after_asset: ['github_repos.repo_url', 'github_repos.status', 'content_log.repo_link']
     },
-    next_actions: [
-      'Review content_scores and final_recommendation before publishing.',
-      'Publish the 3 approved tweets manually at the suggested times.',
-      'Use 5 prepared replies on relevant high-signal posts only.',
-      'Post the quote only if the source post is relevant and strong.',
-      githubNeeded ? 'Create or update the GitHub asset described in github_decision.' : 'Do not create a GitHub repo today unless a later content idea requires a public asset.',
-      articleNeeded ? 'Prepare and publish the article described in article_decision.' : 'Do not write a long-form article today; validate the topic with short-form content first.',
-      'Log URLs and metrics in Supabase after publishing.'
-    ]
+    next_actions: buildSmartActions(tweets, replies, quotes, githubNeeded, articleNeeded, pack)
   };
+}
+
+/**
+ * بناء مهام ذكية ديناميكية بدل المهام الثابتة
+ * كل مهمة تحمل بيانات فعلية (أوقات، أعداد، أنواع) بدل نص عام
+ */
+function buildSmartActions(
+  tweets: any[],
+  replies: any[],
+  quotes: any[],
+  githubNeeded: boolean,
+  articleNeeded: boolean,
+  pack: any
+): Array<{ action_type: string; instruction: string; priority: number }> {
+  const actions: Array<{ action_type: string; instruction: string; priority: number }> = [];
+
+  // ═══ مهام النشر ═══
+  if (tweets.length > 0) {
+    const times = tweets.map((t, i) => `${t.best_time_utc || ['13:00','15:00','17:00'][i]}`).join(', ');
+    actions.push({
+      action_type: 'publish',
+      instruction: `Publish ${tweets.length} tweet${tweets.length > 1 ? 's' : ''} at UTC times: ${times}. Copy text from the content pack delivered to Telegram.`,
+      priority: 1
+    });
+  }
+
+  // ═══ مهام التفاعل ═══
+  if (replies.length > 0) {
+    actions.push({
+      action_type: 'engage',
+      instruction: `Use ${replies.length} prepared repl${replies.length > 1 ? 'ies' : 'y'} on high-signal posts. Only reply when the source post matches the reply angle — do not spam.`,
+      priority: 2
+    });
+  }
+
+  if (quotes.length > 0) {
+    actions.push({
+      action_type: 'engage',
+      instruction: `Post ${quotes.length} quote tweet${quotes.length > 1 ? 's' : ''} only if the source post is relevant and adds standalone value.`,
+      priority: 3
+    });
+  }
+
+  // ═══ مهام GitHub ═══
+  if (githubNeeded) {
+    const repoName = pack?.github_decision?.repo_name || '';
+    const assetType = pack?.github_decision?.asset_type || 'asset';
+    actions.push({
+      action_type: 'create_asset',
+      instruction: `Create GitHub ${assetType}${repoName ? `: ${repoName}` : ''} as described in github_decision. This provides proof layer for the content.`,
+      priority: 4
+    });
+  }
+
+  // ═══ مهام المقال ═══
+  if (articleNeeded) {
+    const title = pack?.article_decision?.title || '';
+    actions.push({
+      action_type: 'create_asset',
+      instruction: `Write X Article${title ? `: "${title}"` : ''} as described in article_decision. Validate the topic with short-form content first.`,
+      priority: 5
+    });
+  }
+
+  // ═══ مهمة التسجيل ═══
+  actions.push({
+    action_type: 'log_results',
+    instruction: 'After publishing, run "📊 مسح الأداء" to measure results and update learning memory.',
+    priority: 6
+  });
+
+  return actions;
 }

@@ -24,8 +24,19 @@ const GENERIC_PATTERNS = [
   /use ai to be more productive/i,
   /streamline your workflow/i,
   /share your thoughts/i,
-  /what do you think/i,
   /which feature matters most/i
+];
+
+/**
+ * أنماط أول شخص خطرة — فقط اللي تمثل ادعاءات غير موثقة
+ * الاستخدام العادي مثل "I think" أو "my approach" مسموح
+ */
+const FIRST_PERSON_CLAIM_PATTERNS = [
+  /i (saved|boosted|increased|improved|doubled|reduced|grew|cut|achieved)\b/i,
+  /my (results?|experience|outcome|experiment|test|data|findings?) (show|prove|confirm|suggest|reveal|demonstrate)\b/i,
+  /i (found|discovered|tested|proved|confirmed|measured|verified)\b/i,
+  /i (got|achieved|reached|hit) \d+/i,
+  /my \w+ (increased|improved|grew|doubled|reduced|boosted) (by )?\d+/i
 ];
 
 function hasSource(text: string, item: any) {
@@ -40,7 +51,11 @@ export function evaluateContentQuality(item: any): QualityResult {
   if (!text.trim()) reasons.push('empty_content');
   if (text.length > 240) reasons.push('over_240_chars');
   if (/#/.test(text)) reasons.push('has_hashtag');
-  if (/\bI\b|\bmy\b|\bme\b/i.test(text)) reasons.push('first_person_claim_risk');
+
+  // فحص أول شخص — فقط الأنماط اللي تمثل ادعاءات غير موثقة
+  // الاستخدام العادي مثل "I think" أو "my approach" لا يُرفض
+  const hasFirstPersonClaim = FIRST_PERSON_CLAIM_PATTERNS.some(p => p.test(text));
+  if (hasFirstPersonClaim && !hasSource(text, item)) reasons.push('first_person_unverified_claim');
 
   const claimRisk = UNSOURCED_CLAIM_PATTERNS.some((pattern) => pattern.test(text));
   if (claimRisk && !hasSource(text, item)) reasons.push('claim_needs_source');
