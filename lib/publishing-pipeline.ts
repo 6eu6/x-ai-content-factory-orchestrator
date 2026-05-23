@@ -248,7 +248,7 @@ async function generateMediaForItems(items: PublishableItem[]): Promise<Publisha
         });
 
         // [جديد] حاول توليد صورة فعلية للكاروسيل والتغريدة مع صورة
-        if (item.content_type === 'carousel' || item.content_type === 'single_tweet_with_image') {
+        if (item.content_type === 'carousel' || item.content_type === 'single_tweet') {
           for (const mediaItem of mediaResult.media_items.slice(0, 3)) {
             try {
               const imageResult = await generateAndDeliverImage(
