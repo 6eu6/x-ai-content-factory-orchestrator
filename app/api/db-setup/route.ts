@@ -36,17 +36,25 @@ export async function GET(req: Request) {
 
     const tableStatus: Record<string, { exists: boolean; rows?: number; error?: string }> = {};
 
-    // افحص الجداول المطلوبة
+    // افحص الجداول المطلوبة — حاول select صف واحد بدل count
     for (const table of requiredTables) {
       try {
-        const { count, error } = await supabase
+        const { data, error } = await supabase
           .from(table)
-          .select('*', { count: 'exact', head: true });
-        
+          .select('id')
+          .limit(1);
+
         if (error) {
-          tableStatus[table] = { exists: false, error: error.message };
+          // لو الخطأ يقول الجدول غير موجود
+          const msg = String(error.message || error.code || '').toLowerCase();
+          if (msg.includes('could not find') || msg.includes('does not exist') || msg.includes('pgrst205')) {
+            tableStatus[table] = { exists: false, error: error.message };
+          } else {
+            // خطأ ثاني — الجدول ممكن موجود بس فيه مشكلة
+            tableStatus[table] = { exists: true, error: error.message, rows: 0 };
+          }
         } else {
-          tableStatus[table] = { exists: true, rows: count || 0 };
+          tableStatus[table] = { exists: true, rows: data?.length || 0 };
         }
       } catch (e: any) {
         tableStatus[table] = { exists: false, error: e.message };
@@ -56,12 +64,13 @@ export async function GET(req: Request) {
     // افحص الجداول الموجودة
     for (const table of existingTables) {
       try {
-        const { count, error } = await supabase
+        const { data, error } = await supabase
           .from(table)
-          .select('*', { count: 'exact', head: true });
-        
+          .select('id')
+          .limit(1);
+
         if (!error) {
-          tableStatus[table] = { exists: true, rows: count || 0 };
+          tableStatus[table] = { exists: true, rows: data?.length || 0 };
         }
       } catch {}
     }
