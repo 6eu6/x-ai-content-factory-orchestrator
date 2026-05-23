@@ -1,7 +1,7 @@
 import { assertAuthorized } from '../../../lib/env';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 
-const VERSION = 'repo-validation-run-v1';
+const VERSION = 'repo-validation-run-v1.1-repair-aware';
 
 function asArray(value: any) {
   if (Array.isArray(value)) return value;
@@ -69,13 +69,13 @@ async function run(req: Request) {
     let planQuery = supabase
       .from('repo_build_plans')
       .select('*')
-      .in('status', ['artifacts_ready', 'artifact_needs_review'])
+      .in('status', ['artifacts_ready', 'artifact_needs_review', 'artifact_repaired', 'validation_warning', 'validation_failed'])
       .order('readiness_score', { ascending: false })
       .limit(limit);
     if (planId) planQuery = planQuery.eq('id', planId);
     const { data: plans, error: plansError } = await planQuery;
     if (plansError) throw plansError;
-    if (!plans?.length) return Response.json({ ok: true, version: VERSION, inserted: { validation_runs: 0 }, note: 'No artifact-ready plans found.' });
+    if (!plans?.length) return Response.json({ ok: true, version: VERSION, inserted: { validation_runs: 0 }, note: 'No artifact-ready or repaired plans found.' });
 
     const planIds = plans.map((p: any) => p.id);
     const [artifactsRes, requirementsRes] = await Promise.all([
