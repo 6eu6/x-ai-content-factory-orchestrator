@@ -1,14 +1,8 @@
-import OpenAI from 'openai';
-import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
-import { parseModelJson } from '../../../lib/model-router';
+import { assertAuthorized, optionalEnv } from '../../../lib/env';
+import { callModel, parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 
 const VERSION = 'repo-build-planner-v1';
-
-function client() {
-  const baseURL = optionalEnv('OPENAI_BASE_URL');
-  return new OpenAI({ apiKey: requiredEnv('OPENAI_API_KEY'), baseURL: baseURL || undefined });
-}
 
 function asArray(value: any) {
   if (Array.isArray(value)) return value;
@@ -84,17 +78,11 @@ repoRules=${JSON.stringify(repoRules.data || [])}
 systemLearningRules=${JSON.stringify(learningRules.data || [])}
 productionCards=${JSON.stringify(productionCards.data || [])}`;
 
-    const completion = await client().chat.completions.create({
-      model: optionalEnv('OPENAI_MODEL', 'gpt-4.1-mini'),
-      temperature: 0.05,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: 'Plan small, useful, testable GitHub repositories from approved repo decisions. JSON only.' },
-        { role: 'user', content: prompt }
-      ]
-    });
-
-    const raw = parseModelJson(completion.choices[0]?.message?.content || '');
+    const modelResponse = await callModel('repo_artifact', [
+      { role: 'system', content: 'Plan small, useful, testable GitHub repositories from approved repo decisions. JSON only.' },
+      { role: 'user', content: prompt }
+    ], { temperature: 0.05 });
+    const raw = parseModelJson(modelResponse);
     const plans = asArray(raw.plans).slice(0, limit);
     const insertedPlans: any[] = [];
     let artifactsInserted = 0;

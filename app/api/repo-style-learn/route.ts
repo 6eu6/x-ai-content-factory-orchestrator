@@ -1,14 +1,8 @@
-import OpenAI from 'openai';
-import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
-import { parseModelJson } from '../../../lib/model-router';
+import { assertAuthorized } from '../../../lib/env';
+import { callModel, parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 
 const VERSION = 'repo-style-learn-v1';
-
-function client() {
-  const baseURL = optionalEnv('OPENAI_BASE_URL');
-  return new OpenAI({ apiKey: requiredEnv('OPENAI_API_KEY'), baseURL: baseURL || undefined });
-}
 
 function asArray(value: any) {
   if (Array.isArray(value)) return value;
@@ -59,17 +53,11 @@ Return strict JSON:
 Repos=${JSON.stringify(repos)}
 Files=${JSON.stringify(files || [])}`;
 
-    const completion = await client().chat.completions.create({
-      model: optionalEnv('OPENAI_MODEL', 'gpt-4.1-mini'),
-      temperature: 0.04,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: 'Extract repo style templates. Do not copy source wording. JSON only.' },
-        { role: 'user', content: prompt }
-      ]
-    });
-
-    const raw = parseModelJson(completion.choices[0]?.message?.content || '');
+    const modelResponse = await callModel('learning_extraction', [
+      { role: 'system', content: 'Extract repo style templates. Do not copy source wording. JSON only.' },
+      { role: 'user', content: prompt }
+    ], { temperature: 0.04 });
+    const raw = parseModelJson(modelResponse);
     const templates = asArray(raw.templates).slice(0, 20);
     let inserted = 0;
     for (const template of templates) {

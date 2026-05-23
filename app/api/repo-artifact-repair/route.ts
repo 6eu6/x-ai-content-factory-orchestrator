@@ -1,15 +1,9 @@
-import OpenAI from 'openai';
 import crypto from 'crypto';
-import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
-import { parseModelJson } from '../../../lib/model-router';
+import { assertAuthorized } from '../../../lib/env';
+import { callModel, parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 
 const VERSION = 'repo-artifact-repair-v1';
-
-function client() {
-  const baseURL = optionalEnv('OPENAI_BASE_URL');
-  return new OpenAI({ apiKey: requiredEnv('OPENAI_API_KEY'), baseURL: baseURL || undefined });
-}
 
 function sha(value: string) {
   return crypto.createHash('sha256').update(value || '').digest('hex');
@@ -97,16 +91,11 @@ Specific repair rules:
 - If credential or crypto example is educational, make it safe: inject secrets/config from caller or environment; add clear production warning; avoid hardcoded secrets; avoid presenting random runtime key as production pattern.
 - Preserve useful exported types/classes where possible.
 Return strict JSON: {"path":"...","content":"...","repair_notes":["..."]}`;
-        const completion = await client().chat.completions.create({
-          model: optionalEnv('OPENAI_MODEL', 'gpt-4.1-mini'),
-          temperature: 0.04,
-          response_format: { type: 'json_object' },
-          messages: [
-            { role: 'system', content: 'Repair repository artifact content safely. JSON only.' },
-            { role: 'user', content: prompt }
-          ]
-        });
-        const raw = parseModelJson(completion.choices[0]?.message?.content || '');
+        const modelResponse = await callModel('repo_artifact', [
+          { role: 'system', content: 'Repair repository artifact content safely. JSON only.' },
+          { role: 'user', content: prompt }
+        ], { temperature: 0.04 });
+        const raw = parseModelJson(modelResponse);
         const path = safePath(raw.path || artifact.artifact_path);
         const content = String(raw.content || '').trim();
         if (!path || !content) continue;

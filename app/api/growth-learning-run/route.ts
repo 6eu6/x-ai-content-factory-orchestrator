@@ -1,14 +1,8 @@
-import OpenAI from 'openai';
-import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
-import { parseModelJson } from '../../../lib/model-router';
+import { assertAuthorized, optionalEnv } from '../../../lib/env';
+import { callModel, parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 
 const VERSION = 'growth-learning-run-v1';
-
-function client() {
-  const baseURL = optionalEnv('OPENAI_BASE_URL');
-  return new OpenAI({ apiKey: requiredEnv('OPENAI_API_KEY'), baseURL: baseURL || undefined });
-}
 
 function asArray(value: any) {
   if (Array.isArray(value)) return value;
@@ -75,17 +69,12 @@ McpMap=${JSON.stringify(mcpMap.data || [])}
 RecentProductionCards=${JSON.stringify(productionCards.data || [])}
 OwnedRepos=${JSON.stringify(ownedRepos.data || [])}`;
 
-    const completion = await client().chat.completions.create({
-      model: optionalEnv('OPENAI_MODEL', 'gpt-4.1-mini'),
-      temperature: 0.05,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: 'Create operational growth learning memory and experiments. JSON only.' },
-        { role: 'user', content: prompt }
-      ]
-    });
+    const modelResponse = await callModel('learning_extraction', [
+      { role: 'system', content: 'Create operational growth learning memory and experiments. JSON only.' },
+      { role: 'user', content: prompt }
+    ], { temperature: 0.05 });
 
-    const raw = parseModelJson(completion.choices[0]?.message?.content || '');
+    const raw = parseModelJson(modelResponse);
     const { data: runRow, error: runError } = await supabase.from('growth_learning_runs').insert({
       run_type: 'growth_learning',
       mode,

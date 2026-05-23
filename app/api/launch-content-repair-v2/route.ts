@@ -1,12 +1,10 @@
-import OpenAI from 'openai';
-import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
-import { parseModelJson } from '../../../lib/model-router';
+import { assertAuthorized } from '../../../lib/env';
+import { callModel, parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 
 const VERSION = 'launch-content-repair-v2-json-safe';
 const REPO = 'https://github.com/6eu6/activepieces-piece-builder-v1';
 
-function oa() { return new OpenAI({ apiKey: requiredEnv('OPENAI_API_KEY'), baseURL: optionalEnv('OPENAI_BASE_URL') || undefined }); }
 function a(v: any) { return Array.isArray(v) ? v : !v ? [] : typeof v === 'object' ? Object.values(v) : [v]; }
 function s(v: any) { return String(v || '').replace(/\s+/g, ' ').trim(); }
 function safe(v: any) { return JSON.parse(JSON.stringify(v ?? null)); }
@@ -56,13 +54,8 @@ async function run(req: Request) {
     const repaired: any[] = [];
     for (const card of cards) {
       const prompt = `Rewrite for X. English. No hype. No closing question. Link once. If single: <=245 chars. If thread: exactly 6 tweets <=250 chars. JSON only with production_type, final_text, thread_items, viral_mechanic, original_angle, audience_pain, quality_basis. Repo: ${repo}. Card: ${JSON.stringify(card)}`;
-      const res = await oa().chat.completions.create({
-        model: optionalEnv('OPENAI_MODEL', 'gpt-4.1-mini'),
-        temperature: 0.02,
-        response_format: { type: 'json_object' },
-        messages: [{ role: 'system', content: 'Return JSON only.' }, { role: 'user', content: prompt }]
-      });
-      const raw = parseModelJson(res.choices[0]?.message?.content || '');
+      const modelResponse = await callModel('content_generation', [{ role: 'system', content: 'Return JSON only.' }, { role: 'user', content: prompt }], { temperature: 0.02 });
+      const raw = parseModelJson(modelResponse);
       const type = raw.production_type === 'thread' ? 'thread' : card.production_type;
       const finalText = type === 'single_tweet' ? cut(raw.final_text, 260) : null;
       const items = type === 'thread' ? thread(a(raw.thread_items)) : [];

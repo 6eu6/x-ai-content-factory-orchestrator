@@ -1,13 +1,9 @@
-import OpenAI from 'openai';
-import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
-import { parseModelJson } from '../../../lib/model-router';
+import { assertAuthorized, optionalEnv } from '../../../lib/env';
+import { callModel, parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 
 const VERSION = 'launch-content-repair-strict-v1';
 
-function client() {
-  return new OpenAI({ apiKey: requiredEnv('OPENAI_API_KEY'), baseURL: optionalEnv('OPENAI_BASE_URL') || undefined });
-}
 function arr(v: any) { return Array.isArray(v) ? v : !v ? [] : typeof v === 'object' ? Object.values(v) : [v]; }
 function clean(v: any) { return String(v || '').replace(/\s+/g, ' ').trim(); }
 function trim(v: string, max: number) {
@@ -83,13 +79,8 @@ XRules=${JSON.stringify(alg.data || [])}
 StylePatterns=${JSON.stringify(styles.data || [])}
 ViralPatterns=${JSON.stringify(viral.data || [])}
 Mcp=${JSON.stringify(mcp.data || [])}`;
-      const completion = await client().chat.completions.create({
-        model: optionalEnv('OPENAI_MODEL', 'gpt-4.1-mini'),
-        temperature: 0.03,
-        response_format: { type: 'json_object' },
-        messages: [{ role: 'system', content: 'Return JSON: {production_type, final_text, thread_items, viral_mechanic, original_angle, audience_pain, quality_basis}' }, { role: 'user', content: prompt }]
-      });
-      const raw = parseModelJson(completion.choices[0]?.message?.content || '');
+      const modelResponse = await callModel('content_generation', [{ role: 'system', content: 'Return JSON: {production_type, final_text, thread_items, viral_mechanic, original_angle, audience_pain, quality_basis}' }, { role: 'user', content: prompt }], { temperature: 0.03 });
+      const raw = parseModelJson(modelResponse);
       const type = raw.production_type === 'thread' ? 'thread' : card.production_type;
       const finalText = type === 'single_tweet' ? trim(raw.final_text, 260) : null;
       const threadItems = type === 'thread' ? compress(arr(raw.thread_items).map(clean)) : [];

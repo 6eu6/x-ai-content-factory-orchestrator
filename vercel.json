@@ -1,0 +1,16 @@
+{
+  "crons": [
+    {
+      "path": "/api/daily-run?secret=${ORCHESTRATOR_SECRET}",
+      "schedule": "0 6 * * *"
+    },
+    {
+      "path": "/api/memory-maintenance-run?secret=${ORCHESTRATOR_SECRET}",
+      "schedule": "0 3 * * *"
+    },
+    {
+      "path": "/api/account-performance-scan?secret=${ORCHESTRATOR_SECRET}",
+      "schedule": "0 20 * * *"
+    }
+  ]
+}

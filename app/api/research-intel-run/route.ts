@@ -1,15 +1,9 @@
-import OpenAI from 'openai';
-import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
-import { parseModelJson } from '../../../lib/model-router';
+import { assertAuthorized, optionalEnv } from '../../../lib/env';
+import { callModel, parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 import { webSearch } from '../../../lib/web-search';
 
 const VERSION = 'research-v3-source-bound';
-
-function openaiClient() {
-  const baseURL = optionalEnv('OPENAI_BASE_URL');
-  return new OpenAI({ apiKey: requiredEnv('OPENAI_API_KEY'), baseURL: baseURL || undefined });
-}
 
 function allowedUrls(searchResults: any[]) {
   return new Set(searchResults.flatMap((g) => (g.results || []).map((r: any) => r.url)).filter(Boolean));
@@ -92,17 +86,12 @@ accountState=${JSON.stringify(accountState.data)}
 recentContent=${JSON.stringify(recentContent.data)}
 Return JSON with keys: mode, market_read, viral_patterns, opportunities, recommended_today, github_asset_plan, article_plan, creator_intel_updates, trend_updates, needs_more_research, daily_run_brief, quality_bar.`;
 
-    const completion = await openaiClient().chat.completions.create({
-      model: optionalEnv('OPENAI_MODEL', 'gpt-4.1-mini'),
-      temperature: 0.15,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: 'Produce source-bound research intelligence. Never invent unsupported entities. Every actionable item must include source_urls from the provided search results.' },
-        { role: 'user', content: prompt }
-      ]
-    });
+    const modelResponse = await callModel('research_synthesis', [
+      { role: 'system', content: 'Produce source-bound research intelligence. Never invent unsupported entities. Every actionable item must include source_urls from the provided search results.' },
+      { role: 'user', content: prompt }
+    ], { temperature: 0.15 });
 
-    const rawIntel = parseModelJson(completion.choices[0]?.message?.content || '');
+    const rawIntel = parseModelJson(modelResponse);
     const intel = sourceBoundIntel(rawIntel, searchResults);
 
     if (Array.isArray(intel.trend_updates)) {

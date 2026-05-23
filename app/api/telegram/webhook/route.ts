@@ -153,6 +153,9 @@ export async function POST(req: Request) {
     if (text === '🛡 فحص الحماية') return shieldTest(supabase, chatId);
     if (text === '🔎 اكتشاف تلقائي') return triggerEndpoint(req, chatId, '/api/research-intel-v4');
     if (text === '📦 زحف مستودع') return startFlow(supabase, chatId, 'awaiting_repo_url', 'أرسل رابط مستودع GitHub للتعلم منه.');
+    if (text === '📅 مراجعة أسبوعية') return triggerEndpoint(req, chatId, '/api/weekly-review');
+    if (text === '🧹 صيانة الذاكرة') return triggerEndpoint(req, chatId, '/api/memory-maintenance-run');
+    if (text === '📈 تعلم النمو') return triggerEndpoint(req, chatId, '/api/growth-learning-run');
 
     await reply(chatId, 'لم أفهم الأمر. استخدم الأزرار في لوحة التحكم.');
     return Response.json({ ok: true });
@@ -285,7 +288,11 @@ async function triggerEndpoint(req: Request, chatId: string, path: string) {
   if (path.includes('format-decision')) return reply(chatId, `تم تشغيل محرك القرار.\nقرارات جديدة: ${json.inserted?.length ?? 0}`);
   if (path.includes('production-cycle')) return reply(chatId, `تم إنتاج بطاقات المحتوى.\nالبطاقات: ${json.inserted?.cards ?? 0}\nجاهز للنشر: ${json.inserted?.ready ?? 0}`);
   if (path.includes('viral-account-scan')) return reply(chatId, `تم فحص التعلم.\nالحسابات: ${json.handles?.length ?? 0}\nالمحفوظ: ${json.persisted?.length ?? 0}\nالأخطاء: ${json.errors?.length ?? 0}`);
+  if (path.includes('weekly-review')) return reply(chatId, `تمت المراجعة الأسبوعية.\n${htmlEscape(json.summary || json.version || 'تم بنجاح')}`);
+  if (path.includes('memory-maintenance')) return reply(chatId, `تمت صيانة الذاكرة.\n${htmlEscape(json.summary || json.version || 'تم بنجاح')}`);
+  if (path.includes('growth-learning')) return reply(chatId, `تم تعلم النمو.\nقواعد الخوارزمية: ${json.inserted?.algorithm_rules ?? 0}\nأنماط الأسلوب: ${json.inserted?.style_patterns ?? 0}\nفرص MCP: ${json.inserted?.mcp_opportunities ?? 0}`);
+  if (path.includes('research-intel')) return reply(chatId, `تم الاكتشاف التلقائي.\n${htmlEscape(json.intel?.market_read || json.version || 'تم بنجاح')}`);
   const ready = json.contentPack?.ready_count ?? 0;
   const safe = json.contentPack?.safe_to_publish ? 'نعم' : 'لا';
-  return reply(chatId, `تم تشغيل خطة اليوم.\nجاهز للنشر: ${ready}\nآمن للنشر: ${safe}\nالنسخة: ${htmlEscape(json.orchestrator_version || '-')}`);
+  return reply(chatId, `تم التشغيل.\nجاهز للنشر: ${ready}\nآمن للنشر: ${safe}\nالنسخة: ${htmlEscape(json.orchestrator_version || json.version || '-')}`);
 }

@@ -1,12 +1,9 @@
-import OpenAI from 'openai';
-import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
-import { parseModelJson } from '../../../lib/model-router';
+import { assertAuthorized } from '../../../lib/env';
+import { callModel, parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 
 const VERSION = 'repo-deep-learn-excerpt-v1';
 const DEFAULT_REPO = 'codebreaker77/X-Algo-Breakdown';
-
-function client() { const baseURL = optionalEnv('OPENAI_BASE_URL'); return new OpenAI({ apiKey: requiredEnv('OPENAI_API_KEY'), baseURL: baseURL || undefined }); }
 function clean(v: any, max = 1200) { return String(v || '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max); }
 function arr(v: any) { if (Array.isArray(v)) return v; if (!v) return []; if (typeof v === 'object') return Object.values(v); return [v]; }
 function sc(v: any, f = 7) { const n = Number(v); if (!Number.isFinite(n)) return f; return Math.min(10, Math.max(1, Math.round(n > 0 && n <= 1 ? n * 10 : n))); }
@@ -23,8 +20,8 @@ async function insertIfMissing(supabase: any, table: string, where: Record<strin
 
 async function analyze(input: { repo: string; path: string; text: string }) {
   const prompt = `Deep learn this repository file for @30piq. Extract only useful reusable knowledge. If the file does not teach anything useful, set useful=false. Do not summarize shallowly. Do not copy. Return JSON only with: useful, file_summary, technical_points, content_angles, repo_style_lessons, x_algorithm_rules, style_patterns. Each x_algorithm_rule has rule_type, rule, evidence, applies_to, confidence_score. Each repo_style_lesson has lesson_name, lesson, applies_to. Each style_pattern has pattern_type, pattern_name, pattern_description, why_it_works, risks, adaptation_for_30piq, confidence_score. Repo=${input.repo}. Path=${input.path}. Content=${input.text.slice(0, 12000)}`;
-  const out = await client().chat.completions.create({ model: optionalEnv('OPENAI_MODEL', 'gpt-4.1-mini'), temperature: 0.02, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: 'Deep repo learning. JSON only. Extract rules, mechanisms, templates, and useful facts.' }, { role: 'user', content: prompt }] });
-  return parseModelJson(out.choices[0]?.message?.content || '');
+  const modelResponse = await callModel('deep_analysis', [{ role: 'system', content: 'Deep repo learning. JSON only. Extract rules, mechanisms, templates, and useful facts.' }, { role: 'user', content: prompt }], { temperature: 0.02 });
+  return parseModelJson(modelResponse);
 }
 
 export async function GET(req: Request) { return run(req); }

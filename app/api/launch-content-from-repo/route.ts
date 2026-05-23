@@ -1,14 +1,8 @@
-import OpenAI from 'openai';
-import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
-import { parseModelJson } from '../../../lib/model-router';
+import { assertAuthorized, optionalEnv } from '../../../lib/env';
+import { callModel, parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 
 const VERSION = 'launch-content-from-repo-v1';
-
-function client() {
-  const baseURL = optionalEnv('OPENAI_BASE_URL');
-  return new OpenAI({ apiKey: requiredEnv('OPENAI_API_KEY'), baseURL: baseURL || undefined });
-}
 
 function asArray(value: any) {
   if (Array.isArray(value)) return value;
@@ -97,17 +91,12 @@ ViralPatterns=${JSON.stringify(viralRes.data || [])}
 SystemLearningRules=${JSON.stringify(learningRulesRes.data || [])}
 RecentCards=${JSON.stringify(recentCardsRes.data || [])}`;
 
-    const completion = await client().chat.completions.create({
-      model: optionalEnv('OPENAI_MODEL', 'gpt-4.1-mini'),
-      temperature: 0.12,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: 'Generate practical X launch content for a GitHub repo. JSON only.' },
-        { role: 'user', content: prompt }
-      ]
-    });
+    const modelResponse = await callModel('content_generation', [
+      { role: 'system', content: 'Generate practical X launch content for a GitHub repo. JSON only.' },
+      { role: 'user', content: prompt }
+    ], { temperature: 0.12 });
 
-    const raw = parseModelJson(completion.choices[0]?.message?.content || '');
+    const raw = parseModelJson(modelResponse);
     const single = cleanText(raw.single_post);
     const threadItems = asArray(raw.thread_items).map(cleanText).filter(Boolean);
     const singleQuality = qualitySingle(single);

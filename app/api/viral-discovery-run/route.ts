@@ -1,16 +1,10 @@
-import OpenAI from 'openai';
-import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
-import { parseModelJson } from '../../../lib/model-router';
+import { assertAuthorized, optionalEnv } from '../../../lib/env';
+import { callModel, parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 import { webSearch } from '../../../lib/web-search';
 import { learnFromCrawlerItems, toArray } from '../../../lib/learning-memory';
 
 const VERSION = 'viral-discovery-v1-autonomous';
-
-function client() {
-  const baseURL = optionalEnv('OPENAI_BASE_URL');
-  return new OpenAI({ apiKey: requiredEnv('OPENAI_API_KEY'), baseURL: baseURL || undefined });
-}
 
 async function searchXRecent(query: string) {
   const token = optionalEnv('X_BEARER_TOKEN');
@@ -86,17 +80,12 @@ Return JSON with keys:
   "next_actions":["..."]
 }`;
 
-    const completion = await client().chat.completions.create({
-      model: optionalEnv('OPENAI_MODEL', 'gpt-4.1-mini'),
-      temperature: 0.2,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: 'Analyze viral mechanics using only provided data. Do not invent missing tweet text, metrics, creators, or URLs.' },
-        { role: 'user', content: prompt }
-      ]
-    });
+    const modelResponse = await callModel('learning_extraction', [
+      { role: 'system', content: 'Analyze viral mechanics using only provided data. Do not invent missing tweet text, metrics, creators, or URLs.' },
+      { role: 'user', content: prompt }
+    ], { temperature: 0.2 });
 
-    const intel = parseModelJson(completion.choices[0]?.message?.content || '');
+    const intel = parseModelJson(modelResponse);
 
     if (Array.isArray(intel.viral_patterns)) {
       await supabase.from('creator_intel').insert(intel.viral_patterns.slice(0, 10).map((p: any) => ({

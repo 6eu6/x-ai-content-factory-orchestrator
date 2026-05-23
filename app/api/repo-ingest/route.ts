@@ -1,14 +1,8 @@
-import OpenAI from 'openai';
-import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
-import { parseModelJson } from '../../../lib/model-router';
+import { assertAuthorized, optionalEnv } from '../../../lib/env';
+import { callModel, parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 
 const VERSION = 'repo-ingest-v1.1-persisted';
-
-function ai() {
-  const baseURL = optionalEnv('OPENAI_BASE_URL');
-  return new OpenAI({ apiKey: requiredEnv('OPENAI_API_KEY'), baseURL: baseURL || undefined });
-}
 
 function repoName(input: string) {
   const raw = String(input || '').trim();
@@ -135,13 +129,11 @@ Repo URL: ${meta.html_url}
 Repo meta: ${JSON.stringify({ full: r.full, stars: meta.stargazers_count, language: meta.language, description: meta.description })}
 Docs: ${JSON.stringify(docs)}`;
 
-    const out = await ai().chat.completions.create({
-      model: optionalEnv('OPENAI_MODEL', 'gpt-4.1-mini'),
-      temperature: 0.06,
-      response_format: { type: 'json_object' },
-      messages: [{ role: 'system', content: 'Analyze repos for learning, content opportunities, testing plans, and maintenance plans. JSON only.' }, { role: 'user', content: prompt }]
-    });
-    const intel = parseModelJson(out.choices[0]?.message?.content || '');
+    const modelResponse = await callModel('deep_analysis', [
+      { role: 'system', content: 'Analyze repos for learning, content opportunities, testing plans, and maintenance plans. JSON only.' },
+      { role: 'user', content: prompt }
+    ], { temperature: 0.06 });
+    const intel = parseModelJson(modelResponse);
     const scores = intel.scores || {};
     await supabase.from('repo_sources').update({
       technical_depth_score: scoreFromObject(scores, ['technical_depth_score', 'content_depth', 'learning_potential'], 7),

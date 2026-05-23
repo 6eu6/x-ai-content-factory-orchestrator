@@ -1,15 +1,9 @@
-import OpenAI from 'openai';
-import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
-import { parseModelJson } from '../../../lib/model-router';
+import { assertAuthorized, optionalEnv } from '../../../lib/env';
+import { callModel, parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 
 const VERSION = 'repo-deep-learn-v1';
 const DEFAULT_REPO = 'codebreaker77/X-Algo-Breakdown';
-
-function client() {
-  const baseURL = optionalEnv('OPENAI_BASE_URL');
-  return new OpenAI({ apiKey: requiredEnv('OPENAI_API_KEY'), baseURL: baseURL || undefined });
-}
 
 function clean(value: any, max = 1200) {
   return String(value || '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
@@ -105,16 +99,11 @@ Return JSON only:
 Repo=${input.repo}
 Path=${input.path}
 Content=${input.text.slice(0, 16000)}`;
-  const out = await client().chat.completions.create({
-    model: optionalEnv('OPENAI_MODEL', 'gpt-4.1-mini'),
-    temperature: 0.02,
-    response_format: { type: 'json_object' },
-    messages: [
-      { role: 'system', content: 'Extract deep reusable repo learning. JSON only. No shallow source-title memories.' },
-      { role: 'user', content: prompt }
-    ]
-  });
-  return parseModelJson(out.choices[0]?.message?.content || '');
+  const modelResponse = await callModel('deep_analysis', [
+    { role: 'system', content: 'Extract deep reusable repo learning. JSON only. No shallow source-title memories.' },
+    { role: 'user', content: prompt }
+  ], { temperature: 0.02 });
+  return parseModelJson(modelResponse);
 }
 
 export async function GET(req: Request) { return run(req); }

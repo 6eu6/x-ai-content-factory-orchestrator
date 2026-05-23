@@ -1,16 +1,10 @@
-import OpenAI from 'openai';
-import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
-import { parseModelJson } from '../../../lib/model-router';
+import { assertAuthorized, optionalEnv } from '../../../lib/env';
+import { callModel, parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 
 const VERSION = 'learning-reflection-run-v1';
 
 type AnyRecord = Record<string, any>;
-
-function client() {
-  const baseURL = optionalEnv('OPENAI_BASE_URL');
-  return new OpenAI({ apiKey: requiredEnv('OPENAI_API_KEY'), baseURL: baseURL || undefined });
-}
 
 function asArray(value: any) {
   if (Array.isArray(value)) return value;
@@ -113,17 +107,12 @@ formatDecisions=${JSON.stringify(formatDecisions.data || [])}
 discoverySources=${JSON.stringify(discoverySources.data || [])}
 recentLogs=${JSON.stringify(recentLogs.data || [])}`;
 
-    const completion = await client().chat.completions.create({
-      model: optionalEnv('OPENAI_MODEL', 'gpt-4.1-mini'),
-      temperature: 0.04,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: 'Produce operational self-improvement memory for the content factory. Return JSON only.' },
-        { role: 'user', content: prompt }
-      ]
-    });
+    const modelResponse = await callModel('learning_extraction', [
+      { role: 'system', content: 'Produce operational self-improvement memory for the content factory. Return JSON only.' },
+      { role: 'user', content: prompt }
+    ], { temperature: 0.04 });
 
-    const reflection = parseModelJson(completion.choices[0]?.message?.content || '');
+    const reflection = parseModelJson(modelResponse);
     const { data: reflectionRow, error: reflectionError } = await supabase.from('system_reflections').insert({
       reflection_type: 'learning_reflection',
       status: 'completed',

@@ -1,15 +1,9 @@
-import OpenAI from 'openai';
 import crypto from 'crypto';
-import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
-import { parseModelJson } from '../../../lib/model-router';
+import { assertAuthorized } from '../../../lib/env';
+import { callModel, parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 
 const VERSION = 'repo-artifact-writer-v1.2-style-aware';
-
-function client() {
-  const baseURL = optionalEnv('OPENAI_BASE_URL');
-  return new OpenAI({ apiKey: requiredEnv('OPENAI_API_KEY'), baseURL: baseURL || undefined });
-}
 
 function asArray(value: any) {
   if (Array.isArray(value)) return value;
@@ -172,17 +166,11 @@ ExistingArtifacts=${JSON.stringify(existingArtifacts.data || [])}
 RepoRules=${JSON.stringify(repoRules.data || [])}
 SystemLearningRules=${JSON.stringify(learningRules.data || [])}`;
 
-      const completion = await client().chat.completions.create({
-        model: optionalEnv('OPENAI_MODEL', 'gpt-4.1-mini'),
-        temperature: 0.07,
-        response_format: { type: 'json_object' },
-        messages: [
-          { role: 'system', content: 'Generate complete repository artifact files from dynamic requirements and style templates. Return JSON only.' },
-          { role: 'user', content: prompt }
-        ]
-      });
-
-      const raw = parseModelJson(completion.choices[0]?.message?.content || '');
+      const modelResponse = await callModel('repo_artifact', [
+        { role: 'system', content: 'Generate complete repository artifact files from dynamic requirements and style templates. Return JSON only.' },
+        { role: 'user', content: prompt }
+      ], { temperature: 0.07 });
+      const raw = parseModelJson(modelResponse);
       const artifacts = asArray(raw.artifacts).slice(0, 40);
       let readyArtifacts = 0;
       for (const artifact of artifacts) {
