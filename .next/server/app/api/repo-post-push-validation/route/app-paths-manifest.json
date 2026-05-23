@@ -1,0 +1,3 @@
+{
+  "/api/repo-post-push-validation/route": "app/api/repo-post-push-validation/route.js"
+}

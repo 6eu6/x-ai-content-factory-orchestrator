@@ -2,6 +2,7 @@ import OpenAI from 'openai';
 import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 import { webSearch } from '../../../lib/web-search';
+import { learnFromCrawlerItems, toArray } from '../../../lib/learning-memory';
 
 const VERSION = 'viral-discovery-v1-autonomous';
 
@@ -118,14 +119,146 @@ Return JSON with keys:
       })));
     }
 
+    // --- Normalize viral discovery intel for learning-memory ---
+    const crawlerItems: any[] = [];
+
+    // Viral patterns: hook mechanics, engagement drivers, adaptation
+    for (const vp of toArray(intel.viral_patterns)) {
+      crawlerItems.push({
+        title: vp.pattern || vp.hook_style || 'viral_pattern',
+        url: toArray(vp.source_urls)[0] || '',
+        summary: [
+          vp.pattern ? `Pattern: ${vp.pattern}` : '',
+          vp.mechanism ? `Mechanism: ${vp.mechanism}` : '',
+          vp.why_people_engage ? `Engage reason: ${vp.why_people_engage}` : '',
+          vp.risk ? `Risk: ${vp.risk}` : '',
+          vp.adaptation_for_30piq ? `Adapt: ${vp.adaptation_for_30piq}` : ''
+        ].filter(Boolean).join(' | '),
+        confidence_score: vp.confidence_score || 8,
+        source_type: 'viral_pattern',
+        mechanism: vp.mechanism || vp.pattern || ''
+      });
+    }
+
+    // Reply opportunities: reply triggers and angles
+    for (const ro of toArray(intel.reply_opportunities)) {
+      crawlerItems.push({
+        title: ro.reply_angle || ro.target_text_summary || 'reply_opportunity',
+        url: ro.target_url || toArray(ro.source_urls)[0] || '',
+        summary: [
+          ro.reply_angle ? `Angle: ${ro.reply_angle}` : '',
+          ro.why_reply ? `Why: ${ro.why_reply}` : '',
+          ro.prepared_reply ? `Reply: ${String(ro.prepared_reply).slice(0, 200)}` : ''
+        ].filter(Boolean).join(' | '),
+        confidence_score: 7,
+        source_type: 'reply_opportunity',
+        mechanism: ro.why_reply || ro.reply_angle || ''
+      });
+    }
+
+    // Quote opportunities: quote triggers and angles
+    for (const qo of toArray(intel.quote_opportunities)) {
+      crawlerItems.push({
+        title: qo.quote_angle || 'quote_opportunity',
+        url: qo.target_url || toArray(qo.source_urls)[0] || '',
+        summary: [
+          qo.quote_angle ? `Angle: ${qo.quote_angle}` : '',
+          qo.why_quote ? `Why: ${qo.why_quote}` : '',
+          qo.prepared_quote ? `Quote: ${String(qo.prepared_quote).slice(0, 200)}` : ''
+        ].filter(Boolean).join(' | '),
+        confidence_score: 7,
+        source_type: 'quote_opportunity',
+        mechanism: qo.why_quote || qo.quote_angle || ''
+      });
+    }
+
+    // Original post opportunities: hooks, mechanisms, why it can spread
+    for (const op of toArray(intel.original_post_opportunities)) {
+      crawlerItems.push({
+        title: op.hook || op.mechanism_used || 'original_post_opportunity',
+        url: toArray(op.source_urls)[0] || '',
+        summary: [
+          op.hook ? `Hook: ${op.hook}` : '',
+          op.mechanism_used ? `Mechanism: ${op.mechanism_used}` : '',
+          op.why_it_can_spread ? `Spread reason: ${op.why_it_can_spread}` : '',
+          op.post_text ? `Text: ${String(op.post_text).slice(0, 200)}` : '',
+          op.risk_score ? `Risk: ${op.risk_score}/10` : ''
+        ].filter(Boolean).join(' | '),
+        confidence_score: Math.max(1, 10 - (op.risk_score || 3)),
+        source_type: 'original_post_opportunity',
+        mechanism: op.mechanism_used || op.why_it_can_spread || ''
+      });
+    }
+
+    // Repo opportunities: proof asset angles
+    for (const rp of toArray(intel.repo_opportunities)) {
+      if (!rp.needed) continue;
+      crawlerItems.push({
+        title: rp.repo_name || rp.problem_solved || 'repo_opportunity',
+        url: toArray(rp.source_urls)[0] || '',
+        summary: [
+          rp.problem_solved ? `Problem: ${rp.problem_solved}` : '',
+          rp.asset_type ? `Asset: ${rp.asset_type}` : '',
+          rp.readme_outline ? `Outline: ${String(rp.readme_outline).slice(0, 200)}` : ''
+        ].filter(Boolean).join(' | '),
+        confidence_score: 7,
+        source_type: 'repo_opportunity',
+        mechanism: rp.problem_solved || rp.asset_type || ''
+      });
+    }
+
+    // Article opportunities: research-to-operator angles
+    for (const ap of toArray(intel.article_opportunities)) {
+      if (!ap.needed) continue;
+      crawlerItems.push({
+        title: ap.title || ap.angle || 'article_opportunity',
+        url: toArray(ap.source_urls)[0] || '',
+        summary: [
+          ap.angle ? `Angle: ${ap.angle}` : '',
+          ap.outline ? `Outline: ${String(ap.outline).slice(0, 200)}` : ''
+        ].filter(Boolean).join(' | '),
+        confidence_score: 7,
+        source_type: 'article_opportunity',
+        mechanism: ap.angle || ''
+      });
+    }
+
+    // Operator rules for daily-run (behavioral rules)
+    for (const rule of toArray(intel.operator_rules_for_daily_run)) {
+      const ruleStr = String(rule || '').slice(0, 300);
+      if (!ruleStr) continue;
+      crawlerItems.push({
+        title: `Operator rule: ${ruleStr.slice(0, 80)}`,
+        url: '',
+        summary: ruleStr,
+        confidence_score: 8,
+        source_type: 'operator_rule',
+        mechanism: ruleStr
+      });
+    }
+
+    let learningMemoryResult: any = null;
+    if (crawlerItems.length > 0) {
+      try {
+        learningMemoryResult = await learnFromCrawlerItems(supabase, {
+          runType: 'viral_discovery',
+          source: 'viral_discovery_autonomous',
+          items: crawlerItems,
+          mode: url.searchParams.get('mode') || 'trial'
+        });
+      } catch (learnErr: any) {
+        // Don't fail the whole endpoint if learning fails
+      }
+    }
+
     const log = await insertSessionLog({
-      actions_completed: ['viral_discovery_run', VERSION],
+      actions_completed: ['viral_discovery_run', VERSION, learningMemoryResult ? `learning_memory:${learningMemoryResult.algorithmRules}algo+${learningMemoryResult.stylePatterns}style+${learningMemoryResult.mcpOpportunities}mcp` : 'learning_memory:skipped'],
       decisions_made: [intel.market_pulse || '', ...(intel.operator_rules_for_daily_run || [])],
       pending_tasks: intel.next_actions || [],
       next_recommendation: 'Run daily-run after viral discovery so content uses current viral mechanics.'
     });
 
-    return Response.json({ ok: true, version: VERSION, xResults, webResults, rankedTweets: tweets, intel, sessionLog: log });
+    return Response.json({ ok: true, version: VERSION, xResults, webResults, rankedTweets: tweets, intel, learningMemory: learningMemoryResult ? { algorithmRules: learningMemoryResult.algorithmRules, stylePatterns: learningMemoryResult.stylePatterns, mcpOpportunities: learningMemoryResult.mcpOpportunities, rejectedLowQuality: learningMemoryResult.rejectedLowQuality, runId: learningMemoryResult.run?.id } : null, sessionLog: log });
   } catch (err: any) {
     return Response.json({ ok: false, version: VERSION, error: err.message }, { status: 500 });
   }

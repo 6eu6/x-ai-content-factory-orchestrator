@@ -3,6 +3,7 @@ import { createHash } from 'crypto';
 import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 import { getXUserAndTimeline, analyzeXTweet } from '../../../lib/x';
+import { learnFromCrawlerItems, toArray } from '../../../lib/learning-memory';
 
 const VERSION = 'viral-account-scan-v5-deep-memory';
 
@@ -265,8 +266,156 @@ errors=${JSON.stringify(errors)}`;
     ];
     if (trendRows.length) await supabase.from('trends').insert(trendRows);
 
-    const log = await insertSessionLog({ actions_completed: ['viral_account_scan', VERSION, 'deep_tweet_analysis_saved', 'viral_memory_tables_updated'], decisions_made: [intel.today_content_brief || {}, { persisted }], pending_tasks: [...intel.post_rules, ...intel.reply_rules, ...intel.quote_rules].slice(0, 20), next_recommendation: 'Run daily-run so final content uses fresh viral memory tables.' });
-    return Response.json({ ok: true, version: VERSION, budget, handles, cachedResults, errors, scanResults, intel, persisted, sessionLog: log });
+    // --- Normalize scan results + deep intel for learning-memory ---
+    const crawlerItems: any[] = [];
+
+    // From scanResults: each analyzed tweet's hook, format, timing, engagement mechanics
+    for (const scanResult of scanResults) {
+      const handle = cleanHandle(scanResult.creator_handle || scanResult.user?.username);
+      for (const tweet of (scanResult.top_tweets || [])) {
+        crawlerItems.push({
+          title: tweet.hook_formula || tweet.format_pattern || `@${handle} viral tweet`,
+          url: tweet.tweet_url || '',
+          summary: [
+            tweet.hook_formula ? `Hook: ${tweet.hook_formula}` : '',
+            tweet.claim_type ? `Claim: ${tweet.claim_type}` : '',
+            tweet.tone ? `Tone: ${tweet.tone}` : '',
+            tweet.format_pattern ? `Format: ${tweet.format_pattern}` : '',
+            tweet.why_replies ? `Reply trigger: ${tweet.why_replies}` : '',
+            tweet.why_quotes ? `Quote trigger: ${tweet.why_quotes}` : '',
+            tweet.why_bookmarks ? `Bookmark trigger: ${tweet.why_bookmarks}` : '',
+            tweet.why_views ? `View driver: ${tweet.why_views}` : '',
+            tweet.audience_pain ? `Pain: ${tweet.audience_pain}` : '',
+            tweet.adaptation_for_30piq ? `Adapt: ${tweet.adaptation_for_30piq}` : '',
+            `Engagement/1k: ${tweet.engagement_per_1k_followers || 'N/A'}`
+          ].filter(Boolean).join(' | '),
+          confidence_score: Math.min(10, Math.max(1, Math.round((tweet.engagement_per_1k_followers || 0) / 5))),
+          source_type: 'viral_tweet',
+          mechanism: tweet.hook_formula || tweet.format_pattern || ''
+        });
+      }
+    }
+
+    // From deep intel: account analyses with rules and patterns
+    for (const account of intel.account_analyses) {
+      const ah = analysisHandle(account);
+
+      // Tweet-level deep analyses (hook, format, timing mechanics)
+      for (const ta of asArray(account.tweet_analyses)) {
+        crawlerItems.push({
+          title: ta.hook_formula || ta.format_pattern || `@${ah} deep analysis`,
+          url: ta.tweet_url || '',
+          summary: [
+            ta.hook_formula ? `Hook: ${ta.hook_formula}` : '',
+            ta.claim_type ? `Claim: ${ta.claim_type}` : '',
+            ta.tone ? `Tone: ${ta.tone}` : '',
+            ta.format_pattern ? `Format: ${ta.format_pattern}` : '',
+            ta.timing_pattern ? `Timing: ${ta.timing_pattern}` : '',
+            ta.audience_pain ? `Pain: ${ta.audience_pain}` : '',
+            ta.why_replies ? `Reply trigger: ${ta.why_replies}` : '',
+            ta.why_quotes ? `Quote trigger: ${ta.why_quotes}` : '',
+            ta.why_bookmarks ? `Bookmark trigger: ${ta.why_bookmarks}` : '',
+            ta.adaptation_for_30piq ? `Adapt: ${ta.adaptation_for_30piq}` : '',
+            ta.originality_risk ? `Risk: ${ta.originality_risk}` : ''
+          ].filter(Boolean).join(' | '),
+          confidence_score: 8,
+          source_type: 'deep_tweet_analysis',
+          mechanism: ta.hook_formula || ta.format_pattern || ta.timing_pattern || ''
+        });
+      }
+
+      // Account-level rules (publish, reply, quote, bookmark, timing, avoid)
+      for (const rule of [...asArray(account.publish_rules), ...asArray(account.reply_rules), ...asArray(account.quote_rules), ...asArray(account.bookmark_rules), ...asArray(account.timing_patterns), ...asArray(account.avoid_rules)]) {
+        const ruleText = textFrom(rule, ['rule', 'pattern', 'formula']) || String(rule || '').slice(0, 200);
+        if (!ruleText || ruleText === '[object Object]') continue;
+        const ruleType = asArray(account.publish_rules).includes(rule) ? 'publish_rule' :
+                         asArray(account.reply_rules).includes(rule) ? 'reply_rule' :
+                         asArray(account.quote_rules).includes(rule) ? 'quote_rule' :
+                         asArray(account.bookmark_rules).includes(rule) ? 'bookmark_rule' :
+                         asArray(account.timing_patterns).includes(rule) ? 'timing_pattern' : 'avoid_rule';
+        crawlerItems.push({
+          title: `@${ah} ${ruleType}: ${ruleText.slice(0, 80)}`,
+          url: '',
+          summary: [
+            ruleText,
+            textFrom(rule, ['evidence', 'why', 'mechanism']) || '',
+            textFrom(rule, ['apply_to_30piq', 'adaptation_for_30piq', 'adaptation']) ? `Adapt: ${textFrom(rule, ['apply_to_30piq', 'adaptation_for_30piq', 'adaptation'])}` : ''
+          ].filter(Boolean).join(' | '),
+          confidence_score: Number(rule.confidence_score || rule.confidence || 7),
+          source_type: ruleType,
+          mechanism: textFrom(rule, ['mechanism', 'why', 'evidence']) || ruleText
+        });
+      }
+
+      // Winner vs Loser comparison
+      if (account.winner_vs_loser && typeof account.winner_vs_loser === 'object') {
+        const wvl = account.winner_vs_loser;
+        crawlerItems.push({
+          title: `@${ah} winner vs loser: ${textFrom(wvl, ['key_difference', 'insight', 'summary']).slice(0, 80)}`,
+          url: '',
+          summary: [
+            textFrom(wvl, ['key_difference', 'insight', 'summary']),
+            textFrom(wvl, ['winner_why', 'why_winner_worked']),
+            textFrom(wvl, ['loser_why', 'why_loser_failed']),
+            textFrom(wvl, ['adaptation', 'adaptation_for_30piq'])
+          ].filter(Boolean).join(' | '),
+          confidence_score: 9,
+          source_type: 'winner_vs_loser',
+          mechanism: textFrom(wvl, ['key_difference', 'insight']) || ''
+        });
+      }
+    }
+
+    // Cross-account patterns (most powerful — apply across niches)
+    for (const cap of intel.cross_account_patterns) {
+      crawlerItems.push({
+        title: `Cross-account: ${textFrom(cap, ['pattern', 'rule', 'pattern_type']).slice(0, 80)}`,
+        url: '',
+        summary: [
+          textFrom(cap, ['pattern', 'rule', 'pattern_type']),
+          textFrom(cap, ['mechanism', 'evidence', 'why']),
+          textFrom(cap, ['apply_to_30piq', 'adaptation_for_30piq', 'adaptation'])
+        ].filter(Boolean).join(' | '),
+        confidence_score: Number(cap.confidence_score || cap.confidence || 8),
+        source_type: 'cross_account_pattern',
+        mechanism: textFrom(cap, ['mechanism', 'evidence', 'why']) || textFrom(cap, ['pattern', 'rule'])
+      });
+    }
+
+    // Global timing, post, reply, quote, bookmark rules
+    for (const rule of [...intel.timing_rules, ...intel.post_rules, ...intel.reply_rules, ...intel.quote_rules, ...intel.bookmark_rules]) {
+      const ruleText = textFrom(rule, ['rule', 'pattern', 'formula']) || String(rule || '').slice(0, 200);
+      if (!ruleText || ruleText === '[object Object]') continue;
+      crawlerItems.push({
+        title: `Global rule: ${ruleText.slice(0, 80)}`,
+        url: '',
+        summary: [
+          ruleText,
+          textFrom(rule, ['evidence', 'why', 'mechanism']) || '',
+          textFrom(rule, ['apply_to_30piq', 'adaptation']) ? `Adapt: ${textFrom(rule, ['apply_to_30piq', 'adaptation'])}` : ''
+        ].filter(Boolean).join(' | '),
+        confidence_score: Number(rule.confidence_score || rule.confidence || 8),
+        source_type: 'global_viral_rule',
+        mechanism: textFrom(rule, ['mechanism', 'why', 'evidence']) || ruleText
+      });
+    }
+
+    let learningMemoryResult: any = null;
+    if (crawlerItems.length > 0) {
+      try {
+        learningMemoryResult = await learnFromCrawlerItems(supabase, {
+          runType: 'viral_account_scan',
+          source: `viral_scan:${handles.join(',')}`,
+          items: crawlerItems,
+          mode: url.searchParams.get('mode') || 'trial'
+        });
+      } catch (learnErr: any) {
+        errors.push({ handle: 'learning_memory', error: learnErr.message });
+      }
+    }
+
+    const log = await insertSessionLog({ actions_completed: ['viral_account_scan', VERSION, 'deep_tweet_analysis_saved', 'viral_memory_tables_updated', learningMemoryResult ? `learning_memory:${learningMemoryResult.algorithmRules}algo+${learningMemoryResult.stylePatterns}style+${learningMemoryResult.mcpOpportunities}mcp` : 'learning_memory:skipped'], decisions_made: [intel.today_content_brief || {}, { persisted }], pending_tasks: [...intel.post_rules, ...intel.reply_rules, ...intel.quote_rules].slice(0, 20), next_recommendation: 'Run daily-run so final content uses fresh viral memory tables.' });
+    return Response.json({ ok: true, version: VERSION, budget, handles, cachedResults, errors, scanResults, intel, persisted, learningMemory: learningMemoryResult ? { algorithmRules: learningMemoryResult.algorithmRules, stylePatterns: learningMemoryResult.stylePatterns, mcpOpportunities: learningMemoryResult.mcpOpportunities, rejectedLowQuality: learningMemoryResult.rejectedLowQuality, runId: learningMemoryResult.run?.id } : null, sessionLog: log });
   } catch (err: any) {
     return Response.json({ ok: false, version: VERSION, error: err.message }, { status: 500 });
   }
