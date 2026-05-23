@@ -27,14 +27,47 @@ function score(value: any, fallback = 7) {
   return Math.min(10, Math.max(1, Math.round(n > 0 && n <= 1 ? n * 10 : n)));
 }
 
-function rawUrl(repo: string, path: string) {
-  return `https://raw.githubusercontent.com/${repo}/main/${path}`;
+function ghHeaders() {
+  const token = optionalEnv('GITHUB_TOKEN');
+  return {
+    accept: 'application/vnd.github+json',
+    'user-agent': 'x-ai-content-factory-orchestrator',
+    ...(token ? { authorization: `Bearer ${token}` } : {})
+  };
 }
 
-async function fetchRaw(repo: string, path: string) {
-  const res = await fetch(rawUrl(repo, path), { headers: { 'user-agent': 'x-ai-content-factory-orchestrator' }, cache: 'no-store' });
-  if (!res.ok) throw new Error(`fetch failed ${res.status} for ${path}`);
-  return await res.text();
+async function getDefaultBranch(repo: string): Promise<string> {
+  try {
+    const res = await fetch(`https://api.github.com/repos/${repo}`, {
+      headers: ghHeaders(),
+      cache: 'no-store'
+    });
+    if (!res.ok) return 'main';
+    const json = await res.json();
+    return json.default_branch || 'main';
+  } catch {
+    return 'main';
+  }
+}
+
+function rawUrl(repo: string, branch: string, path: string) {
+  return `https://raw.githubusercontent.com/${repo}/${branch}/${path}`;
+}
+
+async function fetchRaw(repo: string, branch: string, path: string): Promise<{ text: string; branch: string }> {
+  const candidates = Array.from(new Set([branch, 'main', 'master']));
+  let lastStatus = '';
+  for (const candidate of candidates) {
+    const res = await fetch(rawUrl(repo, candidate, path), {
+      headers: { 'user-agent': 'x-ai-content-factory-orchestrator' },
+      cache: 'no-store'
+    });
+    if (res.ok) {
+      return { text: await res.text(), branch: candidate };
+    }
+    lastStatus = `${res.status} on ${candidate}`;
+  }
+  throw new Error(`fetch failed ${lastStatus} for ${path}`);
 }
 
 async function insertIfMissing(supabase: any, table: string, where: Record<string, any>, payload: Record<string, any>) {
@@ -100,6 +133,8 @@ async function run(req: Request) {
     if (source.error) throw source.error;
     if (!source.data) throw new Error(`repo source not found: ${repo}`);
 
+    const defaultBranch = url.searchParams.get('branch') || await getDefaultBranch(repo);
+
     const filesRes = await supabase.from('repo_source_files').select('*').eq('repo_source_id', source.data.id).order('path', { ascending: true });
     if (filesRes.error) throw filesRes.error;
     const files = (filesRes.data || []).filter((f: any) => force || f.analysis_status !== 'deep_learned').slice(0, limit);
@@ -110,10 +145,17 @@ async function run(req: Request) {
     let stylePatterns = 0;
     let repoRules = 0;
     const learned: any[] = [];
+    let usedBranch = defaultBranch;
 
     for (const file of files) {
       let text = '';
-      try { text = await fetchRaw(repo, file.path); } catch (e: any) {
+      let fetchedBranch = defaultBranch;
+      try {
+        const fetched = await fetchRaw(repo, defaultBranch, file.path);
+        text = fetched.text;
+        fetchedBranch = fetched.branch;
+        usedBranch = fetchedBranch;
+      } catch (e: any) {
         await supabase.from('repo_source_files').update({ analysis_status: 'fetch_failed', extracted_summary: clean(e.message, 500), updated_at: new Date().toISOString() }).eq('id', file.id);
         filesSkipped++;
         continue;
@@ -132,7 +174,7 @@ async function run(req: Request) {
 
       if (!useful) { filesSkipped++; continue; }
       filesLearned++;
-      const sourceUrl = `https://github.com/${repo}/blob/main/${file.path}`;
+      const sourceUrl = `https://github.com/${repo}/blob/${fetchedBranch}/${file.path}`;
 
       for (const item of arr(result.x_algorithm_rules).slice(0, 10)) {
         const ruleType = clean(item.rule_type || 'general', 120);
@@ -204,7 +246,7 @@ async function run(req: Request) {
       run_type: 'repo_deep_learn',
       mode,
       summary,
-      evidence: { repo, repo_source_id: source.data.id, learned, counts: { filesLearned, filesSkipped, algorithmRules, stylePatterns, repoRules } },
+      evidence: { repo, default_branch: usedBranch, repo_source_id: source.data.id, learned, counts: { filesLearned, filesSkipped, algorithmRules, stylePatterns, repoRules } },
       status: 'completed',
       test_run: mode !== 'production',
       updated_at: new Date().toISOString()
@@ -218,7 +260,7 @@ async function run(req: Request) {
       next_recommendation: 'Continue repo-deep-learn until all useful files are deep_learned.'
     });
 
-    return Response.json({ ok: true, version: VERSION, repo, run_id: runRow.data.id, summary, counts: { filesLearned, filesSkipped, algorithmRules, stylePatterns, repoRules }, learned, sessionLog: log });
+    return Response.json({ ok: true, version: VERSION, repo, default_branch: usedBranch, run_id: runRow.data.id, summary, counts: { filesLearned, filesSkipped, algorithmRules, stylePatterns, repoRules }, learned, sessionLog: log });
   } catch (err: any) {
     return Response.json({ ok: false, version: VERSION, error: err.message }, { status: 500 });
   }
