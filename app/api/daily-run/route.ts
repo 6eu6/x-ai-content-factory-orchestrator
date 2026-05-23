@@ -6,8 +6,9 @@ import { GROWTH_OPERATOR_VERSION, enrichGrowthOperatorPack } from '../../../lib/
 import { evaluateContentQuality } from '../../../lib/quality';
 import { shieldCheck } from '../../../lib/account-shield';
 import { planDailyContent, generateContentByType, ContentType } from '../../../lib/content-type-engine';
+import { prepareAndDeliverDailyPack } from '../../../lib/publishing-pipeline';
 
-const ORCHESTRATOR_VERSION = `${GROWTH_OPERATOR_VERSION}+model-router+shield+content-types`;
+const ORCHESTRATOR_VERSION = `${GROWTH_OPERATOR_VERSION}+model-router+shield+content-types+media-pipeline+publishing+learning-loop`;
 
 function uniqueActions(actions: string[]) {
   const seen = new Set<string>();
@@ -282,12 +283,33 @@ async function run(req: Request) {
       .limit(7);
 
     const sessionLog = await insertSessionLog({
-      actions_completed: ['daily_run', ORCHESTRATOR_VERSION, 'x_check_attempted', 'used_research_intel', 'used_viral_memory', 'quality_gate_applied', 'shield_applied', 'content_type_engine', 'model_router_active'],
+      actions_completed: ['daily_run', ORCHESTRATOR_VERSION, 'x_check_attempted', 'used_research_intel', 'used_viral_memory', 'quality_gate_applied', 'shield_applied', 'content_type_engine', 'model_router_active', 'media_pipeline', 'publishing_pipeline'],
       content_created: singleTweets.map((tweet: any, index: number) => ({ ...tweet, quality_gate: combinedResults[index], shield: shieldResults[index]?.passed })),
       db_updates: [{ table: 'daily_checkins', id: runRow.id }, { table: 'content_log', rows: singleTweets.length + diverseContent.length }],
       pending_tasks: actions,
-      next_recommendation: readyCount ? 'Publish only content with publish_status=ready. Review diverse content types before publishing.' : 'Do not publish. Run research-intel-v4 or rewrite into source-backed/opinion-only content first.'
+      next_recommendation: readyCount ? 'Content delivered to Telegram. Publish manually. Then run account-performance-scan to measure results.' : 'Do not publish. Run research-intel-v4 or rewrite into source-backed/opinion-only content first.'
     });
+
+    // ═══ 7. Publishing Pipeline — تسليم المحتوى المنسق لتليجرام ═══
+    let publishResult = null;
+    try {
+      publishResult = await prepareAndDeliverDailyPack(diverseContent, contentPack);
+    } catch (e: any) {
+      publishResult = { ok: false, error: e.message };
+    }
+
+    // ═══ 8. Auto Performance Scan — مسح أداء الحساب بعد التوليد ═══
+    let autoScanResult = null;
+    const url = new URL(req.url);
+    const shouldAutoScan = url.searchParams.get('auto_scan') === '1' || url.searchParams.get('scan') === '1';
+    if (shouldAutoScan) {
+      try {
+        const { scanAccountPerformance } = await import('../../../lib/performance-feedback');
+        autoScanResult = await scanAccountPerformance(10, username);
+      } catch (e: any) {
+        autoScanResult = { ok: false, error: e.message };
+      }
+    }
 
     return Response.json({
       ok: true,
@@ -297,6 +319,8 @@ async function run(req: Request) {
       contentPack: { ...contentPack, quality_gate: combinedResults, shield_results: shieldResults.map(s => ({ passed: s.passed, risk_level: s.risk_level, summary: s.summary, suggestions: s.suggestions })), ready_count: readyCount, safe_to_publish: readyCount > 0 },
       diverse_content: diverseContent,
       content_plan: contentPlan?.variety_check || null,
+      publish_pack: publishResult,
+      auto_performance_scan: autoScanResult,
       daily_checkin: runRow,
       sessionLog,
       pendingActions: pendingActions || []

@@ -4,16 +4,19 @@ import { callModel } from './model-router';
 import { getXUserTimeline, scoreXTweet, analyzeXTweet } from './x';
 
 /**
- * Account Performance Scanner — ماسح أداء الحساب + تعلم من النتائج
+ * Account Performance Scanner — ماسح أداء الحساب + تعلم سببي من النتائج
  *
  * بعد كل نشر يدوي، هذا النظام:
  * 1. يفحص حساب @30piq ويجيب التغريدات + المقاييس
- * 2. يحلل: أي تغريدة جابت تفاعل؟ أي واحدة فشلت؟ ليش؟
- * 3. يعلّم العقل من النتائج:
- *    - يزيد ثقة القواعد اللي نتج عنها محتوى ناجح
- *    - ينقص ثقة القواعد اللي نتج عنها محتوى فاشل
+ * 2. يحلل: أي تغريدة جابت تفاعل؟ أي واحدة فشلت؟ **ليش بالضبط؟**
+ * 3. يربط كل نتيجة بالقواعد اللي استُخدمت في التوليد (causation not correlation)
+ * 4. يعلّم العقل من النتائج:
+ *    - يزيد ثقة القواعد اللي نتج عنها محتوى ناجح (مربوطة بالتحديد)
+ *    - ينقص ثقة القواعد اللي نتج عنها محتوى فاشل (مربوطة بالتحديد)
  *    - يستخلص أنماط جديدة من النجاح/الفشل
- *    - يحدّث working memory
+ *    - يسجّل anti-patterns للتجنب المستقبلي
+ *    - يحدّث working memory (الثقة العالية فقط)
+ * 5. يرسل ملخص التعلم لتليجرام
  */
 
 export type PerformanceScanResult = {
@@ -122,18 +125,58 @@ export async function scanAccountPerformance(
     if (viewAdjustedScore > 50 || (likes > 5 && bookmarks > 2)) verdict = 'high_performer';
     if (viewAdjustedScore < 5 && views > 100) verdict = 'underperformer';
 
-    // ربط مع content_log
+    // ربط مع content_log — نربط بالتحديد عشان نعرف أي قواعد استُخدمت
     let linkedLogId: number | undefined;
+    let linkedLogData: any = null;
     try {
       const { data: logEntry } = await supabase
         .from('content_log')
-        .select('id, mechanic_used, viral_pattern_basis, originality_element, source_used')
+        .select('id, mechanic_used, viral_pattern_basis, originality_element, source_used, notes, content_type, topic')
         .ilike('hook_text', `%${(tweet.text || '').slice(0, 50)}%`)
         .order('published_at', { ascending: false })
         .limit(1)
         .maybeSingle();
       linkedLogId = logEntry?.id;
+      linkedLogData = logEntry;
     } catch {}
+
+    // ربط مع القواعد والأنماط اللي استُخدمت في التوليد
+    let linkedRuleIds: number[] = [];
+    let linkedPatternIds: number[] = [];
+
+    if (linkedLogData?.notes) {
+      try {
+        const notes = typeof linkedLogData.notes === 'string' ? JSON.parse(linkedLogData.notes) : linkedLogData.notes;
+        // لو عندنا معلومات عن القواعد المستخدمة
+        if (notes.used_rule_ids) linkedRuleIds = notes.used_rule_ids;
+        if (notes.used_pattern_ids) linkedPatternIds = notes.used_pattern_ids;
+      } catch {}
+    }
+
+    // لو ما عندنا IDs محددة، نربط بأقرب قواعد حسب الموضوع
+    if (!linkedRuleIds.length && linkedLogData?.topic) {
+      try {
+        const { data: relatedRules } = await supabase
+          .from('x_algorithm_learning_rules')
+          .select('id')
+          .eq('status', 'active')
+          .or(`rule.ilike.%${linkedLogData.topic?.slice(0, 30)}%,evidence.ilike.%${linkedLogData.topic?.slice(0, 30)}%,applies_to.ilike.%${linkedLogData.content_type || 'tweet'}%`)
+          .limit(5);
+        linkedRuleIds = (relatedRules || []).map((r: any) => r.id);
+      } catch {}
+    }
+
+    if (!linkedPatternIds.length && linkedLogData?.mechanic_used) {
+      try {
+        const { data: relatedPatterns } = await supabase
+          .from('viral_style_patterns')
+          .select('id')
+          .eq('status', 'active')
+          .or(`pattern_name.ilike.%${linkedLogData.mechanic_used?.slice(0, 30)}%,pattern_description.ilike.%${linkedLogData.mechanic_used?.slice(0, 30)}%`)
+          .limit(5);
+        linkedPatternIds = (relatedPatterns || []).map((r: any) => r.id);
+      } catch {}
+    }
 
     analyses.push({
       tweet_id: tweet.id,
@@ -145,7 +188,9 @@ export async function scanAccountPerformance(
       analysis: '',
       success_factors: [],
       failure_factors: [],
-      linked_content_log_id: linkedLogId
+      linked_content_log_id: linkedLogId,
+      linked_rule_ids: linkedRuleIds,
+      linked_pattern_ids: linkedPatternIds
     });
   }
 
@@ -276,32 +321,190 @@ Return JSON array matching each tweet:
     }
   }
 
-  // ═══ 6. تطبيق تحديثات التعلم على القاعدة ═══
+  // ═══ 6. تطبيق تحديثات التعلم على القاعدة — تحديث القواعد المربوطة بالتحديد ═══
   for (const update of learningUpdates) {
     try {
       if (update.type === 'rule_boost' || update.type === 'rule_decay') {
-        // زوّد أو نقّص ثقة القواعد النشطة الأخيرة
-        // جلب القواعد ثم تحديثها يدوياً (بدون RPC)
-        const { data: recentRules } = await supabase
-          .from(update.target_table)
-          .select('id, confidence_score')
-          .eq('status', 'active')
-          .order('created_at', { ascending: false })
-          .limit(5);
+        // حدّث القواعد المربوطة بالتحديد (من linked_rule_ids)
+        const targetIds = update.target_id ? [update.target_id] : [];
 
-        if (recentRules && recentRules.length > 0) {
-          for (const rule of recentRules) {
-            const currentScore = Number(rule.confidence_score) || 0.5;
-            const newScore = Math.max(0.1, Math.min(1.0, currentScore + update.confidence_delta));
-            await supabase
+        if (targetIds.length > 0) {
+          for (const ruleId of targetIds) {
+            const { data: rule } = await supabase
               .from(update.target_table)
-              .update({ confidence_score: Math.round(newScore * 1000) / 1000 })
-              .eq('id', rule.id);
+              .select('id, confidence_score')
+              .eq('id', ruleId)
+              .maybeSingle();
+
+            if (rule) {
+              const currentScore = Number(rule.confidence_score) || 0.5;
+              const newScore = Math.max(0.1, Math.min(1.0, currentScore + update.confidence_delta));
+              await supabase
+                .from(update.target_table)
+                .update({ confidence_score: Math.round(newScore * 1000) / 1000 })
+                .eq('id', rule.id);
+            }
+          }
+        } else {
+          // Fallback: حدّث أحدث القواعد النشطة
+          const { data: recentRules } = await supabase
+            .from(update.target_table)
+            .select('id, confidence_score')
+            .eq('status', 'active')
+            .order('created_at', { ascending: false })
+            .limit(5);
+
+          if (recentRules && recentRules.length > 0) {
+            for (const rule of recentRules) {
+              const currentScore = Number(rule.confidence_score) || 0.5;
+              const newScore = Math.max(0.1, Math.min(1.0, currentScore + update.confidence_delta));
+              await supabase
+                .from(update.target_table)
+                .update({ confidence_score: Math.round(newScore * 1000) / 1000 })
+                .eq('id', rule.id);
+            }
           }
         }
       }
+
+      // إضافة anti-pattern صريح لقاعدة الأنماط
+      if (update.type === 'anti_pattern' && update.target_id) {
+        await supabase
+          .from(update.target_table)
+          .update({
+            status: 'anti_pattern',
+            risks: `Anti-pattern confirmed: ${update.reason}`
+          })
+          .eq('id', update.target_id);
+      }
     } catch {}
   }
+
+  // ═══ 6b. تحديث Working Memory — الثقة العالية فقط ═══
+  try {
+    // سحب أعلى القواعد ثقة
+    const { data: topAlgoRules } = await supabase
+      .from('x_algorithm_learning_rules')
+      .select('*')
+      .eq('status', 'active')
+      .gte('confidence_score', 0.7)
+      .order('confidence_score', { ascending: false })
+      .limit(15);
+
+    const { data: topStylePatterns } = await supabase
+      .from('viral_style_patterns')
+      .select('*')
+      .eq('status', 'active')
+      .gte('confidence_score', 0.7)
+      .order('confidence_score', { ascending: false })
+      .limit(15);
+
+    // محاولة تحديث working_memory (لو الجدول موجود)
+    if (topAlgoRules && topAlgoRules.length > 0) {
+      for (const rule of topAlgoRules.slice(0, 10)) {
+        try {
+          await supabase.from('working_memory').upsert({
+            memory_type: 'algorithm_rule',
+            source_table: 'x_algorithm_learning_rules',
+            source_id: String(rule.id),
+            content: { rule: rule.rule, evidence: rule.evidence, applies_to: rule.applies_to },
+            confidence_score: rule.confidence_score,
+            last_accessed_at: new Date().toISOString()
+          }, { onConflict: 'memory_type,source_table,source_id' });
+        } catch {} // الجدول ممكن ما يكون موجود
+      }
+    }
+
+    if (topStylePatterns && topStylePatterns.length > 0) {
+      for (const pattern of topStylePatterns.slice(0, 10)) {
+        try {
+          await supabase.from('working_memory').upsert({
+            memory_type: 'style_pattern',
+            source_table: 'viral_style_patterns',
+            source_id: String(pattern.id),
+            content: { pattern_name: pattern.pattern_name, description: pattern.pattern_description, example: pattern.example_structure },
+            confidence_score: pattern.confidence_score,
+            last_accessed_at: new Date().toISOString()
+          }, { onConflict: 'memory_type,source_table,source_id' });
+        } catch {}
+      }
+    }
+  } catch {}
+
+  // ═══ 6c. استخلص أنماط تعلم سببية جديدة ═══
+  try {
+    const winners = analyses.filter(a => a.verdict === 'high_performer');
+    const losers = analyses.filter(a => a.verdict === 'underperformer');
+
+    if (winners.length > 0 || losers.length > 0) {
+      const causationResponse = await callModel('learning_extraction', [
+        {
+          role: 'system',
+          content: `You are a causal learning analyst for an X/Twitter content system. Given tweet performance data, extract CAUSAL rules about what specifically causes success or failure. Focus on actionable, specific rules — not generic observations. Output valid JSON.`
+        },
+        {
+          role: 'user',
+          content: `Extract causal learning rules from these results:
+
+HIGH PERFORMERS:
+${JSON.stringify(winners.map(w => ({
+  text: w.text_preview,
+  score: w.performance_score,
+  success_factors: w.success_factors,
+  linked_rules: w.linked_rule_ids,
+  linked_patterns: w.linked_pattern_ids,
+  metrics: w.metrics
+})), null, 2)}
+
+UNDERPERFORMERS:
+${JSON.stringify(losers.map(l => ({
+  text: l.text_preview,
+  score: l.performance_score,
+  failure_factors: l.failure_factors,
+  linked_rules: l.linked_rule_ids,
+  linked_patterns: l.linked_pattern_ids,
+  metrics: l.metrics
+})), null, 2)}
+
+For each causal rule, specify:
+1. The CAUSE (specific element, mechanic, or pattern)
+2. The EFFECT (engagement outcome)
+3. CONFIDENCE (0.0-1.0 based on evidence)
+4. ACTIONABLE INSIGHT (what to do differently next time)
+
+Return JSON:
+{
+  "causal_rules": [{
+    "cause": "specific element",
+    "effect": "what happened",
+    "confidence": 0.8,
+    "actionable_insight": "do X to achieve Y",
+    "rule_type": "success_cause|failure_cause"
+  }],
+  "anti_patterns_to_avoid": ["pattern1", "pattern2"],
+  "reinforced_patterns": ["pattern1", "pattern2"]
+}`
+        }
+      ]);
+
+      const causalParsed = JSON.parse(causationResponse);
+
+      // سجّل القواعد السببية في system_learning_rules
+      if (causalParsed.causal_rules?.length) {
+        for (const cr of causalParsed.causal_rules.slice(0, 5)) {
+          await supabase.from('system_learning_rules').insert({
+            rule_type: cr.rule_type === 'success_cause' ? 'causal_success' : 'causal_failure',
+            rule: cr.actionable_insight || `${cr.cause} → ${cr.effect}`,
+            evidence: `Cause: ${cr.cause}, Effect: ${cr.effect}, Confidence: ${cr.confidence}`,
+            applies_to: 'content_generation',
+            confidence_score: Math.round(cr.confidence * 10),
+            status: 'active',
+            test_run: false
+          });
+        }
+      }
+    }
+  } catch {}
 
   // ═══ 7. سجل تحليل الأداء ═══
   try {

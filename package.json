@@ -12,6 +12,7 @@
     "@supabase/supabase-js": "latest",
     "next": "latest",
     "openai": "latest",
+    "pg": "^8.21.0",
     "react": "latest",
     "react-dom": "latest",
     "zod": "latest"
