@@ -1,5 +1,5 @@
 -- ═══════════════════════════════════════════════════════════════
--- X AI Content Factory — Database Migration
+-- X AI Content Factory — Database Migration (Complete v2)
 -- Run this in Supabase SQL Editor (Dashboard → SQL Editor → New Query)
 -- ═══════════════════════════════════════════════════════════════
 
@@ -42,7 +42,7 @@ ON CONFLICT (task_type) DO UPDATE SET
   description = EXCLUDED.description,
   updated_at = now();
 
--- 2. Performance Scans Table (for tracking account scan results over time)
+-- 2. Performance Scans Table
 CREATE TABLE IF NOT EXISTS performance_scans (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   account_handle TEXT NOT NULL,
@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS performance_scans (
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
--- 3. Content Delivery Log (tracks what was delivered to Telegram and when)
+-- 3. Content Delivery Log
 CREATE TABLE IF NOT EXISTS content_deliveries (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   content_log_id INTEGER,
@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS content_deliveries (
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
--- 4. Working Memory (high-confidence subset for fast access)
+-- 4. Working Memory
 CREATE TABLE IF NOT EXISTS working_memory (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   memory_type TEXT NOT NULL,
@@ -89,19 +89,19 @@ CREATE TABLE IF NOT EXISTS working_memory (
   UNIQUE(memory_type, source_table, source_id)
 );
 
--- 5. Enable RLS (Row Level Security) — optional but recommended
+-- 5. Enable RLS
 ALTER TABLE model_routing_rules ENABLE ROW LEVEL SECURITY;
 ALTER TABLE performance_scans ENABLE ROW LEVEL SECURITY;
 ALTER TABLE content_deliveries ENABLE ROW LEVEL SECURITY;
 ALTER TABLE working_memory ENABLE ROW LEVEL SECURITY;
 
--- 6. Allow service role full access (since we use supabaseAdmin)
+-- 6. Allow service role full access
 CREATE POLICY "Service role full access" ON model_routing_rules FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Service role full access" ON performance_scans FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Service role full access" ON content_deliveries FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Service role full access" ON working_memory FOR ALL USING (true) WITH CHECK (true);
 
--- 7. Learning Tweet Queue (tweets manually added for learning via Telegram bot)
+-- 7. Learning Tweet Queue
 CREATE TABLE IF NOT EXISTS learning_tweet_queue (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   tweet_url TEXT NOT NULL,
@@ -115,20 +115,11 @@ CREATE TABLE IF NOT EXISTS learning_tweet_queue (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
--- Add missing columns if table already existed without them
-DO $$ BEGIN
-  ALTER TABLE learning_tweet_queue ADD COLUMN IF NOT EXISTS learning_cycle_id UUID;
-  ALTER TABLE learning_tweet_queue ADD COLUMN IF NOT EXISTS fetched_data JSONB;
-  ALTER TABLE learning_tweet_queue ADD COLUMN IF NOT EXISTS error TEXT;
-  ALTER TABLE learning_tweet_queue ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
-EXCEPTION WHEN OTHERS THEN NULL;
-END $$;
-
 ALTER TABLE learning_tweet_queue ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Service role full access" ON learning_tweet_queue FOR ALL USING (true) WITH CHECK (true);
 
 -- ═══════════════════════════════════════════════════════════════
--- 8. Accounts Table (learning accounts — added via Telegram or auto-discovered)
+-- 8. Accounts Table
 -- ═══════════════════════════════════════════════════════════════
 CREATE TABLE IF NOT EXISTS accounts (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -163,7 +154,7 @@ ALTER TABLE learning_cycles ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Service role full access" ON learning_cycles FOR ALL USING (true) WITH CHECK (true);
 
 -- ═══════════════════════════════════════════════════════════════
--- 10. Telegram Bot State (tracks conversation flows per chat)
+-- 10. Telegram Bot State
 -- ═══════════════════════════════════════════════════════════════
 CREATE TABLE IF NOT EXISTS telegram_bot_state (
   chat_id TEXT PRIMARY KEY,
@@ -366,12 +357,24 @@ ALTER TABLE action_queue ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Service role full access" ON action_queue FOR ALL USING (true) WITH CHECK (true);
 
 -- ═══════════════════════════════════════════════════════════════
--- 19. Viral Scan Runs
+-- 19. Viral Scan Runs (ENHANCED — matches viral-account-scan code)
 -- ═══════════════════════════════════════════════════════════════
 CREATE TABLE IF NOT EXISTS viral_scan_runs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  handles_scanned JSONB DEFAULT '[]',
+  creator_handle TEXT,
+  scan_version TEXT,
+  tweets_requested INTEGER DEFAULT 0,
   tweets_analyzed INTEGER DEFAULT 0,
+  data_quality TEXT,
+  tweet_ids_hash TEXT,
+  best_tweet_url TEXT,
+  weakest_tweet_url TEXT,
+  timing_summary JSONB DEFAULT '{}',
+  budget JSONB DEFAULT '{}',
+  raw_summary JSONB DEFAULT '{}',
+  model_used TEXT,
+  reused_cached_result BOOLEAN DEFAULT false,
+  handles_scanned JSONB DEFAULT '[]',
   patterns_found INTEGER DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'started',
   error TEXT,
@@ -382,19 +385,39 @@ ALTER TABLE viral_scan_runs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Service role full access" ON viral_scan_runs FOR ALL USING (true) WITH CHECK (true);
 
 -- ═══════════════════════════════════════════════════════════════
--- 20. Viral Tweet Analyses
+-- 20. Viral Tweet Analyses (ENHANCED — matches viral-account-scan code)
 -- ═══════════════════════════════════════════════════════════════
 CREATE TABLE IF NOT EXISTS viral_tweet_analyses (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  scan_run_id UUID REFERENCES viral_scan_runs(id),
+  creator_handle TEXT,
   tweet_id TEXT,
   tweet_url TEXT,
+  tweet_text TEXT,
+  created_at_x TIMESTAMPTZ,
+  hour_utc INTEGER,
+  weekday_utc INTEGER,
   username TEXT,
   text TEXT,
   tweet_type TEXT,
+  hook_formula TEXT,
+  claim_type TEXT,
+  tone TEXT,
+  format_pattern TEXT,
+  timing_pattern TEXT,
+  audience_pain TEXT,
+  why_replies TEXT,
+  why_quotes TEXT,
+  why_bookmarks TEXT,
+  why_views TEXT,
+  adaptation_for_30piq TEXT,
+  originality_risk TEXT,
+  role_in_sample TEXT DEFAULT 'sample',
   engagement_per_1k_followers NUMERIC(8,2),
   engagement_score NUMERIC(8,2),
   metrics JSONB DEFAULT '{}',
   analysis JSONB DEFAULT '{}',
+  analysis_payload JSONB DEFAULT '{}',
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
@@ -402,16 +425,21 @@ ALTER TABLE viral_tweet_analyses ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Service role full access" ON viral_tweet_analyses FOR ALL USING (true) WITH CHECK (true);
 
 -- ═══════════════════════════════════════════════════════════════
--- 21. Viral Account Patterns
+-- 21. Viral Account Patterns (ENHANCED — matches viral-account-scan code)
 -- ═══════════════════════════════════════════════════════════════
 CREATE TABLE IF NOT EXISTS viral_account_patterns (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  scan_run_id UUID REFERENCES viral_scan_runs(id),
+  creator_handle TEXT,
   username TEXT,
   pattern_type TEXT,
   pattern_name TEXT,
   rule TEXT,
-  evidence JSONB,
+  evidence TEXT,
   confidence_score NUMERIC(4,2) DEFAULT 5,
+  apply_to_30piq TEXT,
+  avoid_copying_note TEXT,
+  status TEXT NOT NULL DEFAULT 'new',
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
@@ -560,7 +588,7 @@ ALTER TABLE content_production_cards ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Service role full access" ON content_production_cards FOR ALL USING (true) WITH CHECK (true);
 
 -- ═══════════════════════════════════════════════════════════════
--- 29. Trends
+-- 29. Trends (ENHANCED — content_type_suggestion column)
 -- ═══════════════════════════════════════════════════════════════
 CREATE TABLE IF NOT EXISTS trends (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -568,6 +596,7 @@ CREATE TABLE IF NOT EXISTS trends (
   title TEXT,
   source TEXT,
   heat_score NUMERIC(4,2) DEFAULT 5,
+  content_type_suggestion TEXT,
   covered BOOLEAN DEFAULT false,
   notes TEXT,
   created_at TIMESTAMPTZ DEFAULT now()
@@ -577,15 +606,22 @@ ALTER TABLE trends ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Service role full access" ON trends FOR ALL USING (true) WITH CHECK (true);
 
 -- ═══════════════════════════════════════════════════════════════
--- 30. Creator Intel
+-- 30. Creator Intel (ENHANCED — matches code columns)
 -- ═══════════════════════════════════════════════════════════════
 CREATE TABLE IF NOT EXISTS creator_intel (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  username TEXT,
+  creator_handle TEXT,
+  post_url TEXT,
+  topic TEXT,
+  hook_pattern TEXT,
+  format_pattern TEXT,
+  why_it_worked TEXT,
+  adaptation_idea TEXT,
   tweet_url TEXT,
   content_type TEXT,
   insight TEXT,
   status TEXT NOT NULL DEFAULT 'new',
+  notes TEXT,
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
@@ -672,3 +708,85 @@ CREATE TABLE IF NOT EXISTS target_plans (
 
 ALTER TABLE target_plans ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Service role full access" ON target_plans FOR ALL USING (true) WITH CHECK (true);
+
+-- ═══════════════════════════════════════════════════════════════
+-- MIGRATION FIXES: Add missing columns to existing tables
+-- ═══════════════════════════════════════════════════════════════
+
+-- viral_scan_runs: add columns used by viral-account-scan code
+DO $$ BEGIN
+  ALTER TABLE viral_scan_runs ADD COLUMN IF NOT EXISTS creator_handle TEXT;
+  ALTER TABLE viral_scan_runs ADD COLUMN IF NOT EXISTS scan_version TEXT;
+  ALTER TABLE viral_scan_runs ADD COLUMN IF NOT EXISTS tweets_requested INTEGER DEFAULT 0;
+  ALTER TABLE viral_scan_runs ADD COLUMN IF NOT EXISTS data_quality TEXT;
+  ALTER TABLE viral_scan_runs ADD COLUMN IF NOT EXISTS tweet_ids_hash TEXT;
+  ALTER TABLE viral_scan_runs ADD COLUMN IF NOT EXISTS best_tweet_url TEXT;
+  ALTER TABLE viral_scan_runs ADD COLUMN IF NOT EXISTS weakest_tweet_url TEXT;
+  ALTER TABLE viral_scan_runs ADD COLUMN IF NOT EXISTS timing_summary JSONB DEFAULT '{}';
+  ALTER TABLE viral_scan_runs ADD COLUMN IF NOT EXISTS budget JSONB DEFAULT '{}';
+  ALTER TABLE viral_scan_runs ADD COLUMN IF NOT EXISTS raw_summary JSONB DEFAULT '{}';
+  ALTER TABLE viral_scan_runs ADD COLUMN IF NOT EXISTS model_used TEXT;
+  ALTER TABLE viral_scan_runs ADD COLUMN IF NOT EXISTS reused_cached_result BOOLEAN DEFAULT false;
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
+
+-- viral_tweet_analyses: add columns used by viral-account-scan code
+DO $$ BEGIN
+  ALTER TABLE viral_tweet_analyses ADD COLUMN IF NOT EXISTS scan_run_id UUID REFERENCES viral_scan_runs(id);
+  ALTER TABLE viral_tweet_analyses ADD COLUMN IF NOT EXISTS creator_handle TEXT;
+  ALTER TABLE viral_tweet_analyses ADD COLUMN IF NOT EXISTS tweet_text TEXT;
+  ALTER TABLE viral_tweet_analyses ADD COLUMN IF NOT EXISTS created_at_x TIMESTAMPTZ;
+  ALTER TABLE viral_tweet_analyses ADD COLUMN IF NOT EXISTS hour_utc INTEGER;
+  ALTER TABLE viral_tweet_analyses ADD COLUMN IF NOT EXISTS weekday_utc INTEGER;
+  ALTER TABLE viral_tweet_analyses ADD COLUMN IF NOT EXISTS hook_formula TEXT;
+  ALTER TABLE viral_tweet_analyses ADD COLUMN IF NOT EXISTS claim_type TEXT;
+  ALTER TABLE viral_tweet_analyses ADD COLUMN IF NOT EXISTS tone TEXT;
+  ALTER TABLE viral_tweet_analyses ADD COLUMN IF NOT EXISTS format_pattern TEXT;
+  ALTER TABLE viral_tweet_analyses ADD COLUMN IF NOT EXISTS timing_pattern TEXT;
+  ALTER TABLE viral_tweet_analyses ADD COLUMN IF NOT EXISTS audience_pain TEXT;
+  ALTER TABLE viral_tweet_analyses ADD COLUMN IF NOT EXISTS why_replies TEXT;
+  ALTER TABLE viral_tweet_analyses ADD COLUMN IF NOT EXISTS why_quotes TEXT;
+  ALTER TABLE viral_tweet_analyses ADD COLUMN IF NOT EXISTS why_bookmarks TEXT;
+  ALTER TABLE viral_tweet_analyses ADD COLUMN IF NOT EXISTS why_views TEXT;
+  ALTER TABLE viral_tweet_analyses ADD COLUMN IF NOT EXISTS adaptation_for_30piq TEXT;
+  ALTER TABLE viral_tweet_analyses ADD COLUMN IF NOT EXISTS originality_risk TEXT;
+  ALTER TABLE viral_tweet_analyses ADD COLUMN IF NOT EXISTS role_in_sample TEXT DEFAULT 'sample';
+  ALTER TABLE viral_tweet_analyses ADD COLUMN IF NOT EXISTS analysis_payload JSONB DEFAULT '{}';
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
+
+-- viral_account_patterns: add columns used by viral-account-scan code
+DO $$ BEGIN
+  ALTER TABLE viral_account_patterns ADD COLUMN IF NOT EXISTS scan_run_id UUID REFERENCES viral_scan_runs(id);
+  ALTER TABLE viral_account_patterns ADD COLUMN IF NOT EXISTS creator_handle TEXT;
+  ALTER TABLE viral_account_patterns ADD COLUMN IF NOT EXISTS evidence TEXT;
+  ALTER TABLE viral_account_patterns ADD COLUMN IF NOT EXISTS apply_to_30piq TEXT;
+  ALTER TABLE viral_account_patterns ADD COLUMN IF NOT EXISTS avoid_copying_note TEXT;
+  ALTER TABLE viral_account_patterns ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'new';
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
+
+-- creator_intel: add columns used by viral-account-scan code
+DO $$ BEGIN
+  ALTER TABLE creator_intel ADD COLUMN IF NOT EXISTS creator_handle TEXT;
+  ALTER TABLE creator_intel ADD COLUMN IF NOT EXISTS post_url TEXT;
+  ALTER TABLE creator_intel ADD COLUMN IF NOT EXISTS topic TEXT;
+  ALTER TABLE creator_intel ADD COLUMN IF NOT EXISTS hook_pattern TEXT;
+  ALTER TABLE creator_intel ADD COLUMN IF NOT EXISTS format_pattern TEXT;
+  ALTER TABLE creator_intel ADD COLUMN IF NOT EXISTS why_it_worked TEXT;
+  ALTER TABLE creator_intel ADD COLUMN IF NOT EXISTS adaptation_idea TEXT;
+  ALTER TABLE creator_intel ADD COLUMN IF NOT EXISTS notes TEXT;
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
+
+-- trends: add content_type_suggestion
+DO $$ BEGIN
+  ALTER TABLE trends ADD COLUMN IF NOT EXISTS content_type_suggestion TEXT;
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
+
+-- accounts: ensure all columns exist
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_scanned_at TIMESTAMPTZ;
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
