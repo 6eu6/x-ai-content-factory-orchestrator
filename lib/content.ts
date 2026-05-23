@@ -1,5 +1,6 @@
 import { callModel, parseModelJson } from './model-router';
 import { optionalEnv } from './env';
+import { FIRST_PERSON_CLAIM_PATTERNS } from './constants';
 
 function cleanAscii(text: string): string {
   return String(text || '')
@@ -16,27 +17,18 @@ function cleanAscii(text: string): string {
  * التحسين: بدل ما نطابق أي كلمة "I" أو "my" (اللي تدمر كل المحتوى)،
  * نفحص فقط الأنماط اللي تمثل ادعاءات شخصية غير موثقة.
  * الاستخدام العادي لـ "I think" أو "my approach" مسموح.
+ * الأنماط مُعرّفة في lib/constants.ts
  */
 function containsUnsafeClaim(text: string): boolean {
   const t = cleanAscii(text).toLowerCase();
-  const badPatterns = [
-    // ادعاءات نتائج غير موثقة
-    /i (saved|boosted|increased|improved|doubled|reduced|grew|cut|achieved)\b/i,
-    /my (results?|experience|outcome|experiment|test|data|findings?) (show|prove|confirm|suggest|reveal|demonstrate)\b/i,
-    /i (found|discovered|tested|proved|confirmed|measured|verified)\b/i,
-    // أرقام ونسب غير موثقة مع ادعاء شخصي
-    /i (got|achieved|reached|hit) \d+/i,
-    /my \w+ (increased|improved|grew|doubled|reduced|boosted) (by )?\d+/i,
-    // تجارب شخصية كدليل علمي
-    /from (my )?experience,?\s*\d/i,
-    /in my (experience|testing|experiment),?\s*/i,
+  // أنماط إضافية خاصة بالمحتوى (مو في constants لأنها خاصة بالتوليد)
+  const contentSpecificPatterns = [
+    // تجنّب الهاشتاقات
+    /#/,
     // ادعاءات مفرطة
     /\d+\s*(x\s*)?(faster|better|more productive|more efficient)\b/i,
-    /saved (me |you |users? )?\d+/i,
-    // تجنّب الهاشتاقات
-    /#/
   ];
-  return badPatterns.some((p) => p.test(t));
+  return FIRST_PERSON_CLAIM_PATTERNS.some((p) => p.test(t)) || contentSpecificPatterns.some((p) => p.test(t));
 }
 
 function isInstructionInsteadOfContent(text: string): boolean {

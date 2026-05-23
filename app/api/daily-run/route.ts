@@ -379,7 +379,9 @@ async function run(req: Request) {
 
     // ═══ 7. Publishing Pipeline — تسليم المحتوى المنسق لتليجرام ═══
     // تحسين: لا نرسل المحتوى المكرر — لو diverseContent يغطي النوع، لا نضيفه من النظام القديم
+    // فلترة: لا نرسل العناصر اللي فيها أخطاء
     const diverseTypes = new Set(diverseContent.filter(d => !d.content?.error).map(d => d.content_type));
+    const cleanDiverseContent = diverseContent.filter(d => !d.content?.error);
     const filteredContentPack = {
       ...contentPack,
       // لو diverseContent عنده single_tweet، لا نضيف تغريدات النظام القديم
@@ -391,7 +393,7 @@ async function run(req: Request) {
     };
     let publishResult = null;
     try {
-      publishResult = await prepareAndDeliverDailyPack(diverseContent, filteredContentPack);
+      publishResult = await prepareAndDeliverDailyPack(cleanDiverseContent, filteredContentPack);
     } catch (e: any) {
       publishResult = { ok: false, error: e.message };
     }

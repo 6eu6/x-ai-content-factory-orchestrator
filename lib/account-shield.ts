@@ -1,6 +1,7 @@
 import { requiredEnv, optionalEnv } from './env';
 import { supabaseAdmin } from './supabase';
 import { callModel, parseModelJson, TaskType } from './model-router';
+import { FIRST_PERSON_CLAIM_PATTERNS } from './constants';
 
 /**
  * Account Shield — طبقة حماية الحساب v2
@@ -304,13 +305,7 @@ export async function shieldCheck(
 
   // ═══ 5. First-Person Claim Check ═══
   // فقط الادعاءات غير الموثقة — الاستخدام العادي مثل "I think" أو "my approach" مسموح
-  const FIRST_PERSON_CLAIM_PATTERNS = [
-    /i (saved|boosted|increased|improved|doubled|reduced|grew|cut|achieved)\b/i,
-    /my (results?|experience|outcome|experiment|test|data|findings?) (show|prove|confirm|suggest|reveal|demonstrate)\b/i,
-    /i (found|discovered|tested|proved|confirmed|measured|verified)\b/i,
-    /i (got|achieved|reached|hit) \d+/i,
-    /my \w+ (increased|improved|grew|doubled|reduced|boosted) (by )?\d+/i
-  ];
+  // الأنماط مُعرّفة في lib/constants.ts
   const hasFirstPersonClaim = FIRST_PERSON_CLAIM_PATTERNS.some(p => p.test(text));
   if (hasFirstPersonClaim) {
     checks.push({
@@ -474,14 +469,7 @@ export function quickShieldCheck(text: string, item?: any): { safe: boolean; rea
   if (hasSlopPatterns(text).length) reasons.push('slop_forbidden_patterns');
   if (checkSymmetry(text) && text.split('\n').length >= 3) reasons.push('symmetric_structure');
   if (/#/.test(text)) reasons.push('has_hashtag');
-  // فقط ادعاءات أول شخص غير موثقة — الاستخدام العادي مسموح
-  const FIRST_PERSON_CLAIM_PATTERNS = [
-    /i (saved|boosted|increased|improved|doubled|reduced|grew|cut|achieved)\b/i,
-    /my (results?|experience|outcome|experiment|test|data|findings?) (show|prove|confirm|suggest|reveal|demonstrate)\b/i,
-    /i (found|discovered|tested|proved|confirmed|measured|verified)\b/i,
-    /i (got|achieved|reached|hit) \d+/i,
-    /my \w+ (increased|improved|grew|doubled|reduced|boosted) (by )?\d+/i
-  ];
+  // فقط ادعاءات أول شخص غير موثقة — الأنماط مُعرّفة في lib/constants.ts
   if (FIRST_PERSON_CLAIM_PATTERNS.some(p => p.test(text))) reasons.push('first_person_unverified_claim');
   if (hasUnsourcedClaims(text).length) reasons.push('unsourced_numeric_claims');
   if (!item?.originality_element && !item?.mechanic_used) reasons.push('missing_originality');

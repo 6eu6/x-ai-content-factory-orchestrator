@@ -3,6 +3,8 @@ export type QualityResult = {
   reasons: string[];
 };
 
+import { FIRST_PERSON_CLAIM_PATTERNS } from './constants';
+
 const UNSOURCED_CLAIM_PATTERNS = [
   /recent studies show/i,
   /research shows/i,
@@ -30,14 +32,9 @@ const GENERIC_PATTERNS = [
 /**
  * أنماط أول شخص خطرة — فقط اللي تمثل ادعاءات غير موثقة
  * الاستخدام العادي مثل "I think" أو "my approach" مسموح
+ * مُعرّفة في lib/constants.ts
  */
-const FIRST_PERSON_CLAIM_PATTERNS = [
-  /i (saved|boosted|increased|improved|doubled|reduced|grew|cut|achieved)\b/i,
-  /my (results?|experience|outcome|experiment|test|data|findings?) (show|prove|confirm|suggest|reveal|demonstrate)\b/i,
-  /i (found|discovered|tested|proved|confirmed|measured|verified)\b/i,
-  /i (got|achieved|reached|hit) \d+/i,
-  /my \w+ (increased|improved|grew|doubled|reduced|boosted) (by )?\d+/i
-];
+// FIRST_PERSON_CLAIM_PATTERNS is imported from constants.ts
 
 function hasSource(text: string, item: any) {
   const payload = JSON.stringify(item || {});

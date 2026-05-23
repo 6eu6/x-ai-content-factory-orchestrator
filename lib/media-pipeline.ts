@@ -14,7 +14,7 @@ import { sendTelegramMessage, allowedChatId, htmlEscape, shortText } from './tel
  */
 
 export type MediaRequest = {
-  content_type: 'carousel' | 'video_script' | 'single_tweet_with_image';
+  content_type: 'carousel' | 'video_script' | 'single_tweet_with_image' | 'single_tweet';
   topic: string;
   text_content: any;
   style_hint?: string;
@@ -299,6 +299,7 @@ export async function generateMediaPipeline(request: MediaRequest): Promise<Medi
       break;
 
     case 'single_tweet_with_image':
+    case 'single_tweet':
       mediaItems = await generateTweetImagePrompt(request);
       deliveryFormat = 'telegram_images';
       tweetText = request.text_content?.text || request.topic;
@@ -431,5 +432,5 @@ export async function generateAndDeliverImage(
  * يقرر هل المحتوى يحتاج وسائط
  */
 export function contentNeedsMedia(contentType: string): boolean {
-  return ['carousel', 'video_script', 'single_tweet_with_image'].includes(contentType);
+  return ['carousel', 'video_script', 'single_tweet_with_image', 'single_tweet'].includes(contentType);
 }

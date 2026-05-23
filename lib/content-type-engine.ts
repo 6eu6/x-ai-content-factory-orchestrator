@@ -397,10 +397,13 @@ async function generateThread(ctx: any, taskType: TaskType): Promise<any> {
 
 ANTI-SLOP RULES (CRITICAL):
 - NEVER start with "Thread" or "A thread on X" or "Let me show you" or "Here's what I learned"
-- Start with a PERSONAL framing: "I spent [time] reading [X]..." or "Found something nobody's talking about..." or just STATE the insight directly
+- Start with a DIRECT statement or a QUESTION that creates curiosity
+- DO NOT make first-person claims about results (no "I spent X doing Y" or "I tested this")
+  - Instead use: "Found something nobody's talking about..." or just STATE the insight directly
+  - "I think" and "my approach" are fine — just avoid "I saved/achieved/improved X%"
 - VARY tweet lengths: some 2 lines, some full 280 chars
 - Include at least 1 specific reference (tool name, file path, function name, number)
-- Add a personal reaction: "this surprised me", "honestly didn't expect this"
+- Add a reaction: "this surprised me", "honestly didn't expect this" (without claiming results)
 - Break the flow: add a parenthetical aside or question to reader
 - End with YOUR original insight, not just a summary
 - Each tweet under 280 chars. No hashtags. No Slop words.
