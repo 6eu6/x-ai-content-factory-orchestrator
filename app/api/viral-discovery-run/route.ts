@@ -38,6 +38,7 @@ async function run(req: Request) {
   try {
     assertAuthorized(req);
     const supabase = supabaseAdmin();
+    const url = new URL(req.url);
     const nicheQueries = [
       'AI productivity workflow',
       'AI agents productivity',
@@ -238,6 +239,7 @@ Return JSON with keys:
     }
 
     let learningMemoryResult: any = null;
+    let learningError: string | null = null;
     if (crawlerItems.length > 0) {
       try {
         learningMemoryResult = await learnFromCrawlerItems(supabase, {
@@ -247,7 +249,7 @@ Return JSON with keys:
           mode: url.searchParams.get('mode') || 'trial'
         });
       } catch (learnErr: any) {
-        // Don't fail the whole endpoint if learning fails
+        learningError = learnErr.message;
       }
     }
 
@@ -258,7 +260,7 @@ Return JSON with keys:
       next_recommendation: 'Run daily-run after viral discovery so content uses current viral mechanics.'
     });
 
-    return Response.json({ ok: true, version: VERSION, xResults, webResults, rankedTweets: tweets, intel, learningMemory: learningMemoryResult ? { algorithmRules: learningMemoryResult.algorithmRules, stylePatterns: learningMemoryResult.stylePatterns, mcpOpportunities: learningMemoryResult.mcpOpportunities, rejectedLowQuality: learningMemoryResult.rejectedLowQuality, runId: learningMemoryResult.run?.id } : null, sessionLog: log });
+    return Response.json({ ok: true, version: VERSION, xResults, webResults, rankedTweets: tweets, intel, learningMemory: learningMemoryResult ? { algorithmRules: learningMemoryResult.algorithmRules, stylePatterns: learningMemoryResult.stylePatterns, mcpOpportunities: learningMemoryResult.mcpOpportunities, rejectedLowQuality: learningMemoryResult.rejectedLowQuality, runId: learningMemoryResult.run?.id } : null, learningError, crawlerItemsCount: crawlerItems.length, sessionLog: log });
   } catch (err: any) {
     return Response.json({ ok: false, version: VERSION, error: err.message }, { status: 500 });
   }
