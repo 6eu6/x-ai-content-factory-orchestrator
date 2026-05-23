@@ -3,6 +3,7 @@ import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 import { webSearch } from '../../../lib/web-search';
 import { sourceBoundFilter, safeBriefFromOpportunities, hasUnsupportedEntity, sourceCorpus } from '../../../lib/source-bound';
+import { learnFromCrawlerItems, toArray } from '../../../lib/learning-memory';
 
 const VERSION = 'research-v4-strict-source-bound';
 
@@ -104,8 +105,95 @@ recentContent=${JSON.stringify(recentContent.data)}`;
       await supabase.from('creator_intel').insert(intel.creator_intel_updates.slice(0, 10).map((c: any) => ({ creator_handle: c.creator_handle || 'unknown', post_url: (c.source_urls || [])[0] || null, topic: c.topic || null, hook_pattern: c.hook_pattern || null, format_pattern: c.format_pattern || null, why_it_worked: c.why_it_worked || null, adaptation_idea: c.adaptation_idea || null, status: 'new' })));
     }
 
-    const log = await insertSessionLog({ actions_completed: ['research_intel_run', VERSION, 'strict_source_bound_filter_applied'], decisions_made: [intel.recommended_today], pending_tasks: [intel.daily_run_brief], next_recommendation: 'Run daily-run after reviewing strict source-bound research.' });
-    return Response.json({ ok: true, version: VERSION, search_provider: optionalEnv('SEARCH_PROVIDER', 'auto'), searchResults, intel, sessionLog: log });
+    // --- Normalize intel items for learning-memory ---
+    const crawlerItems = [
+      ...toArray(intel.opportunities).map((o: any) => ({
+        title: o.topic || o.angle || 'opportunity',
+        url: toArray(o.source_urls)[0] || '',
+        source_urls: o.source_urls || [],
+        summary: [o.angle, o.audience_pain, o.evidence_notes].filter(Boolean).join(' | '),
+        confidence_score: o.confidence_score,
+        priority_score: o.priority_score,
+        content_potential_score: o.priority_score
+      })),
+      ...toArray(intel.recommended_today).map((r: any) => ({
+        title: r.topic || r.angle || 'recommended',
+        url: toArray(r.source_urls)[0] || '',
+        source_urls: r.source_urls || [],
+        summary: [r.angle, r.audience_pain, r.evidence_notes].filter(Boolean).join(' | '),
+        confidence_score: r.confidence_score,
+        priority_score: r.priority_score,
+        content_potential_score: r.priority_score
+      })),
+      ...toArray(intel.viral_patterns).map((v: any) => ({
+        title: v.pattern_name || v.hook_style || v.pattern_type || 'viral_pattern',
+        url: toArray(v.source_urls)[0] || '',
+        source_urls: v.source_urls || [],
+        summary: [v.pattern_description, v.why_it_works, v.adaptation_for_30piq].filter(Boolean).join(' | '),
+        confidence_score: v.confidence_score
+      })),
+      ...toArray(intel.creator_intel_updates).map((c: any) => ({
+        title: [c.creator_handle, c.topic, c.hook_pattern].filter(Boolean).join(' — '),
+        url: c.post_url || toArray(c.source_urls)[0] || '',
+        source_urls: c.source_urls || [],
+        summary: [c.hook_pattern, c.format_pattern, c.why_it_worked, c.adaptation_idea].filter(Boolean).join(' | ')
+      })),
+      ...toArray(intel.trend_updates).map((t: any) => ({
+        title: t.topic || t.title || 'trend',
+        url: t.source || toArray(t.source_urls)[0] || '',
+        source_urls: t.source_urls || [],
+        summary: [t.angle || t.notes, t.content_type_suggestion].filter(Boolean).join(' | '),
+        confidence_score: t.heat_score
+      })),
+      ...(intel.github_asset_plan?.needed ? [{
+        title: intel.github_asset_plan.proposed_name || intel.github_asset_plan.repo_goal || 'github_asset',
+        url: toArray(intel.github_asset_plan.source_urls)[0] || '',
+        source_urls: intel.github_asset_plan.source_urls || [],
+        summary: intel.github_asset_plan.reason || intel.github_asset_plan.repo_goal || ''
+      }] : []),
+      ...(intel.article_plan?.needed ? [{
+        title: intel.article_plan.proposed_title || intel.article_plan.topic || 'article',
+        url: toArray(intel.article_plan.source_urls)[0] || '',
+        source_urls: intel.article_plan.source_urls || [],
+        summary: intel.article_plan.reason || intel.article_plan.angle || ''
+      }] : [])
+    ];
+
+    let learningMemoryResult: any = null;
+    if (crawlerItems.length > 0) {
+      learningMemoryResult = await learnFromCrawlerItems(supabase, {
+        runType: 'research_intel_v4',
+        source: 'web_search_crawl',
+        items: crawlerItems,
+        mode: u.searchParams.get('mode') || 'trial'
+      });
+    }
+
+    const log = await insertSessionLog({
+      actions_completed: [
+        'research_intel_run', VERSION, 'strict_source_bound_filter_applied',
+        learningMemoryResult ? `learning_memory:${learningMemoryResult.algorithmRules}algo+${learningMemoryResult.stylePatterns}style+${learningMemoryResult.mcpOpportunities}mcp` : 'learning_memory:skipped'
+      ],
+      decisions_made: [intel.recommended_today],
+      pending_tasks: [intel.daily_run_brief],
+      next_recommendation: 'Run daily-run after reviewing strict source-bound research.'
+    });
+
+    return Response.json({
+      ok: true,
+      version: VERSION,
+      search_provider: optionalEnv('SEARCH_PROVIDER', 'auto'),
+      searchResults,
+      intel,
+      learningMemory: learningMemoryResult ? {
+        algorithmRules: learningMemoryResult.algorithmRules,
+        stylePatterns: learningMemoryResult.stylePatterns,
+        mcpOpportunities: learningMemoryResult.mcpOpportunities,
+        rejectedLowQuality: learningMemoryResult.rejectedLowQuality,
+        runId: learningMemoryResult.run?.id
+      } : null,
+      sessionLog: log
+    });
   } catch (err: any) {
     return Response.json({ ok: false, version: VERSION, error: err.message }, { status: 500 });
   }
