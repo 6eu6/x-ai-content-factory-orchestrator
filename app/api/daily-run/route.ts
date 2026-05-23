@@ -60,7 +60,7 @@ async function run(req: Request) {
       xSnapshot = { warning: 'X live check failed or skipped', error: e.message };
     }
 
-    const [accountState, requirements, targets, recentContent, creatorIntel, trends, viralRuns, viralTweets, viralPatterns] = await Promise.all([
+    const [accountState, requirements, targets, recentContent, creatorIntel, trends, viralRuns, viralTweets, viralPatterns, algoRules, stylePatterns, mcpOpportunities] = await Promise.all([
       supabase.from('account_state').select('*').eq('account_handle', username).maybeSingle(),
       supabase.from('requirement_status').select('*').order('priority', { ascending: true }).limit(50),
       supabase.from('target_plans').select('*').eq('active', true).order('priority', { ascending: true }).limit(50),
@@ -69,7 +69,10 @@ async function run(req: Request) {
       supabase.from('trends').select('*').eq('covered', false).not('notes', 'ilike', 'true%').not('notes', 'ilike', 'false%').order('heat_score', { ascending: false }).limit(20),
       supabase.from('viral_scan_runs').select('*').order('created_at', { ascending: false }).limit(10),
       supabase.from('viral_tweet_analyses').select('*').not('tweet_type', 'is', null).order('engagement_per_1k_followers', { ascending: false }).limit(30),
-      supabase.from('viral_account_patterns').select('*').not('rule', 'in', '(true,false,[object Object])').order('confidence_score', { ascending: false }).order('created_at', { ascending: false }).limit(30)
+      supabase.from('viral_account_patterns').select('*').not('rule', 'in', '(true,false,[object Object])').order('confidence_score', { ascending: false }).order('created_at', { ascending: false }).limit(30),
+      supabase.from('x_algorithm_learning_rules').select('*').eq('status', 'active').order('confidence_score', { ascending: false }).limit(25),
+      supabase.from('viral_style_patterns').select('*').eq('status', 'active').order('confidence_score', { ascending: false }).limit(25),
+      supabase.from('mcp_opportunity_map').select('*').eq('status', 'active').order('priority_score', { ascending: false }).limit(15)
     ]);
 
     const viralMemory = {
@@ -79,12 +82,43 @@ async function run(req: Request) {
       usage_rule: 'Use viral memory as mechanics only. Do not copy creator wording, claims, or examples.'
     };
 
+    const learningMemory = {
+      algorithm_rules: (algoRules.data || []).map((r: any) => ({
+        rule_type: r.rule_type,
+        rule: r.rule,
+        evidence: r.evidence,
+        applies_to: r.applies_to,
+        confidence_score: r.confidence_score,
+        source_type: r.source_type
+      })),
+      style_patterns: (stylePatterns.data || []).map((p: any) => ({
+        pattern_type: p.pattern_type,
+        pattern_name: p.pattern_name,
+        pattern_description: p.pattern_description,
+        example_structure: p.example_structure,
+        why_it_works: p.why_it_works,
+        risks: p.risks,
+        adaptation_for_30piq: p.adaptation_for_30piq,
+        confidence_score: p.confidence_score
+      })),
+      mcp_opportunities: (mcpOpportunities.data || []).map((m: any) => ({
+        opportunity_area: m.opportunity_area,
+        mcp_use_case: m.mcp_use_case,
+        audience_segment: m.audience_segment,
+        pain_point: m.pain_point,
+        content_angles: m.content_angles,
+        priority_score: m.priority_score,
+        confidence_score: m.confidence_score
+      })),
+      usage_rule: 'Use algorithm rules to score and plan content. Use style patterns as mechanics for hooks, formats, and structures. Use MCP opportunities for repo/article decisions. Never copy source wording or claims.'
+    };
+
     const rawContentPack = await generateDailyContentPack({
       accountState: { db: accountState.data, xSnapshot },
       targets: targets.data,
       requirements: requirements.data,
       recentContent: recentContent.data,
-      creatorIntel: { creator_intel: creatorIntel.data, trends: trends.data, viral_memory: viralMemory }
+      creatorIntel: { creator_intel: creatorIntel.data, trends: trends.data, viral_memory: viralMemory, learning_memory: learningMemory }
     });
     const contentPack = enrichGrowthOperatorPack(rawContentPack);
 
@@ -173,7 +207,7 @@ async function run(req: Request) {
       ok: true,
       orchestrator_version: ORCHESTRATOR_VERSION,
       xSnapshot,
-      research_context: { trends: trends.data, creator_intel: creatorIntel.data, viral_memory: viralMemory },
+      research_context: { trends: trends.data, creator_intel: creatorIntel.data, viral_memory: viralMemory, learning_memory: learningMemory },
       contentPack: { ...contentPack, quality_gate: qualityResults, ready_count: readyCount, safe_to_publish: readyCount > 0 },
       daily_checkin: runRow,
       sessionLog,

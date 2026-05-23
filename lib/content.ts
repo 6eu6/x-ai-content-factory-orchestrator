@@ -203,11 +203,21 @@ function normalizePack(pack: any) {
 export async function generateDailyContentPack(input: { accountState: unknown; targets: unknown; requirements: unknown; recentContent: unknown; creatorIntel: unknown; }) {
   const client = buildClient();
   const model = optionalEnv('OPENAI_MODEL', optionalEnv('OPENAI_BASE_URL').includes('openrouter.ai') ? 'openai/gpt-4.1-mini' : 'gpt-4.1-mini');
+  const learningMemory = (input.creatorIntel as any)?.learning_memory || null;
+  const learningMemoryContext = learningMemory ? `
+LEARNING MEMORY (from all learning pipelines — repo-deep-learn, research-intel-v4, viral-account-scan, viral-discovery-run):
+- Algorithm rules: ${JSON.stringify(learningMemory.algorithm_rules?.slice(0, 15) || [])}
+- Style patterns: ${JSON.stringify(learningMemory.style_patterns?.slice(0, 15) || [])}
+- MCP opportunities: ${JSON.stringify(learningMemory.mcp_opportunities?.slice(0, 10) || [])}
+- Usage: Apply algorithm rules when scoring content. Use style patterns as mechanics for hooks, formats, structures. Use MCP opportunities for repo/article decisions. Never copy source wording or claims.
+${learningMemory.usage_rule || ''}
+` : '';
+
   const prompt = `
 You are the growth operator for @${optionalEnv('X_USERNAME', '30piq')}, an English X account about AI x Productivity x Career Growth.
 
 Create one practical daily mission using research context, Supabase state, recent content, and viral_memory. Viral memory is only for mechanics: hook shape, timing, reply triggers, bookmark triggers, quote filters, and format patterns. Never copy creator wording or claims.
-
+${learningMemoryContext}
 Critical rules:
 - Output valid JSON only.
 - Use plain ASCII punctuation only.
