@@ -2,6 +2,7 @@ import { assertAuthorized, optionalEnv } from '../../../lib/env';
 import { prepareAndDeliverDailyPack } from '../../../lib/publishing-pipeline';
 import { supabaseAdmin } from '../../../lib/supabase';
 import { ContentType } from '../../../lib/content-type-engine';
+import { parseModelJson } from '../../../lib/model-router';
 
 /**
  * POST /api/publish-pack
@@ -43,7 +44,7 @@ export async function POST(req: Request) {
         diverseContent = recentContent.map((item: any) => {
           let content = {};
           try {
-            if (item.final_text) content = JSON.parse(item.final_text);
+            if (item.final_text) content = parseModelJson(item.final_text);
           } catch {
             content = { text: item.hook_text || item.final_text || '' };
           }

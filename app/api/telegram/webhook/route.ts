@@ -212,9 +212,17 @@ async function learningStatus(supabase: any, chatId: string) {
 }
 
 async function dailyTasks(supabase: any, chatId: string) {
-  const { data } = await supabase.from('action_queue').select('priority,action_type,instruction,status,created_at').eq('status', 'pending').order('created_at', { ascending: false }).order('priority', { ascending: true }).limit(8);
+  const { data } = await supabase.from('action_queue').select('priority,action_type,instruction,status,created_at').eq('status', 'pending').order('priority', { ascending: true }).order('created_at', { ascending: false }).limit(15);
   if (!data?.length) return reply(chatId, 'لا توجد مهام معلقة.');
-  const lines = data.map((x: any, i: number) => `${i + 1}. [${htmlEscape(x.action_type)}] ${htmlEscape(shortText(x.instruction, 160))}`);
+  // إزالة التكرار حسب النص
+  const seen = new Set<string>();
+  const unique = data.filter((x: any) => {
+    const key = String(x.instruction || '').trim().toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, 8);
+  const lines = unique.map((x: any, i: number) => `${i + 1}. [${htmlEscape(x.action_type)}] ${htmlEscape(shortText(x.instruction, 160))}`);
   return reply(chatId, `<b>المهام اليومية</b>\n${lines.join('\n')}`);
 }
 

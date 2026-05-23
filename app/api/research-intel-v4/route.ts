@@ -1,17 +1,11 @@
-import OpenAI from 'openai';
-import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
-import { parseModelJson } from '../../../lib/model-router';
+import { assertAuthorized, optionalEnv } from '../../../lib/env';
+import { callModel, parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 import { webSearch } from '../../../lib/web-search';
 import { sourceBoundFilter, safeBriefFromOpportunities, hasUnsupportedEntity, sourceCorpus } from '../../../lib/source-bound';
 import { learnFromCrawlerItems, toArray } from '../../../lib/learning-memory';
 
-const VERSION = 'research-v4-strict-source-bound';
-
-function client() {
-  const baseURL = optionalEnv('OPENAI_BASE_URL');
-  return new OpenAI({ apiKey: requiredEnv('OPENAI_API_KEY'), baseURL: baseURL || undefined });
-}
+const VERSION = 'research-v4-strict-source-bound-model-router';
 
 function sanitize(raw: any, searchResults: any[]) {
   const corpus = sourceCorpus(searchResults);
@@ -87,17 +81,12 @@ trends=${JSON.stringify(trends.data)}
 accountState=${JSON.stringify(accountState.data)}
 recentContent=${JSON.stringify(recentContent.data)}`;
 
-    const completion = await client().chat.completions.create({
-      model: optionalEnv('OPENAI_MODEL', 'gpt-4.1-mini'),
-      temperature: 0.03,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: 'Strict source-bound extraction. No unsupported entities. No fake metrics. Every action needs source_urls.' },
-        { role: 'user', content: prompt }
-      ]
-    });
+    const modelResponse = await callModel('research_synthesis', [
+      { role: 'system', content: 'Strict source-bound extraction. No unsupported entities. No fake metrics. Every action needs source_urls. Return strict JSON only.' },
+      { role: 'user', content: prompt }
+    ], { temperature: 0.03 });
 
-    const raw = parseModelJson(completion.choices[0]?.message?.content || '');
+    const raw = parseModelJson(modelResponse);
     const intel = sanitize(raw, searchResults);
 
     if (intel.trend_updates.length) {
