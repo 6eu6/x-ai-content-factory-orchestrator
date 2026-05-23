@@ -209,13 +209,62 @@ Docs: ${JSON.stringify(docs)}`;
       decisionsInserted = data?.length || 0;
     }
 
+    const autolearn = u.searchParams.get('autolearn') === '1';
+    const automaintain = u.searchParams.get('automaintain') === '1';
+    const mode = u.searchParams.get('mode') || 'trial';
+    const secret = u.searchParams.get('secret') || '';
+
     const log = await insertSessionLog({
-      actions_completed: ['repo_ingest', VERSION, r.full, `files:${docs.length}`, `rules:${rulesInserted}`, `opportunities:${opportunitiesInserted}`, `repo_decisions:${decisionsInserted}`],
+      actions_completed: ['repo_ingest', VERSION, r.full, `files:${docs.length}`, `rules:${rulesInserted}`, `opportunities:${opportunitiesInserted}`, `repo_decisions:${decisionsInserted}`, autolearn ? 'autolearn_enabled' : 'autolearn_disabled', automaintain ? 'automaintain_enabled' : 'automaintain_disabled'],
       decisions_made: [intel.repo_summary || {}, { scores }],
-      pending_tasks: decisions.map((x: any) => `Build repo: ${x.proposed_name}`),
-      next_recommendation: 'Run format-decision for opportunities or build approved repo decisions.'
+      pending_tasks: [
+        ...decisions.map((x: any) => `Build repo: ${x.proposed_name}`),
+        ...(autolearn ? [`Auto-deep-learn ${r.full} in progress`] : []),
+        ...(automaintain ? ['Auto memory-maintenance-run queued'] : [])
+      ],
+      next_recommendation: autolearn ? 'Deep learning is running automatically. Check growth_learning_runs for results.' : 'Run repo-deep-learn to deeply learn from ingested files.'
     });
-    return Response.json({ ok: true, version: VERSION, repo: { id: repoRow.id, repo_url: meta.html_url, github_full_name: r.full }, files_loaded: docs.length, inserted: { rules: rulesInserted, opportunities: opportunitiesInserted, repo_creation_decisions: decisionsInserted }, intel, sessionLog: log });
+
+    const baseUrl = `${u.protocol}//${u.host}`;
+
+    if (autolearn) {
+      const learnUrl = `${baseUrl}/api/repo-deep-learn?secret=${encodeURIComponent(secret)}&repo=${encodeURIComponent(r.full)}&mode=${mode}&limit=20&force=0`;
+      fetch(learnUrl, { method: 'GET' }).then(async (res) => {
+        const learnResult = await res.json().catch(() => ({}));
+        console.log(`[autolearn] repo-deep-learn completed for ${r.full}:`, JSON.stringify(learnResult.counts || {}));
+
+        if (automaintain) {
+          const maintainUrl = `${baseUrl}/api/memory-maintenance-run?secret=${encodeURIComponent(secret)}&mode=${mode}`;
+          try {
+            const maintainRes = await fetch(maintainUrl, { method: 'GET' });
+            const maintainResult = await maintainRes.json().catch(() => ({}));
+            console.log(`[automaintain] memory-maintenance-run completed:`, JSON.stringify(maintainResult.counts || {}));
+          } catch (e: any) {
+            console.error(`[automaintain] memory-maintenance-run failed:`, e.message);
+          }
+        }
+      }).catch((e: any) => {
+        console.error(`[autolearn] repo-deep-learn failed for ${r.full}:`, e.message);
+      });
+    }
+
+    return Response.json({
+      ok: true,
+      version: VERSION,
+      repo: { id: repoRow.id, repo_url: meta.html_url, github_full_name: r.full },
+      files_loaded: docs.length,
+      inserted: { rules: rulesInserted, opportunities: opportunitiesInserted, repo_creation_decisions: decisionsInserted },
+      pipeline: {
+        autolearn,
+        automaintain,
+        status: autolearn ? 'deep_learning_in_background' : 'manual_deep_learn_required',
+        next_steps: autolearn
+          ? ['repo-deep-learn running in background', automaintain ? 'memory-maintenance-run will follow automatically' : 'Run memory-maintenance-run after deep learning completes']
+          : ['Run repo-deep-learn manually', 'Then run memory-maintenance-run']
+      },
+      intel,
+      sessionLog: log
+    });
   } catch (err: any) {
     return Response.json({ ok: false, version: VERSION, error: err.message }, { status: 500 });
   }
