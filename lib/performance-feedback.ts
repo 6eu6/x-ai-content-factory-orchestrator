@@ -281,25 +281,24 @@ Return JSON array matching each tweet:
     try {
       if (update.type === 'rule_boost' || update.type === 'rule_decay') {
         // زوّد أو نقّص ثقة القواعد النشطة الأخيرة
-        const direction = update.confidence_delta > 0 ? 'boost' : 'decay';
-        await supabase.rpc('adjust_rule_confidence', {
-          delta: update.confidence_delta,
-          limit_count: 5,
-          direction
-        }).catch(() => {
-          // لو الـ RPC ما موجود، حدّث مباشرة
-          return supabase
-            .from(update.target_table)
-            .update({
-              confidence_score: supabase.rpc('greatest', [
-                0.1,
-                supabase.rpc('least', [1.0, supabase.rpc('raw_delta', { table: update.target_table, delta: update.confidence_delta })])
-              ])
-            })
-            .eq('status', 'active')
-            .order('created_at', { ascending: false })
-            .limit(5);
-        });
+        // جلب القواعد ثم تحديثها يدوياً (بدون RPC)
+        const { data: recentRules } = await supabase
+          .from(update.target_table)
+          .select('id, confidence_score')
+          .eq('status', 'active')
+          .order('created_at', { ascending: false })
+          .limit(5);
+
+        if (recentRules && recentRules.length > 0) {
+          for (const rule of recentRules) {
+            const currentScore = Number(rule.confidence_score) || 0.5;
+            const newScore = Math.max(0.1, Math.min(1.0, currentScore + update.confidence_delta));
+            await supabase
+              .from(update.target_table)
+              .update({ confidence_score: Math.round(newScore * 1000) / 1000 })
+              .eq('id', rule.id);
+          }
+        }
       }
     } catch {}
   }

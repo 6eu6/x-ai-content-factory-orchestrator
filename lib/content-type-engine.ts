@@ -1,4 +1,4 @@
-import { callModel } from './model-router';
+import { callModel, TaskType } from './model-router';
 import { supabaseAdmin } from './supabase';
 import { optionalEnv } from './env';
 
@@ -253,7 +253,7 @@ export async function planDailyContent(
     items: plannedItems,
     variety_check: {
       types_used: typesPlanned,
-      types_missing,
+      types_missing: typesMissing,
       recommendation: typesMissing.length > 3
         ? `Missing content types: ${typesMissing.join(', ')}. Consider producing these soon for algorithm diversity.`
         : 'Good variety this cycle.'
@@ -261,7 +261,7 @@ export async function planDailyContent(
   };
 }
 
-function getModelTaskForType(type: ContentType): string {
+function getModelTaskForType(type: ContentType): TaskType {
   switch (type) {
     case 'article': return 'article_writing';
     case 'thread': return 'thread_writing';
@@ -301,7 +301,7 @@ export async function generateContentByType(
     sources?: string[];
   }
 ): Promise<any> {
-  const taskType = getModelTaskForType(type) as any;
+  const taskType = getModelTaskForType(type);
   
   switch (type) {
     case 'single_tweet':
@@ -323,7 +323,7 @@ export async function generateContentByType(
   }
 }
 
-async function generateSingleTweet(ctx: any, taskType: string): Promise<any> {
+async function generateSingleTweet(ctx: any, taskType: TaskType): Promise<any> {
   const response = await callModel(taskType, [
     {
       role: 'system',
@@ -343,7 +343,7 @@ Return: {"text":"...","why_it_works":"...","originality_element":"...","reply_tr
   try { return JSON.parse(response); } catch { return { text: response, why_it_works: '', originality_element: '' }; }
 }
 
-async function generateThread(ctx: any, taskType: string): Promise<any> {
+async function generateThread(ctx: any, taskType: TaskType): Promise<any> {
   const response = await callModel(taskType, [
     {
       role: 'system',
@@ -382,7 +382,7 @@ Return JSON:
   try { return JSON.parse(response); } catch { return { hook: response, tweets: [] }; }
 }
 
-async function generateArticle(ctx: any, taskType: string): Promise<any> {
+async function generateArticle(ctx: any, taskType: TaskType): Promise<any> {
   const response = await callModel(taskType, [
     {
       role: 'system',
@@ -417,7 +417,7 @@ Return JSON:
   try { return JSON.parse(response); } catch { return { headline: response }; }
 }
 
-async function generateCarousel(ctx: any, taskType: string): Promise<any> {
+async function generateCarousel(ctx: any, taskType: TaskType): Promise<any> {
   const response = await callModel(taskType, [
     {
       role: 'system',
@@ -450,7 +450,7 @@ Return JSON:
   try { return JSON.parse(response); } catch { return { slides: [] }; }
 }
 
-async function generateVideoScript(ctx: any, taskType: string): Promise<any> {
+async function generateVideoScript(ctx: any, taskType: TaskType): Promise<any> {
   const response = await callModel(taskType, [
     {
       role: 'system',
@@ -491,7 +491,7 @@ Return JSON:
   try { return JSON.parse(response); } catch { return { title: response }; }
 }
 
-async function generateReply(ctx: any, taskType: string): Promise<any> {
+async function generateReply(ctx: any, taskType: TaskType): Promise<any> {
   const response = await callModel(taskType, [
     {
       role: 'system',
@@ -522,7 +522,7 @@ Return JSON:
   try { return JSON.parse(response); } catch { return { prepared_reply: response }; }
 }
 
-async function generateQuotePost(ctx: any, taskType: string): Promise<any> {
+async function generateQuotePost(ctx: any, taskType: TaskType): Promise<any> {
   const response = await callModel(taskType, [
     {
       role: 'system',
