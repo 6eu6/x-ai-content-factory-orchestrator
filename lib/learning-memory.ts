@@ -35,6 +35,14 @@ function normalizeKey(value: string, max = 80) {
 
 function classifyMechanism(text: string) {
   const t = text.toLowerCase();
+  if (/hook|viral|thread|reply|quote|bookmark|playbook|guide|checklist|engagement question|content format|post structure|tweet format/.test(t)) return {
+    type: 'hook',
+    key: 'portable_success_mechanic',
+    name: 'Portable success mechanic',
+    mechanism: 'Extract the success mechanic from any niche and adapt the mechanic, not the topic, to @30piq.',
+    structure: ['winning mechanic', 'why it works', '30piq adaptation'],
+    risk: 'Can become imitation if wording, topic, or creator framing is copied.'
+  };
   if (/comparison|compare|alternatives|top \d+|best .* tools|vs\b/.test(t)) return {
     type: 'bookmark_trigger',
     key: 'decision_filter_comparison',
@@ -82,14 +90,6 @@ function classifyMechanism(text: string) {
     mechanism: 'Translate a credible research/source claim into one practical operating rule.',
     structure: ['source-backed observation', 'implication', 'operator rule'],
     risk: 'Can overclaim if the post states research conclusions beyond the source.'
-  };
-  if (/hook|viral|thread|reply|quote|bookmark|playbook|guide/.test(t)) return {
-    type: 'hook',
-    key: 'portable_success_mechanic',
-    name: 'Portable success mechanic',
-    mechanism: 'Extract the success mechanic from any niche and adapt the mechanic, not the topic, to @30piq.',
-    structure: ['winning mechanic', 'why it works', '30piq adaptation'],
-    risk: 'Can become imitation if wording, topic, or creator framing is copied.'
   };
   return null;
 }
