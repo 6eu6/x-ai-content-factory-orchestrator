@@ -8,7 +8,7 @@ import { shieldCheck } from '../../../lib/account-shield';
 import { planDailyContent, generateContentByType, ContentType } from '../../../lib/content-type-engine';
 import { prepareAndDeliverDailyPack } from '../../../lib/publishing-pipeline';
 
-const ORCHESTRATOR_VERSION = `${GROWTH_OPERATOR_VERSION}+model-router+shield+content-types+media-pipeline+publishing+learning-loop`;
+const ORCHESTRATOR_VERSION = `${GROWTH_OPERATOR_VERSION}+model-router+shield-v2+content-types-v2+media-pipeline-v2+publishing-v2+learning-loop-v2`;
 
 function uniqueActions(actions: string[]) {
   const seen = new Set<string>();

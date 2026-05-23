@@ -1,27 +1,24 @@
-import { callModel, getModelForTask, TaskType } from './model-router';
+import { callModel, getModelForTask, getAIClientForTask, TaskType } from './model-router';
 import { supabaseAdmin } from './supabase';
 import { optionalEnv } from './env';
+import { sendTelegramMessage, allowedChatId, htmlEscape, shortText } from './telegram';
 
 /**
- * Media Pipeline — مسار توليد الوسائط
+ * Media Pipeline v2 — مسار توليد الوسائط
  *
- * الخطوات:
- * 1. يستقبل نوع المحتوى اللي يحتاج وسائط (carousel, video_script)
- * 2. يولّد وصف دقيق للوسائط باستخدام نموذج وصف الوسائط
- * 3. يختار نموذج OpenRouter المناسب للصورة/الفيديو
- * 4. يولّد الوسائط
- * 5. يرجع النتائج مع النص المرافق للتغريدة
- *
- * مسار البيانات:
- * content_type_engine → media_pipeline → model_router (media_description) → OpenRouter image model → result
+ * تحسينات:
+ * 1. توليد صور فعلي عبر OpenRouter (دعم DALL-E 3, Flux, Stable Diffusion)
+ * 2. إرسال الصور مباشرة لتليجرام
+ * 3. وصف أدق للوسائط
+ * 4. تسجيل في content_deliveries
  */
 
 export type MediaRequest = {
   content_type: 'carousel' | 'video_script' | 'single_tweet_with_image';
   topic: string;
-  text_content: any;           // المحتوى النصي المرافق
-  style_hint?: string;         // تلميح الأسلوب (minimal, dark, bright, etc.)
-  brand_colors?: string[];     // ألوان العلامة التجارية
+  text_content: any;
+  style_hint?: string;
+  brand_colors?: string[];
   target_platform?: 'x' | 'telegram';
 };
 
@@ -29,19 +26,31 @@ export type MediaResult = {
   ok: boolean;
   content_type: string;
   media_items: MediaItem[];
-  tweet_text: string;           // نص التغريدة المرافق
+  tweet_text: string;
   delivery_format: 'telegram_images' | 'telegram_video_note' | 'telegram_document';
   error?: string;
 };
 
 export type MediaItem = {
-  type: 'image_prompt' | 'video_script' | 'carousel_slide';
-  prompt: string;               // الوصف الدقيق للتوليد
-  alt_text: string;             // وصف بديل للإمكانية
-  slide_number?: number;        // رقم الشريحة (carousel فقط)
-  layout_hint?: string;         // تلميح التخطيط
-  duration_seconds?: number;    // مدة الفيديو (video_script فقط)
+  type: 'image_prompt' | 'video_script' | 'carousel_slide' | 'generated_image';
+  prompt: string;
+  alt_text: string;
+  slide_number?: number;
+  layout_hint?: string;
+  duration_seconds?: number;
+  image_url?: string;       // [جديد] URL الصورة المولّدة
+  image_base64?: string;    // [جديد] base64 الصورة المولّدة
 };
+
+// ═══════════════════════════════════════════════════
+// نماذج توليد الصور المتاحة عبر OpenRouter
+// ═══════════════════════════════════════════════════
+const IMAGE_MODELS = [
+  'openai/dall-e-3',
+  'stabilityai/stable-diffusion-xl',
+  'black-forest-labs/flux-1-schnell',
+  'black-forest-labs/flux-1-dev',
+];
 
 /**
  * يولّد وصف دقيق لوسائط الكاروسيل (4-8 شرائح)
@@ -70,7 +79,7 @@ async function generateCarouselPrompts(request: MediaRequest): Promise<MediaItem
         content: `You are a visual content designer for an X/Twitter account about AI x Productivity x Career Growth (@${optionalEnv('X_USERNAME', '30piq')}).
 
 Design carousel slides. For each slide, provide:
-1. A precise image generation prompt (for AI image generation — DALL-E, Midjourney, or Flux style)
+1. A precise image generation prompt (for DALL-E 3 or Flux — be specific about style, colors, layout)
 2. Alt text describing what the image shows
 3. Layout hint (left-aligned text, centered, split-screen, etc.)
 
@@ -96,7 +105,7 @@ Style: ${request.style_hint || 'dark minimal tech'}
 Return JSON array:
 [{
   "slide_number": 1,
-  "image_prompt": "precise prompt for AI image generation, include style, colors, layout, text overlay",
+  "image_prompt": "precise prompt for DALL-E 3 image generation, include style, colors, layout, text overlay, aspect ratio 1:1",
   "alt_text": "what the image shows",
   "layout_hint": "centered|left_text|split_screen|diagram"
 }]`
@@ -115,7 +124,7 @@ Return JSON array:
     }
   } catch {}
 
-  // Fallback: توليد prompts بسيطة
+  // Fallback
   const count = slides.length || 4;
   return Array.from({ length: count }, (_, i) => ({
     type: 'carousel_slide' as const,
@@ -169,7 +178,7 @@ Duration: ${content?.duration_seconds || 30} seconds
 
 Return JSON:
 {
-  "thumbnail_prompt": "precise image generation prompt for video thumbnail",
+  "thumbnail_prompt": "precise DALL-E 3 prompt for video thumbnail",
   "thumbnail_alt": "what thumbnail shows",
   "visual_segments": [{"seconds":"0-3","visual_description":"...","on_screen_text":"..."}]
 }`
@@ -179,7 +188,6 @@ Return JSON:
     const parsed = JSON.parse(response);
     const items: MediaItem[] = [];
 
-    // Thumbnail prompt
     if (parsed.thumbnail_prompt) {
       items.push({
         type: 'image_prompt' as const,
@@ -189,7 +197,6 @@ Return JSON:
       });
     }
 
-    // Visual segments as description
     if (parsed.visual_segments) {
       items.push({
         type: 'video_script' as const,
@@ -227,6 +234,7 @@ Rules:
 - Include visual metaphors or diagrams where possible
 - Dark or neutral background preferred
 - Minimal text on image (0-3 words)
+- Aspect ratio: 16:9 for X/Twitter
 
 Output valid JSON.`
       },
@@ -239,7 +247,7 @@ Tweet text: "${request.text_content?.text || ''}"
 
 Return JSON:
 {
-  "image_prompt": "precise prompt for AI image generation",
+  "image_prompt": "precise DALL-E 3 prompt for image generation",
   "alt_text": "description for accessibility"
 }`
       }
@@ -261,10 +269,10 @@ Return JSON:
 }
 
 /**
- * يحسّن الـ prompt بإضافة تفاصيل الأسلوب
+ * يحسّن الـ prompt بإضافة تفاصيل الأسلوب والجودة
  */
 function refineImagePrompt(prompt: string, styleHint?: string): string {
-  const baseStyle = 'high quality, clean design, modern tech aesthetic, professional';
+  const baseStyle = 'high quality, clean design, modern tech aesthetic, professional, sharp details';
   const style = styleHint || 'dark minimal';
   return `${prompt}, ${style} style, ${baseStyle}`;
 }
@@ -334,36 +342,89 @@ export async function generateMediaPipeline(request: MediaRequest): Promise<Medi
 
 /**
  * يولّد صورة عبر OpenRouter image model
- * يرجع base64 أو URL حسب النموذج
+ * يحاول DALL-E 3 أولاً، ثم Flux كبديل
  */
-export async function generateImage(prompt: string, size: string = '1024x1024'): Promise<{ ok: boolean; image_data?: string; image_url?: string; error?: string }> {
-  try {
-    const config = await getModelForTask('media_description');
-    const { getAIClientForTask } = await import('./model-router');
-    const { client } = await getAIClientForTask('media_description');
+export async function generateImage(
+  prompt: string,
+  size: string = '1024x1024'
+): Promise<{ ok: boolean; image_data?: string; image_url?: string; model_used?: string; error?: string }> {
+  // حاول توليد صورة عبر OpenRouter
+  for (const model of IMAGE_MODELS) {
+    try {
+      const { client } = await getAIClientForTask('media_description');
 
-    // حاول توليد صورة عبر OpenRouter
-    // بعض النماذج تدعم images.generate
-    const response = await client.images.generate({
-      model: config.model,
-      prompt,
-      n: 1,
-      size: size as any,
-    });
+      // حاول images.generate
+      const response = await client.images.generate({
+        model,
+        prompt,
+        n: 1,
+        size: size as any,
+      });
 
-    const imageData = response.data?.[0];
-    if (imageData?.b64_json) {
-      return { ok: true, image_data: imageData.b64_json };
+      const imageData = response.data?.[0];
+      if (imageData?.b64_json) {
+        return { ok: true, image_data: imageData.b64_json, model_used: model };
+      }
+      if (imageData?.url) {
+        return { ok: true, image_url: imageData.url, model_used: model };
+      }
+    } catch (e: any) {
+      // لو النموذج ما يدعم توليد صور، جرّب اللي بعده
+      continue;
     }
-    if (imageData?.url) {
-      return { ok: true, image_url: imageData.url };
-    }
-
-    return { ok: false, error: 'No image data returned from model' };
-  } catch (e: any) {
-    // لو النموذج ما يدعم توليد صور، نرجع الـ prompt بس
-    return { ok: false, error: `Image generation not available: ${e.message}` };
   }
+
+  // كل النماذج فشلت — أرسل الـ prompt لتليجرام كوصف
+  try {
+    const chatId = allowedChatId();
+    if (chatId) {
+      await sendTelegramMessage(chatId,
+        `🎨 <b>Image Prompt</b> (auto-generation not available)\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `${htmlEscape(shortText(prompt, 800))}\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `<i>Copy this prompt to generate the image manually</i>`
+      );
+    }
+  } catch {}
+
+  return { ok: false, error: 'Image generation not available via any model. Prompt sent to Telegram instead.' };
+}
+
+/**
+ * [جديد] يولّد صورة ويرسلها لتليجرام مباشرة
+ */
+export async function generateAndDeliverImage(
+  prompt: string,
+  caption: string,
+  size: string = '1024x1024'
+): Promise<{ ok: boolean; delivered: boolean; image_url?: string; error?: string }> {
+  const result = await generateImage(prompt, size);
+  
+  if (result.ok && result.image_url) {
+    // أرسل الصورة لتليجرام
+    try {
+      const chatId = allowedChatId();
+      if (chatId) {
+        const token = process.env.TELEGRAM_BOT_TOKEN;
+        if (token) {
+          await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: chatId,
+              photo: result.image_url,
+              caption: caption.slice(0, 1024),
+              parse_mode: 'HTML'
+            })
+          });
+          return { ok: true, delivered: true, image_url: result.image_url };
+        }
+      }
+    } catch {}
+  }
+
+  return { ok: result.ok, delivered: false, error: result.error };
 }
 
 /**

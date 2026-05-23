@@ -3,7 +3,7 @@ import { supabaseAdmin } from './supabase';
 import { callModel, TaskType } from './model-router';
 
 /**
- * Account Shield — طبقة حماية الحساب
+ * Account Shield — طبقة حماية الحساب v2
  *
  * يفحص كل محتوى قبل التسليم للتأكد إنه:
  * 1. ما فيه أنماط AI مكتشفة (Slop Detection)
@@ -11,6 +11,8 @@ import { callModel, TaskType } from './model-router';
  * 3. ما يخالف الخوارزمية المخزنة في الذاكرة
  * 4. فيه عنصر أصلي حقيقي (Originality Gate)
  * 5. أي ادعاء رقمي له مصدر (Claim Verification)
+ * 6. [جديد] فحص AI عميق — يحلل الأسلوب والبنية
+ * 7. [جديد] اقتراحات إعادة كتابة ذكية
  */
 
 export type ShieldResult = {
@@ -19,6 +21,8 @@ export type ShieldResult = {
   checks: ShieldCheck[];
   summary: string;
   suggestions: string[];
+  ai_rewrite?: string;     // [جديد] نسخة مُعاد كتابتها
+  ai_analysis?: string;    // [جديد] تحليل AI مفصّل
 };
 
 export type ShieldCheck = {
@@ -38,7 +42,12 @@ const SLOP_FORBIDDEN_WORDS = [
   'game-changer', 'gamechanger', 'unlock the power',
   'in this thread', "let's dive in", 'here\'s the thing',
   'a thread on', 'in today\'s fast-paced', 'unlocking',
-  'everything you need to know'
+  'everything you need to know',
+  // إضافة: المزيد من كلمات AI المكتشفة
+  'it\'s worth noting', 'at the end of the day', 'the reality is',
+  'needless to say', 'important to note', 'it goes without saying',
+  'landscape', 'realm', 'robust', 'seamless', 'cutting-edge',
+  'next-generation', 'state-of-the-art', 'paradigm shift'
 ];
 
 const SLOP_FORBIDDEN_PATTERNS = [
@@ -50,19 +59,22 @@ const SLOP_FORBIDDEN_PATTERNS = [
   /unlock the power of/i,
   /game.?changer/i,
   /revolutionize your workflow/i,
-  /^\d+\.\s+\w+/m,              // قائمة مرقمة كبداية
-  /^[-•]\s+\w+/m,               // قائمة نقطية كبداية
+  /^\d+\.\s+\w+/m,
+  /^[-•]\s+\w+/m,
+  /here are \d+ (ways|things|reasons|tips)/i,
+  /if you want to \w+, you need to/i,
+  /the (secret|key) to \w+ is/i,
 ];
 
 // ═══════════════════════════════════════════════════
 // قواعد الحساب الصغير (أقل من 500 متابع)
 // ═══════════════════════════════════════════════════
 const LOW_FOLLOWER_RULES = {
-  max_external_links: 0,         // لا روابط خارجية
-  max_tags_per_tweet: 0,         // لا tags
-  max_replies_per_hour: 4,       // حد أقصى للردود
-  no_identical_replies: true,    // لا ردود متشابهة
-  no_mass_following: true        // لا متابعة جماعية
+  max_external_links: 0,
+  max_tags_per_tweet: 0,
+  max_replies_per_hour: 4,
+  no_identical_replies: true,
+  no_mass_following: true
 };
 
 // ═══════════════════════════════════════════════════
@@ -141,6 +153,68 @@ async function getAlgorithmRules(): Promise<string[]> {
 }
 
 /**
+ * [جديد] فحص AI عميق — يحلل الأسلوب والبنية باستخدام نموذج
+ */
+async function aiDeepCheck(
+  text: string,
+  contentType: string,
+  originalityElement?: string,
+  mechanicUsed?: string
+): Promise<{ analysis: string; rewrite_suggestion: string; ai_detected: boolean }> {
+  try {
+    const response = await callModel('shield_check', [
+      {
+        role: 'system',
+        content: `You are an AI content detector and Twitter/X shield checker for @${optionalEnv('X_USERNAME', '30piq')}.
+Analyze the text for:
+1. AI-generated patterns (slop, formulaic structure, generic phrasing)
+2. Risk to account reputation
+3. Algorithm compatibility
+4. Engagement potential
+
+Then suggest a BETTER version that:
+- Sounds like a smart friend in tech, not a content mill
+- Varies sentence length (some 3 words, some 15 words)
+- Includes a specific detail, name, or reference
+- Has a conversational hook
+- Avoids all AI-slop words and patterns
+- Under 240 characters for tweets
+
+Return JSON only.`
+      },
+      {
+        role: 'user',
+        content: `Analyze this ${contentType} content:
+
+"${text}"
+
+Originality element: ${originalityElement || 'none'}
+Mechanic used: ${mechanicUsed || 'none'}
+
+Return JSON:
+{
+  "analysis": "detailed analysis of what's wrong and what's right",
+  "ai_detected": true/false,
+  "ai_confidence": 0.0-1.0,
+  "issues": ["issue1", "issue2"],
+  "rewrite_suggestion": "better version of the text that passes all checks",
+  "engagement_prediction": "low|medium|high"
+}`
+      }
+    ]);
+
+    const parsed = JSON.parse(response);
+    return {
+      analysis: parsed.analysis || '',
+      rewrite_suggestion: parsed.rewrite_suggestion || '',
+      ai_detected: parsed.ai_detected ?? false
+    };
+  } catch {
+    return { analysis: '', rewrite_suggestion: '', ai_detected: false };
+  }
+}
+
+/**
  * الفحص الرئيسي — يفحص أي محتوى قبل التسليم
  */
 export async function shieldCheck(
@@ -152,6 +226,7 @@ export async function shieldCheck(
     mechanic_used?: string;
     reply_trigger?: string;
     bookmark_trigger?: string;
+    deep_check?: boolean;   // [جديد] فحص AI عميق
   }
 ): Promise<ShieldResult> {
   const checks: ShieldCheck[] = [];
@@ -334,6 +409,31 @@ export async function shieldCheck(
     checks.push({ name: 'tweet_length', passed: true, severity: 'info', detail: `Length: ${text.length} chars` });
   }
 
+  // ═══ 11. [جديد] فحص AI عميق — لو طلب أو لو في warning ═══
+  let aiAnalysis = '';
+  let aiRewrite = '';
+
+  const hasWarnings = checks.some(c => c.severity === 'warn' || c.severity === 'block');
+  if (content.deep_check || hasWarnings) {
+    const deepResult = await aiDeepCheck(text, content.type, content.originality_element, content.mechanic_used);
+    aiAnalysis = deepResult.analysis;
+    aiRewrite = deepResult.rewrite_suggestion;
+
+    if (deepResult.ai_detected) {
+      checks.push({
+        name: 'ai_style_detected',
+        passed: false,
+        severity: 'warn',
+        detail: 'AI writing style detected — content may sound artificial'
+      });
+      suggestions.push('Rewrite to sound more natural. Vary sentence length. Add a personal reaction or specific reference.');
+    }
+
+    if (deepResult.rewrite_suggestion && deepResult.rewrite_suggestion !== text) {
+      suggestions.push(`Suggested rewrite: "${deepResult.rewrite_suggestion}"`);
+    }
+  }
+
   // ═══ حساب النتيجة النهائية ═══
   const blocked = checks.filter(c => c.severity === 'block');
   const warnings = checks.filter(c => c.severity === 'warn');
@@ -350,7 +450,9 @@ export async function shieldCheck(
     risk_level: riskLevel,
     checks,
     summary: summaryParts.join(' | '),
-    suggestions
+    suggestions,
+    ai_rewrite: aiRewrite || undefined,
+    ai_analysis: aiAnalysis || undefined
   };
 }
 

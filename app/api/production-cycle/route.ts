@@ -1,14 +1,9 @@
-import OpenAI from 'openai';
-import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
+import { assertAuthorized, optionalEnv } from '../../../lib/env';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
+import { callModel } from '../../../lib/model-router';
 import { evaluateContentQuality } from '../../../lib/quality';
 
-const VERSION = 'production-cycle-v1.2-thread-quality';
-
-function client() {
-  const baseURL = optionalEnv('OPENAI_BASE_URL');
-  return new OpenAI({ apiKey: requiredEnv('OPENAI_API_KEY'), baseURL: baseURL || undefined });
-}
+const VERSION = 'production-cycle-v2-model-router';
 
 function asArray(value: any) {
   if (Array.isArray(value)) return value;
@@ -143,17 +138,13 @@ viralTweets=${JSON.stringify(viralTweets.data || [])}
 viralPatterns=${JSON.stringify(viralPatterns.data || [])}
 recentContent=${JSON.stringify(recentContent.data || [])}`;
 
-    const completion = await client().chat.completions.create({
-      model: optionalEnv('OPENAI_MODEL', 'gpt-4.1-mini'),
-      temperature: 0.1,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: 'Produce structured content cards from decisions. Facts need source URLs. Return JSON only.' },
-        { role: 'user', content: prompt }
-      ]
-    });
+    // ═══ يستخدم model-router — يختار النموذج حسب نوع المهمة ═══
+    const response = await callModel('content_generation', [
+      { role: 'system', content: 'Produce structured content cards from decisions. Facts need source URLs. Return JSON only.' },
+      { role: 'user', content: prompt }
+    ], { response_format: { type: 'json_object' } });
 
-    const raw = JSON.parse(completion.choices[0]?.message?.content || '{}');
+    const raw = JSON.parse(response);
     const cards = asArray(raw.cards).slice(0, limit);
     const inserted: any[] = [];
 
@@ -207,7 +198,7 @@ recentContent=${JSON.stringify(recentContent.data || [])}`;
     }
 
     const log = await insertSessionLog({
-      actions_completed: ['production_cycle', VERSION, `cards:${inserted.length}`],
+      actions_completed: ['production_cycle', VERSION, `cards:${inserted.length}`, 'model_router'],
       content_created: inserted,
       db_updates: [{ table: 'content_production_cards', rows: inserted.length }],
       pending_tasks: inserted.filter((x) => x.quality_status !== 'ready').map((x) => `Review ${x.production_type}: ${x.quality_reasons?.join(', ') || 'needs_review'}`),

@@ -1,19 +1,5 @@
-import OpenAI from 'openai';
-import { optionalEnv, requiredEnv } from './env';
-
-function buildClient() {
-  const baseURL = optionalEnv('OPENAI_BASE_URL');
-  return new OpenAI({
-    apiKey: requiredEnv('OPENAI_API_KEY'),
-    baseURL: baseURL || undefined,
-    defaultHeaders: baseURL.includes('openrouter.ai')
-      ? {
-          'HTTP-Referer': optionalEnv('OPENROUTER_REFERER', 'https://x.com/30piq'),
-          'X-OpenRouter-Title': optionalEnv('OPENROUTER_TITLE', 'X AI Content Factory')
-        }
-      : undefined
-  });
-}
+import { callModel } from './model-router';
+import { optionalEnv } from './env';
 
 function cleanAscii(text: string): string {
   return String(text || '')
@@ -201,8 +187,6 @@ function normalizePack(pack: any) {
 }
 
 export async function generateDailyContentPack(input: { accountState: unknown; targets: unknown; requirements: unknown; recentContent: unknown; creatorIntel: unknown; }) {
-  const client = buildClient();
-  const model = optionalEnv('OPENAI_MODEL', optionalEnv('OPENAI_BASE_URL').includes('openrouter.ai') ? 'openai/gpt-4.1-mini' : 'gpt-4.1-mini');
   const learningMemory = (input.creatorIntel as any)?.learning_memory || null;
   const learningMemoryContext = learningMemory ? `
 LEARNING MEMORY (from all learning pipelines — repo-deep-learn, research-intel-v4, viral-account-scan, viral-discovery-run):
@@ -249,15 +233,12 @@ Return JSON with this exact shape:
   "quality_checks": ["..."],
   "human_checklist": ["..."]
 }`;
-  const response = await client.chat.completions.create({
-    model,
-    temperature: 0.18,
-    response_format: { type: 'json_object' },
-    messages: [
-      { role: 'system', content: 'Write publish-ready X content using provided mechanics only. Never invent proof, metrics, hashtags, or personal claims.' },
-      { role: 'user', content: prompt }
-    ]
-  });
-  const text = response.choices[0]?.message?.content || '{}';
-  try { return normalizePack(JSON.parse(text)); } catch { return fallbackPack(); }
+
+  // ═══ يستخدم model-router بدل OpenAI مباشرة ═══
+  const response = await callModel('content_generation', [
+    { role: 'system', content: 'Write publish-ready X content using provided mechanics only. Never invent proof, metrics, hashtags, or personal claims.' },
+    { role: 'user', content: prompt }
+  ]);
+
+  try { return normalizePack(JSON.parse(response)); } catch { return fallbackPack(); }
 }

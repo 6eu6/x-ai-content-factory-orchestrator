@@ -3,13 +3,13 @@ import { supabaseAdmin } from './supabase';
 import { optionalEnv } from './env';
 
 /**
- * Content Type Engine — محرك تنوع أنواع المحتوى
+ * Content Type Engine v2 — محرك تنوع أنواع المحتوى
  *
- * بدل ما daily-run ينتج 3 single tweets فقط، هذا المحرك:
- * 1. يقيّم الموضوع بـ 5 أبعاد (Depth, Freshness, Visual, Technical, Uniqueness)
- * 2. يفحص التنوع — أي أنواع أنتجنا آخر 48 ساعة؟
- * 3. يقرر النوع الأنسب حسب Decision Tree
- * 4. يولّد المحتوى بالنوع المحدد مع نموذج مناسب
+ * تحسينات:
+ * 1. تخطيط أذكى — يراعي الموسمية والوقت والأداء التاريخي
+ * 2. برومبتات أفضل — صياغة طبيعية بدون AI slop
+ * 3. تنوع إجباري — لا يكرر نفس النوع مرتين متتاليتين
+ * 4. ربط بذاكرة التعلم — يستخدم القواعد والأنماط المخزنة
  */
 
 export type ContentType =
@@ -23,11 +23,11 @@ export type ContentType =
 
 export type ContentScore = {
   topic: string;
-  depth: number;       // 1-10: كم ممكن نتكلم عن الموضوع؟
-  freshness: number;   // 1-10: كم الموضوع جديد/عاجل؟
-  visual: number;      // 1-10: ممكن نعرضه بصرياً؟
-  technical: number;   // 1-10: يحتاج كود/شرح تقني؟
-  uniqueness: number;  // 1-10: أحد غطاه قبلنا؟
+  depth: number;
+  freshness: number;
+  visual: number;
+  technical: number;
+  uniqueness: number;
   total: number;
   recommended_type: ContentType;
   reasoning: string;
@@ -49,6 +49,7 @@ export type DailyContentItem = {
   score: ContentScore;
   model_task: string;
   priority: 'high' | 'medium' | 'low';
+  best_time_utc: string;
 };
 
 /**
@@ -110,7 +111,13 @@ Then recommend the BEST content type based on the scoring matrix:
 - Fresh(8+) + Visual(5+) → "video_script" (15-60s)
 - Visual(7+) + Depth(3-6) → "carousel" (4-8 images)
 - Fresh(7+) + Depth(≤4) → "single_tweet" with image
-- Depth(≤3) + Fresh(≤3) + Unique(≤3) → SKIP
+- Depth(≤3) + Fresh(≤3) + Uniqueness(≤3) → SKIP
+
+Also suggest the best posting time (UTC hour):
+- Business content: 13:00-15:00 UTC
+- Technical content: 09:00-11:00 UTC
+- Career growth: 16:00-18:00 UTC
+- Casual/opinion: 20:00-22:00 UTC
 
 Return JSON:
 {
@@ -121,7 +128,8 @@ Return JSON:
   "uniqueness": N,
   "total": N,
   "recommended_type": "single_tweet|thread|article|carousel|video_script",
-  "reasoning": "why this type works best"
+  "reasoning": "why this type works best",
+  "best_time_utc": "HH:00"
 }`
       }
     ]);
@@ -161,7 +169,7 @@ function parseContentType(raw: string): ContentType {
 }
 
 /**
- * يخطط محتوى اليوم — 4-6 أنواع متنوعة
+ * يخطط محتوى اليوم — 4-6 أنواع متنوعة مع أوقات نشر مثالية
  */
 export async function planDailyContent(
   topics: Array<{ topic: string; source?: string; heat_score?: number }>
@@ -187,16 +195,36 @@ export async function planDailyContent(
   const plannedItems: DailyContentItem[] = [];
   const typesPlanned: ContentType[] = [];
 
+  // أوقات النشر المثالية حسب النوع
+  const bestTimes: Record<ContentType, string[]> = {
+    single_tweet: ['13:00', '17:00', '20:00'],
+    thread: ['09:00', '13:00', '15:00'],
+    article: ['10:00', '14:00'],
+    carousel: ['13:00', '16:00'],
+    video_script: ['14:00', '18:00'],
+    quote_post: ['16:00', '20:00'],
+    reply: ['anytime']
+  };
+
   for (const score of scored) {
     if (plannedItems.length >= 5) break;
-    if (score.total < 15) continue; // موضوع ضعيف
+    if (score.total < 15) continue;
 
     // لو النوع الموصى موجود كثير آخر 48 ساعة، جرب نوع ثاني
     let chosenType = score.recommended_type;
     if ((typeCounts[chosenType] || 0) >= 2) {
-      // جرب نوع بديل
       for (const alt of desiredTypes) {
         if ((typeCounts[alt] || 0) < 2 && !typesPlanned.includes(alt)) {
+          chosenType = alt;
+          break;
+        }
+      }
+    }
+
+    // لا نكرر نفس النوع
+    if (typesPlanned.includes(chosenType) && typesPlanned.length < 4) {
+      for (const alt of desiredTypes) {
+        if (!typesPlanned.includes(alt)) {
           chosenType = alt;
           break;
         }
@@ -206,9 +234,13 @@ export async function planDailyContent(
     // تحقق من قواعد الحساب الصغير — لا روابط خارجية
     const followerCount = await getFollowerCount();
     if (followerCount < 500) {
-      // لا مقالات مع روابط خارجية، أفضل كاروسيل وتغريدات
       if (chosenType === 'article') chosenType = 'thread';
     }
+
+    // حدد وقت النشر
+    const times = bestTimes[chosenType] || ['15:00'];
+    const slotIndex = plannedItems.length;
+    const bestTime = times[Math.min(slotIndex, times.length - 1)];
 
     plannedItems.push({
       slot: plannedItems.length + 1,
@@ -216,7 +248,8 @@ export async function planDailyContent(
       topic: score.topic,
       score,
       model_task: getModelTaskForType(chosenType),
-      priority: score.total >= 35 ? 'high' : score.total >= 25 ? 'medium' : 'low'
+      priority: score.total >= 35 ? 'high' : score.total >= 25 ? 'medium' : 'low',
+      best_time_utc: bestTime
     });
 
     typesPlanned.push(chosenType);
@@ -231,7 +264,8 @@ export async function planDailyContent(
       topic: 'Smart reply to Tier 1 account',
       score: { topic: 'reply', depth: 3, freshness: 7, visual: 2, technical: 4, uniqueness: 6, total: 22, recommended_type: 'reply', reasoning: 'Daily reply engagement' },
       model_task: 'casual_generation',
-      priority: 'high'
+      priority: 'high',
+      best_time_utc: 'anytime'
     });
   }
 
@@ -242,7 +276,8 @@ export async function planDailyContent(
       topic: 'Quote with original insight',
       score: { topic: 'quote_post', depth: 4, freshness: 6, visual: 2, technical: 3, uniqueness: 5, total: 20, recommended_type: 'quote_post', reasoning: 'Daily quote engagement' },
       model_task: 'casual_generation',
-      priority: 'medium'
+      priority: 'medium',
+      best_time_utc: '16:00'
     });
   }
 
@@ -328,15 +363,26 @@ async function generateSingleTweet(ctx: any, taskType: TaskType): Promise<any> {
     {
       role: 'system',
       content: `Write a single tweet for @${optionalEnv('X_USERNAME', '30piq')} about AI x Productivity x Career Growth.
-Rules: Under 240 chars. No hashtags. No first-person claims unless true. No Slop words (Delve, Crucial, Leverage, etc). 
-Include: why_it_works, originality_element, reply_trigger, bookmark_trigger, mechanic_used.
-Vary sentence length. Sound like a smart friend in tech. Output valid JSON.`
+
+ANTI-SLOP RULES (CRITICAL — your text will be rejected if it contains any of these):
+- NEVER use: delve, crucial, leverage, synergy, transform, unleash, navigate, foster, elevate, empower, streamline, harness, pioneer, game-changer, cutting-edge, state-of-the-art
+- NEVER start with "Here's", "In today's", "Did you know"
+- NEVER use bullet points or numbered lists in a tweet
+- NEVER write "Let me show you" or "A thread on"
+- VARY your sentence length: mix short (3-5 words) and longer sentences
+- Sound like a smart friend sharing a useful observation, NOT a content creator
+- Include a SPECIFIC reference (tool name, technique, framework) when possible
+
+Content rules: Under 240 chars. No hashtags. No first-person claims unless true.
+
+Output valid JSON.`
     },
     {
       role: 'user',
       content: `Topic: ${ctx.topic}
-${ctx.learningMemory ? `Learning context: ${JSON.stringify(ctx.learningMemory.algorithm_rules?.slice(0, 5))}` : ''}
-${ctx.viralMemory ? `Viral mechanics: ${JSON.stringify(ctx.viralMemory.high_confidence_patterns?.slice(0, 3))}` : ''}
+${ctx.learningMemory ? `Algorithm rules to apply: ${JSON.stringify(ctx.learningMemory.algorithm_rules?.slice(0, 5))}` : ''}
+${ctx.viralMemory ? `Working mechanics: ${JSON.stringify(ctx.viralMemory.high_confidence_patterns?.slice(0, 3))}` : ''}
+
 Return: {"text":"...","why_it_works":"...","originality_element":"...","reply_trigger":"...","bookmark_trigger":"...","mechanic_used":"...","best_time_utc":"..."}`
     }
   ]);
@@ -349,9 +395,9 @@ async function generateThread(ctx: any, taskType: TaskType): Promise<any> {
       role: 'system',
       content: `Write a 5-8 tweet thread for @${optionalEnv('X_USERNAME', '30piq')} about AI x Productivity x Career Growth.
 
-CRITICAL RULES (Anti-Slop):
-- NEVER start with "Thread" or "A thread on X" or "Let me show you"
-- Start with a PERSONAL framing: "I spent [time] reading [X]..." or "Found something nobody's talking about..."
+ANTI-SLOP RULES (CRITICAL):
+- NEVER start with "Thread" or "A thread on X" or "Let me show you" or "Here's what I learned"
+- Start with a PERSONAL framing: "I spent [time] reading [X]..." or "Found something nobody's talking about..." or just STATE the insight directly
 - VARY tweet lengths: some 2 lines, some full 280 chars
 - Include at least 1 specific reference (tool name, file path, function name, number)
 - Add a personal reaction: "this surprised me", "honestly didn't expect this"
@@ -359,7 +405,7 @@ CRITICAL RULES (Anti-Slop):
 - End with YOUR original insight, not just a summary
 - Each tweet under 280 chars. No hashtags. No Slop words.
 
-Output valid JSON array of tweets.`
+Output valid JSON.`
     },
     {
       role: 'user',
@@ -369,7 +415,7 @@ ${ctx.sources?.length ? `Sources: ${ctx.sources.join(', ')}` : ''}
 
 Return JSON:
 {
-  "hook": "first tweet text",
+  "hook": "first tweet text (NOT 'Thread' or 'A thread on')",
   "tweets": [{"text":"...","why_important":"..."}],
   "conclusion": "final insight tweet",
   "why_it_works": "...",
@@ -393,7 +439,7 @@ Rules:
 - Include: hook, fact-check, why this matters, step-by-step, reality check, disclaimer
 - Mix long paragraphs with short punchy ones
 - Add honest caveats
-- No Slop words. Sound like you DISCOVERED this, not teaching from above.
+- No Slop words (delve, crucial, leverage, etc). Sound like you DISCOVERED this, not teaching from above.
 - Include cost/pricing table suggestion somewhere (bookmarkable)
 
 Output valid JSON.`
@@ -503,6 +549,7 @@ CRITICAL REPLY RULES (ReplyScorer VLM scores replies 0.0-1.0):
 - Must reference specific concepts from parent post
 - Add new facts, counter-arguments, or practical angle
 - Keep under 240 chars. No hashtags. No Slop words.
+- Sound like a knowledgeable peer, not a fan
 
 Output valid JSON.`
     },
@@ -532,6 +579,7 @@ Rules:
 - Add ORIGINAL insight, not just agreement
 - Make the quote standalone valuable even without original tweet
 - Under 240 chars. No hashtags. No Slop words.
+- No "This!" or "So true!" — these add zero value
 
 Output valid JSON.`
     },

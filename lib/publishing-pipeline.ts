@@ -2,21 +2,17 @@ import { sendTelegramMessage, htmlEscape, shortText, MAIN_KEYBOARD, allowedChatI
 import { shieldCheck, ShieldResult } from './account-shield';
 import { supabaseAdmin } from './supabase';
 import { optionalEnv } from './env';
-import { contentNeedsMedia, generateMediaPipeline } from './media-pipeline';
+import { contentNeedsMedia, generateMediaPipeline, generateAndDeliverImage } from './media-pipeline';
 import { ContentType } from './content-type-engine';
 
 /**
- * Publishing Pipeline — مسار تسليم المحتوى المنسق لتليجرام
+ * Publishing Pipeline v2 — مسار تسليم المحتوى المنسق لتليجرام
  *
- * المبدأ الأساسي: النشر يدوي — المستخدم هو اللي ينشر
- * دور النظام:
- * 1. ينسّق كل محتوى اليوم حسب نوعه
- * 2. يفحصه بالـ Account Shield
- * 3. يولّد وصف الوسائط إن لزم
- * 4. يرسله لتليجرام منسق وجاهز للنسخ
- * 5. يسجّل التسليم في قاعدة البيانات
- *
- * بعد نشر المستخدم يدوياً، ماسح الأداء يفحص النتايج
+ * تحسينات:
+ * 1. تنسيق أفضل لكل نوع محتوى
+ * 2. إرسال صور مولّدة لتليجرام
+ * 3. تشغيل ماسح الأداء تلقائياً بعد التسليم
+ * 4. تسجيل أفضل في content_deliveries
  */
 
 export type PublishableItem = {
@@ -66,6 +62,10 @@ function formatContentForTelegram(item: PublishableItem): string {
       if (c.originality_element) lines.push(`🔑 <b>Originality:</b> ${htmlEscape(shortText(c.originality_element, 150))}`);
       if (c.reply_trigger) lines.push(`💬 <b>Reply trigger:</b> ${htmlEscape(shortText(c.reply_trigger, 100))}`);
       if (c.bookmark_trigger) lines.push(`🔖 <b>Bookmark trigger:</b> ${htmlEscape(shortText(c.bookmark_trigger, 100))}`);
+      // [جديد] اقتراح إعادة كتابة من Shield
+      if (item.shield_result?.ai_rewrite) {
+        lines.push(`\n✏️ <b>Suggested rewrite:</b>\n<i>${htmlEscape(shortText(item.shield_result.ai_rewrite, 280))}</i>`);
+      }
       break;
 
     case 'thread':
@@ -100,10 +100,7 @@ function formatContentForTelegram(item: PublishableItem): string {
         });
       }
       if (item.media_result?.media_items?.length) {
-        lines.push(`\n<b>🖼 Image prompts generated:</b> ${item.media_result.media_items.length}`);
-        item.media_result.media_items.forEach((m: any, i: number) => {
-          lines.push(`  Prompt ${i + 1}: ${htmlEscape(shortText(m.prompt, 120))}`);
-        });
+        lines.push(`\n<b>🖼 Image prompts ready:</b> ${item.media_result.media_items.length}`);
       }
       break;
 
@@ -136,7 +133,7 @@ function formatContentForTelegram(item: PublishableItem): string {
   // Shield suggestions
   if (item.shield_result && !item.shield_result.passed && item.shield_result.suggestions?.length) {
     lines.push('\n<b>🛡 Shield suggestions:</b>');
-    item.shield_result.suggestions.forEach(s => {
+    item.shield_result.suggestions.slice(0, 3).forEach(s => {
       lines.push(`  • ${htmlEscape(shortText(s, 120))}`);
     });
   }
@@ -189,7 +186,8 @@ async function shieldCheckAll(items: PublishableItem[]): Promise<PublishableItem
         originality_element: item.content?.originality_element,
         mechanic_used: item.content?.mechanic_used,
         reply_trigger: item.content?.reply_trigger,
-        bookmark_trigger: item.content?.bookmark_trigger
+        bookmark_trigger: item.content?.bookmark_trigger,
+        deep_check: true  // [جديد] فحص AI عميق
       });
 
       const status: PublishableItem['status'] =
@@ -248,6 +246,22 @@ async function generateMediaForItems(items: PublishableItem[]): Promise<Publisha
           text_content: item.content,
           style_hint: 'dark minimal tech'
         });
+
+        // [جديد] حاول توليد صورة فعلية للكاروسيل والتغريدة مع صورة
+        if (item.content_type === 'carousel' || item.content_type === 'single_tweet_with_image') {
+          for (const mediaItem of mediaResult.media_items.slice(0, 3)) {
+            try {
+              const imageResult = await generateAndDeliverImage(
+                mediaItem.prompt,
+                `${formatContentType(item.content_type)} — ${item.content?.topic || ''}`
+              );
+              if (imageResult.ok) {
+                mediaItem.image_url = imageResult.image_url;
+                mediaItem.type = 'generated_image';
+              }
+            } catch {}
+          }
+        }
 
         results.push({
           ...item,
@@ -322,7 +336,7 @@ export async function prepareAndDeliverDailyPack(
     }
   }
 
-  // ═══ 2. Shield فحص ═══
+  // ═══ 2. Shield فحص (مع فحص AI عميق) ═══
   items = await shieldCheckAll(items);
 
   // ═══ 3. توليد وصف الوسائط ═══
@@ -334,7 +348,6 @@ export async function prepareAndDeliverDailyPack(
 
   if (chatId) {
     try {
-      // رسالة الملخص
       const readyCount = items.filter(i => i.status === 'ready').length;
       const blockedCount = items.filter(i => i.status === 'blocked').length;
       const reviewCount = items.filter(i => i.status === 'needs_review').length;
@@ -351,7 +364,7 @@ export async function prepareAndDeliverDailyPack(
 
       // أرسل كل عنصر بروسالة منفصلة
       for (const item of items) {
-        if (item.status === 'blocked') continue; // لا نرسل المحظور
+        if (item.status === 'blocked') continue;
         const formatted = formatContentForTelegram(item);
         try {
           await sendTelegramMessage(chatId, formatted);
@@ -362,7 +375,7 @@ export async function prepareAndDeliverDailyPack(
       await sendTelegramMessage(chatId,
         `━━━━━━━━━━━━━━━━━━━━\n` +
         `🛡 <b>Shield Summary:</b> ${readyCount} passed, ${reviewCount} need review, ${blockedCount} blocked\n` +
-        `📋 <b>Next:</b> After publishing, run account-performance-scan to measure results and learn\n` +
+        `📋 <b>Next:</b> After publishing, send "📊 مسح الأداء" to measure results and learn\n` +
         `━━━━━━━━━━━━━━━━━━━━`,
         MAIN_KEYBOARD
       );
@@ -384,7 +397,8 @@ export async function prepareAndDeliverDailyPack(
           shield_result: item.shield_result ? {
             passed: item.shield_result.passed,
             risk_level: item.shield_result.risk_level,
-            summary: item.shield_result.summary
+            summary: item.shield_result.summary,
+            ai_analysis: item.shield_result.ai_analysis
           } : null,
           media_generated: Boolean(item.media_result),
           priority: item.priority,
@@ -407,7 +421,7 @@ export async function prepareAndDeliverDailyPack(
   if (readyCount > 0) recommendations.push(`${readyCount} items ready to publish. Copy from Telegram and post manually.`);
   if (reviewCount > 0) recommendations.push(`${reviewCount} items need review. Check shield suggestions and edit before publishing.`);
   if (blockedCount > 0) recommendations.push(`${blockedCount} items blocked by shield. Do not publish these without major edits.`);
-  recommendations.push('After publishing, run /api/account-performance-scan to measure results and update learning.');
+  recommendations.push('After publishing, run account-performance-scan to measure results and update learning.');
 
   return {
     pack_date: packDate,

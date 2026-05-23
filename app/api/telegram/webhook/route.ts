@@ -45,6 +45,7 @@ export async function POST(req: Request) {
     }
 
     if (text === '📊 حالة الحساب') return accountStatus(supabase, chatId);
+    if (text === '📊 مسح الأداء') return triggerEndpoint(req, chatId, '/api/account-performance-scan');
     if (text === '🧠 حالة التعلم') return learningStatus(supabase, chatId);
     if (text === '➕ إضافة حساب للتعلم') return startFlow(supabase, chatId, 'awaiting_learning_account', 'أرسل حساب X للتعلم منه. مثال: emollick أو @emollick');
     if (text === '🔗 إضافة تغريدة للتعلم') return startFlow(supabase, chatId, 'awaiting_learning_tweet', 'أرسل رابط تغريدة X ليتم إدخالها في قائمة التعلم.');
@@ -55,6 +56,9 @@ export async function POST(req: Request) {
     if (text === '🏭 إنتاج المحتوى') return triggerEndpoint(req, chatId, '/api/production-cycle');
     if (text === '🚀 تشغيل فحص تعلم') return triggerEndpoint(req, chatId, '/api/viral-account-scan?max_accounts=2&tweets_per_account=8');
     if (text === '🧪 تشغيل خطة اليوم') return triggerEndpoint(req, chatId, '/api/daily-run');
+    if (text === '🛡 فحص الحماية') return shieldTest(supabase, chatId);
+    if (text === '🔎 اكتشاف تلقائي') return triggerEndpoint(req, chatId, '/api/research-intel-v4');
+    if (text === '📦 زحف مستودع') return startFlow(supabase, chatId, 'awaiting_repo_url', 'أرسل رابط مستودع GitHub للتعلم منه.');
 
     await reply(chatId, 'لم أفهم الأمر. استخدم الأزرار في لوحة التحكم.');
     return Response.json({ ok: true });
@@ -130,6 +134,41 @@ async function readyContent(supabase: any, chatId: string) {
   if (!data?.length) return reply(chatId, 'لا يوجد محتوى مصفى وجاهز للنشر الآن. شغّل 🔍 دورة تعلم ذكية ثم 🧭 محرك القرار ثم 🏭 إنتاج المحتوى.');
   const lines = data.map((x: any, i: number) => `${i + 1}. <b>${htmlEscape(x.content_type)}</b>\n${htmlEscape(shortText(x.final_text, 260))}`);
   return reply(chatId, `<b>محتوى جاهز للنشر</b>\n\n${lines.join('\n\n')}`);
+}
+
+async function shieldTest(supabase: any, chatId: string) {
+  const { data: recentContent } = await supabase
+    .from('content_log')
+    .select('final_text,content_type,publish_status')
+    .neq('publish_status', 'rejected')
+    .order('published_at', { ascending: false })
+    .limit(3);
+
+  if (!recentContent?.length) {
+    return reply(chatId, 'لا يوجد محتوى حديث لفحصه. شغّل 🧪 تشغيل خطة اليوم أولاً.');
+  }
+
+  const { shieldCheck } = await import('../../../../lib/account-shield');
+  const lines: string[] = ['🛡 <b>فحص الحماية — آخر محتوى</b>', '━'.repeat(30)];
+
+  for (const item of recentContent) {
+    try {
+      const result = await shieldCheck({
+        text: item.final_text || '',
+        type: 'tweet',
+        deep_check: true
+      });
+      const status = result.passed ? '✅' : result.risk_level === 'danger' ? '🚫' : '⚠️';
+      lines.push(`${status} <b>${htmlEscape(item.content_type)}</b>: ${result.summary}`);
+      if (result.ai_rewrite) {
+        lines.push(`  ✏️ <i>${htmlEscape(result.ai_rewrite.slice(0, 150))}</i>`);
+      }
+    } catch {
+      lines.push(`❓ <b>${htmlEscape(item.content_type)}</b>: فشل الفحص`);
+    }
+  }
+
+  return reply(chatId, lines.join('\n'));
 }
 
 async function triggerEndpoint(req: Request, chatId: string, path: string) {
