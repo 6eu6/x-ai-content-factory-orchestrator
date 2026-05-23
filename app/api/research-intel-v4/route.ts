@@ -109,28 +109,28 @@ recentContent=${JSON.stringify(recentContent.data)}`;
     // --- Normalize intel items for learning-memory ---
     const crawlerItems = [
       ...toArray(intel.opportunities).map((o: any) => ({
-        title: o.topic || o.angle || 'opportunity',
+        title: o.topic || o.angle || o.type || 'opportunity',
         url: toArray(o.source_urls)[0] || '',
         source_urls: o.source_urls || [],
-        summary: [o.angle, o.audience_pain, o.evidence_notes].filter(Boolean).join(' | '),
-        confidence_score: o.confidence_score,
+        summary: [o.description, o.angle, o.audience_pain, o.evidence_notes].filter(Boolean).join(' | '),
+        confidence_score: o.confidence_score || o.priority_score,
         priority_score: o.priority_score,
-        content_potential_score: o.priority_score
+        content_potential_score: o.priority_score || o.confidence_score
       })),
       ...toArray(intel.recommended_today).map((r: any) => ({
-        title: r.topic || r.angle || 'recommended',
+        title: r.topic || r.angle || r.type || 'recommended',
         url: toArray(r.source_urls)[0] || '',
         source_urls: r.source_urls || [],
-        summary: [r.angle, r.audience_pain, r.evidence_notes].filter(Boolean).join(' | '),
-        confidence_score: r.confidence_score,
+        summary: [r.description, r.angle, r.audience_pain, r.evidence_notes].filter(Boolean).join(' | '),
+        confidence_score: r.confidence_score || r.priority_score,
         priority_score: r.priority_score,
-        content_potential_score: r.priority_score
+        content_potential_score: r.priority_score || r.confidence_score
       })),
       ...toArray(intel.viral_patterns).map((v: any) => ({
-        title: v.pattern_name || v.hook_style || v.pattern_type || 'viral_pattern',
+        title: v.pattern_name || v.pattern || v.hook_style || v.pattern_type || 'viral_pattern',
         url: toArray(v.source_urls)[0] || '',
         source_urls: v.source_urls || [],
-        summary: [v.pattern_description, v.why_it_works, v.adaptation_for_30piq].filter(Boolean).join(' | '),
+        summary: [v.pattern_description, v.example, v.why_it_works, v.adaptation_for_30piq].filter(Boolean).join(' | '),
         confidence_score: v.confidence_score
       })),
       ...toArray(intel.creator_intel_updates).map((c: any) => ({
