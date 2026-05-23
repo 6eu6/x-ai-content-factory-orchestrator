@@ -1,6 +1,7 @@
 import OpenAI from 'openai';
 import crypto from 'crypto';
 import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
+import { parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 
 const VERSION = 'repo-artifact-repair-v1';
@@ -105,7 +106,7 @@ Return strict JSON: {"path":"...","content":"...","repair_notes":["..."]}`;
             { role: 'user', content: prompt }
           ]
         });
-        const raw = JSON.parse(completion.choices[0]?.message?.content || '{}');
+        const raw = parseModelJson(completion.choices[0]?.message?.content || '');
         const path = safePath(raw.path || artifact.artifact_path);
         const content = String(raw.content || '').trim();
         if (!path || !content) continue;

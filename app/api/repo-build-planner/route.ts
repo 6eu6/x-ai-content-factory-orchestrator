@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
+import { parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 
 const VERSION = 'repo-build-planner-v1';
@@ -93,7 +94,7 @@ productionCards=${JSON.stringify(productionCards.data || [])}`;
       ]
     });
 
-    const raw = JSON.parse(completion.choices[0]?.message?.content || '{}');
+    const raw = parseModelJson(completion.choices[0]?.message?.content || '');
     const plans = asArray(raw.plans).slice(0, limit);
     const insertedPlans: any[] = [];
     let artifactsInserted = 0;

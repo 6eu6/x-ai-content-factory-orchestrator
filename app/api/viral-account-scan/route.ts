@@ -3,7 +3,7 @@ import { assertAuthorized, optionalEnv } from '../../../lib/env';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 import { getXUserAndTimeline, analyzeXTweet } from '../../../lib/x';
 import { learnFromCrawlerItems, toArray } from '../../../lib/learning-memory';
-import { callModel } from '../../../lib/model-router';
+import { callModel, parseModelJson } from '../../../lib/model-router';
 
 const VERSION = 'viral-account-scan-v6-deep-memory-model-router';
 
@@ -242,7 +242,7 @@ errors=${JSON.stringify(errors)}`;
       { role: 'system', content: 'Return operational viral mechanics from supplied metrics only. No invented facts.' },
       { role: 'user', content: prompt }
     ]);
-    const intel = normalizeDeepIntel(JSON.parse(modelResponse || '{}'));
+    const intel = normalizeDeepIntel(parseModelJson(modelResponse));
 
     const accountAnalysisByHandle = new Map<string, AnyRecord>();
     for (const a of intel.account_analyses) {

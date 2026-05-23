@@ -262,6 +262,10 @@ async function run(req: Request) {
     }
 
     if (actions.length) {
+      // حذف المهام اليومية القديمة المعلقة قبل إضافة الجديدة (لتجنب التكرار)
+      try {
+        await supabase.from('action_queue').delete().ilike('title', 'Growth daily action%').eq('status', 'pending');
+      } catch {}
       await supabase.from('action_queue').insert(actions.map((instruction: string, index: number) => ({
         priority: index + 1,
         action_type: readyCount ? 'human_publish_or_engage' : 'quality_review_or_research',

@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
+import { parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 import { webSearch } from '../../../lib/web-search';
 import { learnFromCrawlerItems, toArray } from '../../../lib/learning-memory';
@@ -95,7 +96,7 @@ Return JSON with keys:
       ]
     });
 
-    const intel = JSON.parse(completion.choices[0]?.message?.content || '{}');
+    const intel = parseModelJson(completion.choices[0]?.message?.content || '');
 
     if (Array.isArray(intel.viral_patterns)) {
       await supabase.from('creator_intel').insert(intel.viral_patterns.slice(0, 10).map((p: any) => ({

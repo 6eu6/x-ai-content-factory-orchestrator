@@ -1,6 +1,6 @@
 import { requiredEnv, optionalEnv } from './env';
 import { supabaseAdmin } from './supabase';
-import { callModel, TaskType } from './model-router';
+import { callModel, parseModelJson, TaskType } from './model-router';
 
 /**
  * Account Shield — طبقة حماية الحساب v2
@@ -203,7 +203,7 @@ Return JSON:
       }
     ]);
 
-    const parsed = JSON.parse(response);
+    const parsed = parseModelJson(response);
     return {
       analysis: parsed.analysis || '',
       rewrite_suggestion: parsed.rewrite_suggestion || '',

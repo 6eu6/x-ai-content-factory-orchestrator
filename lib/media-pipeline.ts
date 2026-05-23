@@ -1,4 +1,4 @@
-import { callModel, getModelForTask, getAIClientForTask, TaskType } from './model-router';
+import { callModel, getModelForTask, getAIClientForTask, parseModelJson, TaskType } from './model-router';
 import { supabaseAdmin } from './supabase';
 import { optionalEnv } from './env';
 import { sendTelegramMessage, allowedChatId, htmlEscape, shortText } from './telegram';
@@ -112,7 +112,7 @@ Return JSON array:
       }
     ]);
 
-    const parsed = JSON.parse(response);
+    const parsed = parseModelJson(response);
     if (Array.isArray(parsed)) {
       return parsed.map((item: any, i: number) => ({
         type: 'carousel_slide' as const,
@@ -185,7 +185,7 @@ Return JSON:
       }
     ]);
 
-    const parsed = JSON.parse(response);
+    const parsed = parseModelJson(response);
     const items: MediaItem[] = [];
 
     if (parsed.thumbnail_prompt) {
@@ -253,7 +253,7 @@ Return JSON:
       }
     ]);
 
-    const parsed = JSON.parse(response);
+    const parsed = parseModelJson(response);
     return [{
       type: 'image_prompt' as const,
       prompt: refineImagePrompt(parsed.image_prompt || `Tech infographic about ${request.topic}, dark background, minimal`, request.style_hint),

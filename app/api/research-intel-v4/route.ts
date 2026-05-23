@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
+import { parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 import { webSearch } from '../../../lib/web-search';
 import { sourceBoundFilter, safeBriefFromOpportunities, hasUnsupportedEntity, sourceCorpus } from '../../../lib/source-bound';
@@ -96,7 +97,7 @@ recentContent=${JSON.stringify(recentContent.data)}`;
       ]
     });
 
-    const raw = JSON.parse(completion.choices[0]?.message?.content || '{}');
+    const raw = parseModelJson(completion.choices[0]?.message?.content || '');
     const intel = sanitize(raw, searchResults);
 
     if (intel.trend_updates.length) {

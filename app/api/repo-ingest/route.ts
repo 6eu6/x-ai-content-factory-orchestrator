@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
+import { parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 
 const VERSION = 'repo-ingest-v1.1-persisted';
@@ -140,7 +141,7 @@ Docs: ${JSON.stringify(docs)}`;
       response_format: { type: 'json_object' },
       messages: [{ role: 'system', content: 'Analyze repos for learning, content opportunities, testing plans, and maintenance plans. JSON only.' }, { role: 'user', content: prompt }]
     });
-    const intel = JSON.parse(out.choices[0]?.message?.content || '{}');
+    const intel = parseModelJson(out.choices[0]?.message?.content || '');
     const scores = intel.scores || {};
     await supabase.from('repo_sources').update({
       technical_depth_score: scoreFromObject(scores, ['technical_depth_score', 'content_depth', 'learning_potential'], 7),

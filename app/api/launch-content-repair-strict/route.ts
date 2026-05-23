@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
+import { parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 
 const VERSION = 'launch-content-repair-strict-v1';
@@ -88,7 +89,7 @@ Mcp=${JSON.stringify(mcp.data || [])}`;
         response_format: { type: 'json_object' },
         messages: [{ role: 'system', content: 'Return JSON: {production_type, final_text, thread_items, viral_mechanic, original_angle, audience_pain, quality_basis}' }, { role: 'user', content: prompt }]
       });
-      const raw = JSON.parse(completion.choices[0]?.message?.content || '{}');
+      const raw = parseModelJson(completion.choices[0]?.message?.content || '');
       const type = raw.production_type === 'thread' ? 'thread' : card.production_type;
       const finalText = type === 'single_tweet' ? trim(raw.final_text, 260) : null;
       const threadItems = type === 'thread' ? compress(arr(raw.thread_items).map(clean)) : [];

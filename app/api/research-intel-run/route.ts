@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
+import { parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 import { webSearch } from '../../../lib/web-search';
 
@@ -101,7 +102,7 @@ Return JSON with keys: mode, market_read, viral_patterns, opportunities, recomme
       ]
     });
 
-    const rawIntel = JSON.parse(completion.choices[0]?.message?.content || '{}');
+    const rawIntel = parseModelJson(completion.choices[0]?.message?.content || '');
     const intel = sourceBoundIntel(rawIntel, searchResults);
 
     if (Array.isArray(intel.trend_updates)) {

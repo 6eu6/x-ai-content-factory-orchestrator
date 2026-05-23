@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
+import { parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 
 const VERSION = 'launch-content-repair-v2-json-safe';
@@ -61,7 +62,7 @@ async function run(req: Request) {
         response_format: { type: 'json_object' },
         messages: [{ role: 'system', content: 'Return JSON only.' }, { role: 'user', content: prompt }]
       });
-      const raw = JSON.parse(res.choices[0]?.message?.content || '{}');
+      const raw = parseModelJson(res.choices[0]?.message?.content || '');
       const type = raw.production_type === 'thread' ? 'thread' : card.production_type;
       const finalText = type === 'single_tweet' ? cut(raw.final_text, 260) : null;
       const items = type === 'thread' ? thread(a(raw.thread_items)) : [];

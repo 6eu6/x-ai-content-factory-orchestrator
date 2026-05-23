@@ -1,4 +1,4 @@
-import { callModel } from './model-router';
+import { callModel, parseModelJson } from './model-router';
 import { optionalEnv } from './env';
 
 function cleanAscii(text: string): string {
@@ -240,5 +240,5 @@ Return JSON with this exact shape:
     { role: 'user', content: prompt }
   ]);
 
-  try { return normalizePack(JSON.parse(response)); } catch { return fallbackPack(); }
+  try { return normalizePack(parseModelJson(response)); } catch { return fallbackPack(); }
 }

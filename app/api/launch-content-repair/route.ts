@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
+import { parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 
 const VERSION = 'launch-content-repair-v1';
@@ -105,7 +106,7 @@ McpOpportunities=${JSON.stringify(mcp.data || [])}`;
           { role: 'user', content: prompt }
         ]
       });
-      const raw = JSON.parse(completion.choices[0]?.message?.content || '{}');
+      const raw = parseModelJson(completion.choices[0]?.message?.content || '');
       const type = raw.production_type === 'thread' ? 'thread' : card.production_type;
       const finalText = type === 'single_tweet' ? clean(raw.final_text) : null;
       const threadItems = type === 'thread' ? asArray(raw.thread_items).map(clean).filter(Boolean) : [];

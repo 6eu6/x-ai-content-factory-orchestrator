@@ -1,6 +1,6 @@
 import { assertAuthorized, optionalEnv } from '../../../lib/env';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
-import { callModel } from '../../../lib/model-router';
+import { callModel, parseModelJson } from '../../../lib/model-router';
 import { evaluateContentQuality } from '../../../lib/quality';
 
 const VERSION = 'production-cycle-v2-model-router';
@@ -144,7 +144,7 @@ recentContent=${JSON.stringify(recentContent.data || [])}`;
       { role: 'user', content: prompt }
     ], { response_format: { type: 'json_object' } });
 
-    const raw = JSON.parse(response);
+    const raw = parseModelJson(response);
     const cards = asArray(raw.cards).slice(0, limit);
     const inserted: any[] = [];
 

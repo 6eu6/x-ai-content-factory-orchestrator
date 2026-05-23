@@ -1,6 +1,6 @@
 import { assertAuthorized, optionalEnv } from '../../../lib/env';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
-import { callModel } from '../../../lib/model-router';
+import { callModel, parseModelJson } from '../../../lib/model-router';
 
 const VERSION = 'format-decision-v2-model-router';
 
@@ -75,7 +75,7 @@ recentDecisions=${JSON.stringify(recentDecisions.data || [])}`;
       { role: 'user', content: prompt }
     ]);
 
-    const raw = JSON.parse(modelResponse || '{}');
+    const raw = parseModelJson(modelResponse);
     const decisions = asArray(raw.decisions).slice(0, limit);
     const inserted: any[] = [];
 

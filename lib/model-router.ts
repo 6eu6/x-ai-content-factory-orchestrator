@@ -254,3 +254,65 @@ export function clearRoutingCache(): void {
   routingCache = null;
   cacheExpiry = 0;
 }
+
+/**
+ * parseModelJson — يحلل رد النموذج الذكي بأمان
+ *
+ * المشكلة: بعض النماذج (خاصة عبر OpenRouter) ترجع JSON ملفوف بـ markdown code blocks:
+ *   ```json
+ *   {"key": "value"}
+ *   ```
+ *
+ * JSON.parse() العادية تفشل مع هذا التنسيق.
+ *
+ * هذه الدالة:
+ * 1. تنزع أغلفة markdown code blocks (```json ... ```)
+ * 2. تنزع أي نص قبل أو بعد الـ JSON
+ * 3. تحلل الـ JSON بأمان
+ */
+export function parseModelJson(text: string): any {
+  if (!text || typeof text !== 'string') return {};
+
+  let cleaned = text.trim();
+
+  // خطوة 1: نزع أغلفة markdown code blocks
+  // يتعامل مع: ```json\n{...}\n``` أو ```\n{...}\n```
+  const codeBlockMatch = cleaned.match(/```(?:json|JSON)?\s*\n?([\s\S]*?)\n?\s*```/);
+  if (codeBlockMatch) {
+    cleaned = codeBlockMatch[1].trim();
+  }
+
+  // خطوة 2: نزع أي نص قبل أول { أو [
+  const jsonStart = Math.min(
+    ...[cleaned.indexOf('{'), cleaned.indexOf('[')].filter(i => i !== -1)
+  );
+  if (jsonStart > 0) {
+    cleaned = cleaned.slice(jsonStart);
+  }
+
+  // خطوة 3: نزع أي نص بعد آخر } أو ]
+  const jsonEnd = Math.max(
+    ...[cleaned.lastIndexOf('}'), cleaned.lastIndexOf(']')].filter(i => i !== -1)
+  );
+  if (jsonEnd !== -1 && jsonEnd < cleaned.length - 1) {
+    cleaned = cleaned.slice(0, jsonEnd + 1);
+  }
+
+  try {
+    return JSON.parse(cleaned);
+  } catch (firstErr) {
+    // خطوة أخيرة: محاولة استخراج أي JSON صالح
+    try {
+      // جرّب العثور على أول كائن JSON صالح
+      const deepMatch = cleaned.match(/\{[\s\S]*\}/);
+      if (deepMatch) {
+        return JSON.parse(deepMatch[0]);
+      }
+      const arrMatch = cleaned.match(/\[[\s\S]*\]/);
+      if (arrMatch) {
+        return JSON.parse(arrMatch[0]);
+      }
+    } catch {}
+    throw firstErr;
+  }
+}

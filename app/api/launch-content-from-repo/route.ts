@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
+import { parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 
 const VERSION = 'launch-content-from-repo-v1';
@@ -106,7 +107,7 @@ RecentCards=${JSON.stringify(recentCardsRes.data || [])}`;
       ]
     });
 
-    const raw = JSON.parse(completion.choices[0]?.message?.content || '{}');
+    const raw = parseModelJson(completion.choices[0]?.message?.content || '');
     const single = cleanText(raw.single_post);
     const threadItems = asArray(raw.thread_items).map(cleanText).filter(Boolean);
     const singleQuality = qualitySingle(single);

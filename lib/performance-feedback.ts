@@ -1,6 +1,6 @@
 import { supabaseAdmin } from './supabase';
 import { optionalEnv } from './env';
-import { callModel } from './model-router';
+import { callModel, parseModelJson } from './model-router';
 import { getXUserTimeline, scoreXTweet, analyzeXTweet } from './x';
 import { sendTelegramMessage, allowedChatId, htmlEscape, shortText, MAIN_KEYBOARD } from './telegram';
 
@@ -237,7 +237,7 @@ Return JSON array matching each tweet:
       }
     ]);
 
-    const parsed = JSON.parse(aiResponse);
+    const parsed = parseModelJson(aiResponse);
     if (Array.isArray(parsed)) {
       for (let i = 0; i < analyses.length && i < parsed.length; i++) {
         analyses[i].analysis = parsed[i]?.analysis || '';
@@ -494,7 +494,7 @@ Return JSON:
         }
       ]);
 
-      const causalParsed = JSON.parse(causationResponse);
+      const causalParsed = parseModelJson(causationResponse);
 
       // سجّل القواعد السببية في system_learning_rules
       if (causalParsed.causal_rules?.length) {

@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
+import { parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 
 const VERSION = 'repo-deep-learn-v1';
@@ -113,7 +114,7 @@ Content=${input.text.slice(0, 16000)}`;
       { role: 'user', content: prompt }
     ]
   });
-  return JSON.parse(out.choices[0]?.message?.content || '{}');
+  return parseModelJson(out.choices[0]?.message?.content || '');
 }
 
 export async function GET(req: Request) { return run(req); }

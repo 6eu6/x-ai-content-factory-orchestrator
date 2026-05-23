@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
+import { parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 
 const VERSION = 'repo-style-learn-v1';
@@ -68,7 +69,7 @@ Files=${JSON.stringify(files || [])}`;
       ]
     });
 
-    const raw = JSON.parse(completion.choices[0]?.message?.content || '{}');
+    const raw = parseModelJson(completion.choices[0]?.message?.content || '');
     const templates = asArray(raw.templates).slice(0, 20);
     let inserted = 0;
     for (const template of templates) {

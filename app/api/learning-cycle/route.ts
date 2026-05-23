@@ -3,7 +3,7 @@ import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 import { webSearch } from '../../../lib/web-search';
 import { evaluateContentQuality } from '../../../lib/quality';
 import { fetchTwitterApiJson, twitterApiBase, extractTweets, analyzeXTweet } from '../../../lib/x';
-import { callModel } from '../../../lib/model-router';
+import { callModel, parseModelJson } from '../../../lib/model-router';
 
 const VERSION = 'learning-cycle-v2-research-viral-fusion-model-router';
 
@@ -213,7 +213,7 @@ recentContent=${JSON.stringify(recentContent.data)}`;
       { role: 'user', content: prompt }
     ]);
 
-    const intel = JSON.parse(modelResponse || '{}');
+    const intel = parseModelJson(modelResponse);
     const opportunities = asArray(intel.opportunities).slice(0, 12);
     const insertedOpps: any[] = [];
 

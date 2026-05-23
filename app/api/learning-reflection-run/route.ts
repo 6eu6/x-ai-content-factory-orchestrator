@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
+import { parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 
 const VERSION = 'learning-reflection-run-v1';
@@ -122,7 +123,7 @@ recentLogs=${JSON.stringify(recentLogs.data || [])}`;
       ]
     });
 
-    const reflection = JSON.parse(completion.choices[0]?.message?.content || '{}');
+    const reflection = parseModelJson(completion.choices[0]?.message?.content || '');
     const { data: reflectionRow, error: reflectionError } = await supabase.from('system_reflections').insert({
       reflection_type: 'learning_reflection',
       status: 'completed',

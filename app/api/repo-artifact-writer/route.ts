@@ -1,6 +1,7 @@
 import OpenAI from 'openai';
 import crypto from 'crypto';
 import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
+import { parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 
 const VERSION = 'repo-artifact-writer-v1.2-style-aware';
@@ -181,7 +182,7 @@ SystemLearningRules=${JSON.stringify(learningRules.data || [])}`;
         ]
       });
 
-      const raw = JSON.parse(completion.choices[0]?.message?.content || '{}');
+      const raw = parseModelJson(completion.choices[0]?.message?.content || '');
       const artifacts = asArray(raw.artifacts).slice(0, 40);
       let readyArtifacts = 0;
       for (const artifact of artifacts) {

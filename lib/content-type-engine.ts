@@ -1,4 +1,4 @@
-import { callModel, TaskType } from './model-router';
+import { callModel, parseModelJson, TaskType } from './model-router';
 import { supabaseAdmin } from './supabase';
 import { optionalEnv } from './env';
 
@@ -134,7 +134,7 @@ Return JSON:
       }
     ]);
 
-    const parsed = JSON.parse(response);
+    const parsed = parseModelJson(response);
     return {
       topic,
       depth: parsed.depth || 5,
@@ -386,7 +386,7 @@ ${ctx.viralMemory ? `Working mechanics: ${JSON.stringify(ctx.viralMemory.high_co
 Return: {"text":"...","why_it_works":"...","originality_element":"...","reply_trigger":"...","bookmark_trigger":"...","mechanic_used":"...","best_time_utc":"..."}`
     }
   ]);
-  try { return JSON.parse(response); } catch { return { text: response, why_it_works: '', originality_element: '' }; }
+  try { return parseModelJson(response); } catch { return { text: response, why_it_works: '', originality_element: '' }; }
 }
 
 async function generateThread(ctx: any, taskType: TaskType): Promise<any> {
@@ -425,7 +425,7 @@ Return JSON:
 }`
     }
   ]);
-  try { return JSON.parse(response); } catch { return { hook: response, tweets: [] }; }
+  try { return parseModelJson(response); } catch { return { hook: response, tweets: [] }; }
 }
 
 async function generateArticle(ctx: any, taskType: TaskType): Promise<any> {
@@ -460,7 +460,7 @@ Return JSON:
 }`
     }
   ]);
-  try { return JSON.parse(response); } catch { return { headline: response }; }
+  try { return parseModelJson(response); } catch { return { headline: response }; }
 }
 
 async function generateCarousel(ctx: any, taskType: TaskType): Promise<any> {
@@ -493,7 +493,7 @@ Return JSON:
 }`
     }
   ]);
-  try { return JSON.parse(response); } catch { return { slides: [] }; }
+  try { return parseModelJson(response); } catch { return { slides: [] }; }
 }
 
 async function generateVideoScript(ctx: any, taskType: TaskType): Promise<any> {
@@ -534,7 +534,7 @@ Return JSON:
 }`
     }
   ]);
-  try { return JSON.parse(response); } catch { return { title: response }; }
+  try { return parseModelJson(response); } catch { return { title: response }; }
 }
 
 async function generateReply(ctx: any, taskType: TaskType): Promise<any> {
@@ -566,7 +566,7 @@ Return JSON:
 }`
     }
   ]);
-  try { return JSON.parse(response); } catch { return { prepared_reply: response }; }
+  try { return parseModelJson(response); } catch { return { prepared_reply: response }; }
 }
 
 async function generateQuotePost(ctx: any, taskType: TaskType): Promise<any> {
@@ -596,5 +596,5 @@ Return JSON:
 }`
     }
   ]);
-  try { return JSON.parse(response); } catch { return { prepared_quote: response }; }
+  try { return parseModelJson(response); } catch { return { prepared_quote: response }; }
 }

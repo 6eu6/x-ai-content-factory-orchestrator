@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
+import { parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 
 const VERSION = 'growth-learning-run-v1';
@@ -84,7 +85,7 @@ OwnedRepos=${JSON.stringify(ownedRepos.data || [])}`;
       ]
     });
 
-    const raw = JSON.parse(completion.choices[0]?.message?.content || '{}');
+    const raw = parseModelJson(completion.choices[0]?.message?.content || '');
     const { data: runRow, error: runError } = await supabase.from('growth_learning_runs').insert({
       run_type: 'growth_learning',
       mode,

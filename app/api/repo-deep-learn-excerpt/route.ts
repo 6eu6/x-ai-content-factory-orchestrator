@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
+import { parseModelJson } from '../../../lib/model-router';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 
 const VERSION = 'repo-deep-learn-excerpt-v1';
@@ -23,7 +24,7 @@ async function insertIfMissing(supabase: any, table: string, where: Record<strin
 async function analyze(input: { repo: string; path: string; text: string }) {
   const prompt = `Deep learn this repository file for @30piq. Extract only useful reusable knowledge. If the file does not teach anything useful, set useful=false. Do not summarize shallowly. Do not copy. Return JSON only with: useful, file_summary, technical_points, content_angles, repo_style_lessons, x_algorithm_rules, style_patterns. Each x_algorithm_rule has rule_type, rule, evidence, applies_to, confidence_score. Each repo_style_lesson has lesson_name, lesson, applies_to. Each style_pattern has pattern_type, pattern_name, pattern_description, why_it_works, risks, adaptation_for_30piq, confidence_score. Repo=${input.repo}. Path=${input.path}. Content=${input.text.slice(0, 12000)}`;
   const out = await client().chat.completions.create({ model: optionalEnv('OPENAI_MODEL', 'gpt-4.1-mini'), temperature: 0.02, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: 'Deep repo learning. JSON only. Extract rules, mechanisms, templates, and useful facts.' }, { role: 'user', content: prompt }] });
-  return JSON.parse(out.choices[0]?.message?.content || '{}');
+  return parseModelJson(out.choices[0]?.message?.content || '');
 }
 
 export async function GET(req: Request) { return run(req); }
