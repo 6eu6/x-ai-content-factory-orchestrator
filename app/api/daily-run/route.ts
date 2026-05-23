@@ -263,10 +263,13 @@ async function run(req: Request) {
 
     if (actions.length) {
       // حذف المهام اليومية القديمة المعلقة قبل إضافة الجديدة (لتجنب التكرار)
+      // تحسين: نحذف كل المهام المعلقة القديمة من أي مصدر (أقدم من ساعتين)
       try {
-        await supabase.from('action_queue').delete().ilike('title', 'Growth daily action%').eq('status', 'pending');
+        await supabase.from('action_queue').delete().eq('status', 'pending').lt('created_at', new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString());
       } catch {}
-      await supabase.from('action_queue').insert(actions.map((instruction: string, index: number) => ({
+      // إزالة التكرار من القائمة الجديدة أيضاً
+      const uniqueActionList = uniqueActions(actions);
+      await supabase.from('action_queue').insert(uniqueActionList.map((instruction: string, index: number) => ({
         priority: index + 1,
         action_type: readyCount ? 'human_publish_or_engage' : 'quality_review_or_research',
         title: `Growth daily action ${index + 1}`,
@@ -295,9 +298,20 @@ async function run(req: Request) {
     });
 
     // ═══ 7. Publishing Pipeline — تسليم المحتوى المنسق لتليجرام ═══
+    // تحسين: لا نرسل المحتوى المكرر — لو diverseContent يغطي النوع، لا نضيفه من النظام القديم
+    const diverseTypes = new Set(diverseContent.filter(d => !d.content?.error).map(d => d.content_type));
+    const filteredContentPack = {
+      ...contentPack,
+      // لو diverseContent عنده single_tweet، لا نضيف تغريدات النظام القديم
+      single_tweets: diverseTypes.has('single_tweet') ? [] : contentPack.single_tweets,
+      // لو diverseContent عنده reply، لا نضيف ردود النظام القديم
+      reply_targets_strategy: diverseTypes.has('reply') ? [] : contentPack.reply_targets_strategy,
+      // لو diverseContent عنده quote_post، لا نضيف اقتباسات النظام القديم
+      quote_tweet_strategy: diverseTypes.has('quote_post') ? [] : contentPack.quote_tweet_strategy,
+    };
     let publishResult = null;
     try {
-      publishResult = await prepareAndDeliverDailyPack(diverseContent, contentPack);
+      publishResult = await prepareAndDeliverDailyPack(diverseContent, filteredContentPack);
     } catch (e: any) {
       publishResult = { ok: false, error: e.message };
     }

@@ -138,6 +138,23 @@ export async function POST(req: Request) {
       return Response.json({ ok: true });
     }
 
+    // ═══ معالج جديد: زحف مستودع GitHub ═══
+    if (state?.current_flow === 'awaiting_repo_url') {
+      const { extractGitHubRepo } = await import('../../../../lib/telegram');
+      const repoUrl = extractGitHubRepo(text);
+      if (!repoUrl) return reply(chatId, 'أرسل رابط مستودع GitHub صحيح مثل: https://github.com/owner/repo أو owner/repo');
+      await clearFlow(supabase, chatId);
+      // شغّل زحف المستودع
+      await sendTelegramMessage(chatId, 'بدأت عملية زحف المستودع. سأرسل النتيجة بعد الانتهاء.', MAIN_KEYBOARD);
+      const origin = new URL(req.url).origin;
+      const secret = optionalEnv('ORCHESTRATOR_SECRET');
+      const res = await fetch(`${origin}/api/repo-ingest?secret=${encodeURIComponent(secret)}&repo_url=${encodeURIComponent(repoUrl)}`, { method: 'GET' });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !json.ok) return reply(chatId, `فشل زحف المستودع: ${htmlEscape(json.error || res.statusText)}`);
+      const ingested = json.ingested ?? json.files_ingested ?? 0;
+      return reply(chatId, `تم زحف المستودع بنجاح.\nالملفات المستوردة: ${ingested}\n\nشغّل الآن: 🔍 دورة تعلم ذكية أو 🚀 تشغيل فحص تعلم`);
+    }
+
     if (text === '📊 حالة الحساب') return accountStatus(supabase, chatId);
     if (text === '📊 مسح الأداء') return triggerEndpoint(req, chatId, '/api/account-performance-scan');
     if (text === '🧠 حالة التعلم') return learningStatus(supabase, chatId);

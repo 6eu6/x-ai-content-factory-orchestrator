@@ -10,25 +10,30 @@ function cleanAscii(text: string): string {
     .trim();
 }
 
+/**
+ * containsUnsafeClaim — يفحص هل النص يحتوي ادعاءات غير موثقة
+ *
+ * التحسين: بدل ما نطابق أي كلمة "I" أو "my" (اللي تدمر كل المحتوى)،
+ * نفحص فقط الأنماط اللي تمثل ادعاءات شخصية غير موثقة.
+ * الاستخدام العادي لـ "I think" أو "my approach" مسموح.
+ */
 function containsUnsafeClaim(text: string): boolean {
   const t = cleanAscii(text).toLowerCase();
   const badPatterns = [
-    /\bi\b/,
-    /\bmy\b/,
-    /\bme\b/,
-    /from experience/,
-    /experiment/,
-    /tested/,
-    /i found/,
-    /result\??/,
-    /\d+\s*%/,
-    /\d+\s*(hours?|minutes?|x)\b/,
-    /saved/,
-    /boosted/,
-    /increased/,
-    /improved/,
-    /doubling/,
-    /recruiters notice/,
+    // ادعاءات نتائج غير موثقة
+    /i (saved|boosted|increased|improved|doubled|reduced|grew|cut|achieved)\b/i,
+    /my (results?|experience|outcome|experiment|test|data|findings?) (show|prove|confirm|suggest|reveal|demonstrate)\b/i,
+    /i (found|discovered|tested|proved|confirmed|measured|verified)\b/i,
+    // أرقام ونسب غير موثقة مع ادعاء شخصي
+    /i (got|achieved|reached|hit) \d+/i,
+    /my \w+ (increased|improved|grew|doubled|reduced|boosted) (by )?\d+/i,
+    // تجارب شخصية كدليل علمي
+    /from (my )?experience,?\s*\d/i,
+    /in my (experience|testing|experiment),?\s*/i,
+    // ادعاءات مفرطة
+    /\d+\s*(x\s*)?(faster|better|more productive|more efficient)\b/i,
+    /saved (me |you |users? )?\d+/i,
+    // تجنّب الهاشتاقات
     /#/
   ];
   return badPatterns.some((p) => p.test(t));
@@ -140,26 +145,66 @@ function normalizeQuote(item: any) {
   return { target_type: target, quote_angle: angle, prepared_quote: cleanAscii(prepared).slice(0, 280), decision_rule: decisionRule };
 }
 
+/**
+ * normalizePack — ينظّف الحزمة بدل رميها بالكامل
+ *
+ * التحسين: بدل ما نرمي كل الحزمة لو تغريدة وحدة فيها مشكلة،
+ * نستبدل التغريدات المعطوبة فقط بالfallback ونحتفظ بالباقي.
+ * كذلك نسمح بأقل من 3 تغريدات بدل ما نلغي كل شيء.
+ */
 function normalizePack(pack: any) {
   const safe = fallbackPack();
   const tweets = Array.isArray(pack?.single_tweets) ? pack.single_tweets : [];
   const repliesRaw = Array.isArray(pack?.reply_targets_strategy) ? pack.reply_targets_strategy : [];
   const quotesRaw = Array.isArray(pack?.quote_tweet_strategy) ? pack.quote_tweet_strategy : [];
-  const allText = [...tweets.map((t: any) => String(t?.text || '')), ...repliesRaw.map((r: any) => valueFrom(r, ['prepared_reply', 'reply', 'text', 'content'], '')), ...quotesRaw.map((q: any) => valueFrom(q, ['prepared_quote', 'quote', 'text', 'content'], ''))];
 
-  if (tweets.length !== 3 || allText.some(containsUnsafeClaim)) return safe;
-
-  const cleanedTweets = tweets.slice(0, 3).map((t: any, index: number) => ({
-    text: cleanAscii(String(t?.text || '')).slice(0, 240),
-    why_it_works: cleanAscii(String(t?.why_it_works || safe.single_tweets[index]?.why_it_works || '')),
-    originality_element: cleanAscii(String(t?.originality_element || t?.element || 'Original framework')),
-    best_time_utc: cleanAscii(String(t?.best_time_utc || safe.single_tweets[index]?.best_time_utc || '15:00')),
-    mechanic_used: cleanAscii(String(t?.mechanic_used || safe.single_tweets[index]?.mechanic_used || '')),
-    viral_pattern_basis: cleanAscii(String(t?.viral_pattern_basis || safe.single_tweets[index]?.viral_pattern_basis || '')),
-    reply_trigger: cleanAscii(String(t?.reply_trigger || safe.single_tweets[index]?.reply_trigger || '')),
-    bookmark_trigger: cleanAscii(String(t?.bookmark_trigger || safe.single_tweets[index]?.bookmark_trigger || '')),
-    why_this_is_not_generic: cleanAscii(String(t?.why_this_is_not_generic || safe.single_tweets[index]?.why_this_is_not_generic || ''))
-  }));
+  // نظّف كل تغريدة لوحدها — استبدل المعطوبة بالـ fallback
+  const cleanedTweets: any[] = [];
+  for (let i = 0; i < 3; i++) {
+    const raw = tweets[i];
+    if (!raw) {
+      // لا توجد تغريدة كافية — استخدم fallback
+      cleanedTweets.push({
+        text: cleanAscii(safe.single_tweets[i]?.text || '').slice(0, 240),
+        why_it_works: cleanAscii(safe.single_tweets[i]?.why_it_works || ''),
+        originality_element: cleanAscii(safe.single_tweets[i]?.originality_element || 'Original framework'),
+        best_time_utc: cleanAscii(safe.single_tweets[i]?.best_time_utc || '15:00'),
+        mechanic_used: cleanAscii(safe.single_tweets[i]?.mechanic_used || ''),
+        viral_pattern_basis: cleanAscii(safe.single_tweets[i]?.viral_pattern_basis || ''),
+        reply_trigger: cleanAscii(safe.single_tweets[i]?.reply_trigger || ''),
+        bookmark_trigger: cleanAscii(safe.single_tweets[i]?.bookmark_trigger || ''),
+        why_this_is_not_generic: cleanAscii(safe.single_tweets[i]?.why_this_is_not_generic || '')
+      });
+      continue;
+    }
+    const text = cleanAscii(String(raw?.text || ''));
+    // لو التغريدة فيها ادعاء غير موثق، استبدلها بالـ fallback
+    if (containsUnsafeClaim(text) || !text.trim()) {
+      cleanedTweets.push({
+        text: cleanAscii(safe.single_tweets[i]?.text || '').slice(0, 240),
+        why_it_works: cleanAscii(String(raw?.why_it_works || safe.single_tweets[i]?.why_it_works || '')),
+        originality_element: cleanAscii(String(raw?.originality_element || raw?.element || safe.single_tweets[i]?.originality_element || 'Original framework')),
+        best_time_utc: cleanAscii(String(raw?.best_time_utc || safe.single_tweets[i]?.best_time_utc || '15:00')),
+        mechanic_used: cleanAscii(String(raw?.mechanic_used || safe.single_tweets[i]?.mechanic_used || '')),
+        viral_pattern_basis: cleanAscii(String(raw?.viral_pattern_basis || safe.single_tweets[i]?.viral_pattern_basis || '')),
+        reply_trigger: cleanAscii(String(raw?.reply_trigger || safe.single_tweets[i]?.reply_trigger || '')),
+        bookmark_trigger: cleanAscii(String(raw?.bookmark_trigger || safe.single_tweets[i]?.bookmark_trigger || '')),
+        why_this_is_not_generic: cleanAscii(String(raw?.why_this_is_not_generic || safe.single_tweets[i]?.why_this_is_not_generic || ''))
+      });
+    } else {
+      cleanedTweets.push({
+        text: text.slice(0, 240),
+        why_it_works: cleanAscii(String(raw?.why_it_works || safe.single_tweets[i]?.why_it_works || '')),
+        originality_element: cleanAscii(String(raw?.originality_element || raw?.element || 'Original framework')),
+        best_time_utc: cleanAscii(String(raw?.best_time_utc || safe.single_tweets[i]?.best_time_utc || '15:00')),
+        mechanic_used: cleanAscii(String(raw?.mechanic_used || safe.single_tweets[i]?.mechanic_used || '')),
+        viral_pattern_basis: cleanAscii(String(raw?.viral_pattern_basis || safe.single_tweets[i]?.viral_pattern_basis || '')),
+        reply_trigger: cleanAscii(String(raw?.reply_trigger || safe.single_tweets[i]?.reply_trigger || '')),
+        bookmark_trigger: cleanAscii(String(raw?.bookmark_trigger || safe.single_tweets[i]?.bookmark_trigger || '')),
+        why_this_is_not_generic: cleanAscii(String(raw?.why_this_is_not_generic || safe.single_tweets[i]?.why_this_is_not_generic || ''))
+      });
+    }
+  }
 
   const cleanedReplies = repliesRaw.slice(0, 3).map(normalizeReply).filter((r: any) => r.prepared_reply && !containsUnsafeClaim(r.prepared_reply));
   const cleanedQuotes = quotesRaw.slice(0, 1).map(normalizeQuote).filter((q: any) => q.prepared_quote && !containsUnsafeClaim(q.prepared_quote));
@@ -178,7 +223,7 @@ function normalizePack(pack: any) {
     mode: cleanAscii(String(pack?.mode || 'daily_mission')),
     today_goal: cleanAscii(String(pack?.today_goal || safe.today_goal)),
     single_tweets: cleanedTweets,
-    reply_targets_strategy: cleanedReplies.length === 3 ? cleanedReplies : safe.reply_targets_strategy,
+    reply_targets_strategy: cleanedReplies.length >= 1 ? cleanedReplies : safe.reply_targets_strategy,
     quote_tweet_strategy: cleanedQuotes.length ? cleanedQuotes : safe.quote_tweet_strategy,
     github_decision: githubDecision,
     quality_checks: (Array.isArray(pack?.quality_checks) ? pack.quality_checks : safe.quality_checks).slice(0, 7).map((x: any) => cleanAscii(String(x))),
