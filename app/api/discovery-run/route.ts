@@ -1,8 +1,9 @@
 import { assertAuthorized, optionalEnv } from '../../../lib/env';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 import { webSearch } from '../../../lib/web-search';
+import { learnFromCrawlerItems } from '../../../lib/learning-memory';
 
-const VERSION = 'discovery-run-mvp';
+const VERSION = 'discovery-run-mvp+learning-memory';
 
 function daysAgo(days: number) {
   const d = new Date(Date.now() - days * 86400000);
@@ -59,13 +60,16 @@ async function run(req: Request) {
     const url = new URL(req.url);
     const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 4), 2), 8);
     const since = url.searchParams.get('since') || daysAgo(30);
+    const mode = url.searchParams.get('mode') || 'trial';
 
     const { data: sources } = await supabase.from('discovery_sources').select('*').eq('active', true).order('priority', { ascending: false }).limit(6);
-    const { data: runRow, error: runError } = await supabase.from('discovery_runs').insert({ run_type: 'discovery_mvp', status: 'started', inputs: { limit, since } }).select('*').single();
+    const { data: runRow, error: runError } = await supabase.from('discovery_runs').insert({ run_type: 'discovery_mvp', status: 'started', inputs: { limit, since, learning_memory: true } }).select('*').single();
     if (runError) throw runError;
 
     let saved = 0;
     const errors: any[] = [];
+    const crawlerItemsForLearning: any[] = [];
+
     for (const source of sources || []) {
       const query = String(source.query_template || '').replace('{date}', since);
       try {
@@ -74,6 +78,15 @@ async function run(req: Request) {
           : (await webSearch(query, limit)).map((r: any) => ({ item_type: 'web_page', title: r.title, url: r.url, source_host: host(r.url), summary: r.snippet || '', raw_payload: r }));
         for (const item of results) {
           const s = scores(item);
+          const memoryItem = {
+            ...item,
+            ...s,
+            source_name: source.source_name,
+            source_type: source.source_type,
+            topic_cluster: source.topic_cluster,
+            query
+          };
+          crawlerItemsForLearning.push(memoryItem);
           await supabase.from('discovered_items').upsert({
             discovery_run_id: runRow.id,
             discovery_source_id: source.id,
@@ -101,9 +114,24 @@ async function run(req: Request) {
       }
     }
 
-    await supabase.from('discovery_runs').update({ status: 'completed', finished_at: new Date().toISOString(), summary: { saved, errors } }).eq('id', runRow.id);
-    const log = await insertSessionLog({ actions_completed: ['discovery_run', VERSION, `saved:${saved}`], decisions_made: [], pending_tasks: ['Review discovered_items with high repo_potential_score and run repo-ingest.'], next_recommendation: 'Run repo-ingest for strong GitHub repos, then format-decision and production-cycle.' });
-    return Response.json({ ok: true, version: VERSION, run_id: runRow.id, saved, errors, sessionLog: log });
+    let learningMemory: any = null;
+    if (crawlerItemsForLearning.length) {
+      learningMemory = await learnFromCrawlerItems(supabase, {
+        runType: 'discovery_crawler_learning',
+        source: 'discovery-run',
+        items: crawlerItemsForLearning,
+        mode
+      });
+    }
+
+    await supabase.from('discovery_runs').update({ status: 'completed', finished_at: new Date().toISOString(), summary: { saved, errors, learning_memory: learningMemory } }).eq('id', runRow.id);
+    const log = await insertSessionLog({
+      actions_completed: ['discovery_run', VERSION, `saved:${saved}`, `learned_rules:${learningMemory?.algorithmRules || 0}`, `learned_patterns:${learningMemory?.stylePatterns || 0}`, `learned_mcp:${learningMemory?.mcpOpportunities || 0}`],
+      decisions_made: [],
+      pending_tasks: ['Review discovered_items with high repo_potential_score and run repo-ingest.', 'Use growth_learning_runs to verify every crawler run produced memory or explicit no-learning evidence.'],
+      next_recommendation: 'Run repo-ingest for strong GitHub repos, then format-decision and production-cycle. Do not bypass learning memory.'
+    });
+    return Response.json({ ok: true, version: VERSION, run_id: runRow.id, saved, errors, learningMemory, sessionLog: log });
   } catch (err: any) {
     return Response.json({ ok: false, version: VERSION, error: err.message }, { status: 500 });
   }
