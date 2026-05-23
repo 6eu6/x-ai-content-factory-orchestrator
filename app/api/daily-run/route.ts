@@ -4,8 +4,10 @@ import { getXUserByUsername } from '../../../lib/x';
 import { generateDailyContentPack } from '../../../lib/content';
 import { GROWTH_OPERATOR_VERSION, enrichGrowthOperatorPack } from '../../../lib/growth';
 import { evaluateContentQuality } from '../../../lib/quality';
+import { shieldCheck } from '../../../lib/account-shield';
+import { planDailyContent, generateContentByType, ContentType } from '../../../lib/content-type-engine';
 
-const ORCHESTRATOR_VERSION = `${GROWTH_OPERATOR_VERSION}+viral-memory+quality-gate`;
+const ORCHESTRATOR_VERSION = `${GROWTH_OPERATOR_VERSION}+model-router+shield+content-types`;
 
 function uniqueActions(actions: string[]) {
   const seen = new Set<string>();
@@ -40,6 +42,7 @@ async function run(req: Request) {
     const supabase = supabaseAdmin();
     const username = optionalEnv('X_USERNAME', '30piq');
 
+    // ═══ 1. فحص الحساب ═══
     let xSnapshot: any = null;
     try {
       xSnapshot = await getXUserByUsername(username);
@@ -60,6 +63,7 @@ async function run(req: Request) {
       xSnapshot = { warning: 'X live check failed or skipped', error: e.message };
     }
 
+    // ═══ 2. سحب كل البيانات ═══
     const [accountState, requirements, targets, recentContent, creatorIntel, trends, viralRuns, viralTweets, viralPatterns, algoRules, stylePatterns, mcpOpportunities] = await Promise.all([
       supabase.from('account_state').select('*').eq('account_handle', username).maybeSingle(),
       supabase.from('requirement_status').select('*').order('priority', { ascending: true }).limit(50),
@@ -84,35 +88,66 @@ async function run(req: Request) {
 
     const learningMemory = {
       algorithm_rules: (algoRules.data || []).map((r: any) => ({
-        rule_type: r.rule_type,
-        rule: r.rule,
-        evidence: r.evidence,
-        applies_to: r.applies_to,
-        confidence_score: r.confidence_score,
-        source_type: r.source_type
+        rule_type: r.rule_type, rule: r.rule, evidence: r.evidence,
+        applies_to: r.applies_to, confidence_score: r.confidence_score, source_type: r.source_type
       })),
       style_patterns: (stylePatterns.data || []).map((p: any) => ({
-        pattern_type: p.pattern_type,
-        pattern_name: p.pattern_name,
-        pattern_description: p.pattern_description,
-        example_structure: p.example_structure,
-        why_it_works: p.why_it_works,
-        risks: p.risks,
-        adaptation_for_30piq: p.adaptation_for_30piq,
-        confidence_score: p.confidence_score
+        pattern_type: p.pattern_type, pattern_name: p.pattern_name,
+        pattern_description: p.pattern_description, example_structure: p.example_structure,
+        why_it_works: p.why_it_works, risks: p.risks,
+        adaptation_for_30piq: p.adaptation_for_30piq, confidence_score: p.confidence_score
       })),
       mcp_opportunities: (mcpOpportunities.data || []).map((m: any) => ({
-        opportunity_area: m.opportunity_area,
-        mcp_use_case: m.mcp_use_case,
-        audience_segment: m.audience_segment,
-        pain_point: m.pain_point,
-        content_angles: m.content_angles,
-        priority_score: m.priority_score,
-        confidence_score: m.confidence_score
+        opportunity_area: m.opportunity_area, mcp_use_case: m.mcp_use_case,
+        audience_segment: m.audience_segment, pain_point: m.pain_point,
+        content_angles: m.content_angles, priority_score: m.priority_score, confidence_score: m.confidence_score
       })),
       usage_rule: 'Use algorithm rules to score and plan content. Use style patterns as mechanics for hooks, formats, and structures. Use MCP opportunities for repo/article decisions. Never copy source wording or claims.'
     };
 
+    // ═══ 3. تخطيط محتوى متنوع (Content Type Engine) ═══
+    const trendTopics = (trends.data || []).map((t: any) => ({
+      topic: t.topic || t.title || 'AI productivity',
+      source: t.source || '',
+      heat_score: t.heat_score || 5
+    }));
+
+    let contentPlan: any = null;
+    let diverseContent: any[] = [];
+    try {
+      contentPlan = await planDailyContent(trendTopics.length ? trendTopics : [{ topic: 'AI tools productivity career growth' }]);
+      
+      // ولّد محتوى لكل نوع في الخطة
+      for (const item of contentPlan.items.slice(0, 6)) {
+        try {
+          const content = await generateContentByType(item.content_type, {
+            topic: item.topic,
+            score: item.score,
+            accountState: accountState.data,
+            learningMemory,
+            viralMemory,
+            sources: []
+          });
+          diverseContent.push({
+            content_type: item.content_type,
+            content,
+            priority: item.priority,
+            model_task: item.model_task
+          });
+        } catch (e: any) {
+          diverseContent.push({
+            content_type: item.content_type,
+            content: { error: e.message },
+            priority: item.priority,
+            model_task: item.model_task
+          });
+        }
+      }
+    } catch (e: any) {
+      contentPlan = { items: [], variety_check: { types_used: [], types_missing: [], recommendation: `Content planning failed: ${e.message}` } };
+    }
+
+    // ═══ 4. التوليد القديم (backward compatible) ═══
     const rawContentPack = await generateDailyContentPack({
       accountState: { db: accountState.data, xSnapshot },
       targets: targets.data,
@@ -122,13 +157,43 @@ async function run(req: Request) {
     });
     const contentPack = enrichGrowthOperatorPack(rawContentPack);
 
+    // ═══ 5. Quality Gate + Account Shield ═══
     const singleTweets = Array.isArray(contentPack.single_tweets) ? contentPack.single_tweets : [];
     const replies = Array.isArray(contentPack.reply_targets_strategy) ? contentPack.reply_targets_strategy : [];
     const quotes = Array.isArray(contentPack.quote_tweet_strategy) ? contentPack.quote_tweet_strategy : [];
+    
+    // Quality gate قديم
     const qualityResults = singleTweets.map((tweet: any) => evaluateContentQuality(tweet));
-    const readyCount = qualityResults.filter((q) => q.status === 'ready').length;
-    const actions = qualityAwareActions(Array.isArray(contentPack.next_actions) ? contentPack.next_actions : [], qualityResults);
+    
+    // Shield فحص جديد
+    const shieldResults = await Promise.all(
+      singleTweets.map((tweet: any) => shieldCheck({
+        text: tweet.text || '',
+        type: 'tweet',
+        originality_element: tweet.originality_element,
+        mechanic_used: tweet.mechanic_used,
+        reply_trigger: tweet.reply_trigger,
+        bookmark_trigger: tweet.bookmark_trigger
+      }))
+    );
 
+    // دمج النتائج
+    const combinedResults = qualityResults.map((q: any, i: number) => {
+      const shield = shieldResults[i];
+      if (!shield.passed) {
+        return {
+          ...q,
+          status: 'needs_review' as const,
+          reasons: [...(q.reasons || []), ...shield.checks.filter(c => !c.passed).map(c => c.name)]
+        };
+      }
+      return q;
+    });
+
+    const readyCount = combinedResults.filter((q) => q.status === 'ready').length;
+    const actions = qualityAwareActions(Array.isArray(contentPack.next_actions) ? contentPack.next_actions : [], combinedResults);
+
+    // ═══ 6. تسجيل ═══
     const { data: runRow, error: runError } = await supabase.from('daily_checkins').upsert({
       checkin_date: new Date().toISOString().slice(0, 10),
       execution_mode: contentPack.mode || 'partial',
@@ -145,13 +210,14 @@ async function run(req: Request) {
       creator_posts_analyzed: (Array.isArray(creatorIntel.data) ? creatorIntel.data.length : 0) + (Array.isArray(viralTweets.data) ? viralTweets.data.length : 0),
       github_assets_created: contentPack.github_decision?.needed ? 1 : 0,
       next_priority: readyCount ? contentPack.today_goal : 'No content is ready. Add source-backed research or rewrite needs_review items.',
-      notes: `Generated by daily-run API ${ORCHESTRATOR_VERSION}. Ready: ${readyCount}/${singleTweets.length}. Quality statuses: ${qualityResults.map((q) => q.status).join(',')}.`
+      notes: `Generated by daily-run API ${ORCHESTRATOR_VERSION}. Ready: ${readyCount}/${singleTweets.length}. Quality: ${combinedResults.map((q) => q.status).join(',')}. Content types planned: ${contentPlan?.items?.map((i: any) => i.content_type).join(',') || 'none'}.`
     }, { onConflict: 'checkin_date' }).select('*').single();
     if (runError) throw runError;
 
     if (singleTweets.length) {
       const { error: contentError } = await supabase.from('content_log').insert(singleTweets.map((t: any, index: number) => {
-        const quality = qualityResults[index] || { status: 'needs_review', reasons: ['missing_quality_result'] };
+        const quality = combinedResults[index] || { status: 'needs_review', reasons: ['missing_quality_result'] };
+        const shield = shieldResults[index];
         return {
           content_type: 'single_tweet',
           topic: contentPack.today_goal || 'AI productivity career growth',
@@ -163,6 +229,7 @@ async function run(req: Request) {
           publish_status: quality.status,
           notes: JSON.stringify({
             quality_gate: quality,
+            shield_check: shield ? { passed: shield.passed, risk_level: shield.risk_level, summary: shield.summary } : null,
             why_it_works: t.why_it_works || null,
             mechanic_used: t.mechanic_used || null,
             viral_pattern_basis: t.viral_pattern_basis || null,
@@ -174,13 +241,32 @@ async function run(req: Request) {
       if (contentError) throw contentError;
     }
 
+    // سجل المحتوى المتنوع
+    if (diverseContent.length) {
+      for (const item of diverseContent) {
+        try {
+          await supabase.from('content_log').insert({
+            content_type: item.content_type,
+            topic: item.content?.topic || item.content?.headline || item.content?.hook?.slice(0, 80) || 'diverse content',
+            hook_text: (item.content?.text || item.content?.hook || item.content?.headline || '').slice(0, 240),
+            final_text: JSON.stringify(item.content).slice(0, 2000),
+            target_audience: 'English-speaking AI productivity career growth audience',
+            originality_element: item.content?.originality_element || 'Generated via content type engine',
+            source_used: `${ORCHESTRATOR_VERSION}+${item.model_task}`,
+            publish_status: 'needs_review',
+            notes: JSON.stringify({ content_type: item.content_type, priority: item.priority, model_task: item.model_task })
+          });
+        } catch {}
+      }
+    }
+
     if (actions.length) {
       await supabase.from('action_queue').insert(actions.map((instruction: string, index: number) => ({
         priority: index + 1,
         action_type: readyCount ? 'human_publish_or_engage' : 'quality_review_or_research',
         title: `Growth daily action ${index + 1}`,
         instruction,
-        prepared_content: JSON.stringify({ ...contentPack, quality_gate: qualityResults, ready_count: readyCount }),
+        prepared_content: JSON.stringify({ ...contentPack, quality_gate: combinedResults, shield_results: shieldResults.map(s => ({ passed: s.passed, risk: s.risk_level, summary: s.summary })), ready_count: readyCount }),
         status: 'pending',
         assigned_to: 'human_operator'
       })));
@@ -196,11 +282,11 @@ async function run(req: Request) {
       .limit(7);
 
     const sessionLog = await insertSessionLog({
-      actions_completed: ['daily_run', ORCHESTRATOR_VERSION, 'x_check_attempted', 'used_research_intel', 'used_viral_memory', 'quality_gate_applied', 'publish_actions_blocked_when_not_ready'],
-      content_created: singleTweets.map((tweet: any, index: number) => ({ ...tweet, quality_gate: qualityResults[index] })),
-      db_updates: [{ table: 'daily_checkins', id: runRow.id }, { table: 'content_log', rows: singleTweets.length }],
+      actions_completed: ['daily_run', ORCHESTRATOR_VERSION, 'x_check_attempted', 'used_research_intel', 'used_viral_memory', 'quality_gate_applied', 'shield_applied', 'content_type_engine', 'model_router_active'],
+      content_created: singleTweets.map((tweet: any, index: number) => ({ ...tweet, quality_gate: combinedResults[index], shield: shieldResults[index]?.passed })),
+      db_updates: [{ table: 'daily_checkins', id: runRow.id }, { table: 'content_log', rows: singleTweets.length + diverseContent.length }],
       pending_tasks: actions,
-      next_recommendation: readyCount ? 'Publish only content with publish_status=ready.' : 'Do not publish. Run research-intel-v4 or rewrite into source-backed/opinion-only content first.'
+      next_recommendation: readyCount ? 'Publish only content with publish_status=ready. Review diverse content types before publishing.' : 'Do not publish. Run research-intel-v4 or rewrite into source-backed/opinion-only content first.'
     });
 
     return Response.json({
@@ -208,7 +294,9 @@ async function run(req: Request) {
       orchestrator_version: ORCHESTRATOR_VERSION,
       xSnapshot,
       research_context: { trends: trends.data, creator_intel: creatorIntel.data, viral_memory: viralMemory, learning_memory: learningMemory },
-      contentPack: { ...contentPack, quality_gate: qualityResults, ready_count: readyCount, safe_to_publish: readyCount > 0 },
+      contentPack: { ...contentPack, quality_gate: combinedResults, shield_results: shieldResults.map(s => ({ passed: s.passed, risk_level: s.risk_level, summary: s.summary, suggestions: s.suggestions })), ready_count: readyCount, safe_to_publish: readyCount > 0 },
+      diverse_content: diverseContent,
+      content_plan: contentPlan?.variety_check || null,
       daily_checkin: runRow,
       sessionLog,
       pendingActions: pendingActions || []
