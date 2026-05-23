@@ -44,7 +44,10 @@ export async function GET(req: Request) {
       'content_production_cards',
       'original_content_hypotheses',
       'raw_research_items',
-      'telegram_bot_state'
+      'telegram_bot_state',
+      'learning_cycles',
+      'requirement_status',
+      'target_plans'
     ];
 
     const tableStatus: Record<string, { exists: boolean; rows?: number; error?: string }> = {};

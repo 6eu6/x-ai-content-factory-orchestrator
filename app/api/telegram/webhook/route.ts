@@ -28,31 +28,120 @@ export async function POST(req: Request) {
 
     if (state?.current_flow === 'awaiting_learning_account') {
       const handle = extractHandle(text);
-      if (!handle) return reply(chatId, 'أرسل اليوزر فقط مثل: emollick أو @emollick');
+      if (!handle) return reply(chatId, 'أرسل اليوزر فقط مثل: emollick أو @emollick أو رابط الحساب');
+      let addedOk = false;
+      let accountInfo = '';
+      // Try inserting with full schema first
       try {
-        await supabase.from('accounts').upsert({ handle, username: handle, tier: 2, active: true, notes: 'Added from Telegram learning flow.' }, { onConflict: 'handle' });
-      } catch {
-        // Fallback: try with minimal columns in case of schema mismatch
-        try { await supabase.from('accounts').upsert({ handle, username: handle }, { onConflict: 'handle' }); } catch {}
+        const { error } = await supabase.from('accounts').upsert({ handle, username: handle, tier: 2, active: true, notes: 'Added from Telegram learning flow.' }, { onConflict: 'handle' });
+        if (!error) addedOk = true;
+      } catch {}
+      // Fallback: minimal columns
+      if (!addedOk) {
+        try {
+          const { error } = await supabase.from('accounts').upsert({ handle, username: handle }, { onConflict: 'handle' });
+          if (!error) addedOk = true;
+        } catch {}
+      }
+      // Try to fetch live info about the account
+      try {
+        const { getXUserByUsername } = await import('../../../../lib/x');
+        const snapshot = await getXUserByUsername(handle);
+        if (snapshot) {
+          accountInfo = `\n\n✅ معلومات الحساب:\nالاسم: ${htmlEscape(snapshot.name || handle)}\nالمتابعين: ${snapshot.followers_count ?? '?'}\nالتغريدات: ${snapshot.tweet_count ?? '?'}`;
+          // Update with richer data
+          try {
+            await supabase.from('accounts').update({
+              notes: `Added from Telegram. Followers: ${snapshot.followers_count}, Tweets: ${snapshot.tweet_count}, Verified: ${snapshot.verified || false}`,
+              updated_at: new Date().toISOString()
+            }).eq('handle', handle);
+          } catch {}
+        }
+      } catch (err: any) {
+        accountInfo = '\n\n⚠️ لم أتمكن من جلب معلومات الحساب الآن (سيتم جلبها لاحقاً).';
       }
       await clearFlow(supabase, chatId);
-      await reply(chatId, `تمت إضافة حساب التعلم: @${htmlEscape(handle)}\n\nشغّل الآن: 🚀 تشغيل فحص تعلم أو 🔍 دورة تعلم ذكية`);
+      if (addedOk) {
+        await reply(chatId, `تمت إضافة حساب التعلم: @${htmlEscape(handle)}${accountInfo}\n\nشغّل الآن: 🚀 تشغيل فحص تعلم أو 🔍 دورة تعلم ذكية`);
+      } else {
+        await reply(chatId, `⚠️ قد يكون الحساب مضافاً مسبقاً: @${htmlEscape(handle)}${accountInfo}\n\nشغّل الآن: 🚀 تشغيل فحص تعلم أو 🔍 دورة تعلم ذكية`);
+      }
       return Response.json({ ok: true });
     }
 
     if (state?.current_flow === 'awaiting_learning_tweet') {
       const tweetUrl = extractTweetUrl(text);
       if (!tweetUrl) return reply(chatId, 'أرسل رابط تغريدة X صحيح مثل: https://x.com/user/status/123');
-      await supabase.from('learning_tweet_queue').insert({ tweet_url: tweetUrl, source: 'telegram', status: 'pending', notes: 'Added from Telegram.' });
+      const { data: insertedTweet, error: insertError } = await supabase.from('learning_tweet_queue').insert({ tweet_url: tweetUrl, source: 'telegram', status: 'pending', notes: 'Added from Telegram.' }).select('*').single();
+      if (insertError) {
+        await clearFlow(supabase, chatId);
+        await reply(chatId, `خطأ في إضافة التغريدة: ${htmlEscape(insertError.message)}`);
+        return Response.json({ ok: false, error: insertError.message });
+      }
+      // Try to process the tweet immediately
+      let processResult = '';
+      try {
+        const { fetchTwitterApiJson, twitterApiBase, extractTweets, analyzeXTweet } = await import('../../../../lib/x');
+        const urlMatch = String(tweetUrl).match(/\/status\/(\d+)/);
+        if (urlMatch) {
+          const tweetId = urlMatch[1];
+          const base = twitterApiBase();
+          const json = await fetchTwitterApiJson(`${base}/twitter/tweet/${tweetId}`);
+          const rawTweets = extractTweets(json);
+          if (rawTweets.length > 0) {
+            const raw = rawTweets[0];
+            const username = raw?.author?.userName || raw?.author?.username || 'unknown';
+            const user = { username, followers_count: Number(raw?.author?.followers || 0), public_metrics: { followers_count: Number(raw?.author?.followers || 0) } };
+            const normalized = {
+              id: String(raw.id || raw.tweetId || raw.rest_id || tweetId),
+              text: raw.text || raw.full_text || raw.content || '',
+              created_at: raw.createdAt || raw.created_at || raw.created_at_iso,
+              public_metrics: {
+                like_count: Number(raw.likeCount || raw.likes || raw.favorite_count || 0),
+                reply_count: Number(raw.replyCount || raw.replies || raw.reply_count || 0),
+                retweet_count: Number(raw.retweetCount || raw.retweets || raw.retweet_count || 0),
+                quote_count: Number(raw.quoteCount || raw.quotes || raw.quote_count || 0),
+                bookmark_count: Number(raw.bookmarkCount || raw.bookmarks || 0),
+                view_count: Number(raw.viewCount || raw.views || 0)
+              },
+              entities: raw.entities || {},
+              is_reply: Boolean(raw.isReply || raw.in_reply_to_status_id),
+              author: raw.author || raw.user
+            };
+            const analysis = analyzeXTweet(normalized, user);
+            await supabase.from('learning_tweet_queue').update({
+              status: 'processed',
+              fetched_data: analysis,
+              updated_at: new Date().toISOString()
+            }).eq('id', insertedTweet.id);
+            const eng = analysis.engagement_per_1k_followers ?? 0;
+            processResult = `\n\n✅ تم التحليل:\nالمؤلف: @${htmlEscape(username)}\nالمتابعين: ${user.followers_count}\nالتفاعل/1K: ${eng}\nالنص: ${htmlEscape(shortText(analysis.text, 120))}`;
+          } else {
+            await supabase.from('learning_tweet_queue').update({
+              status: 'failed',
+              error: 'No tweet data returned from API',
+              updated_at: new Date().toISOString()
+            }).eq('id', insertedTweet.id);
+            processResult = '\n\n⚠️ لم يتم العثور على بيانات التغريدة. ستُعالج لاحقاً في دورة التعلم.';
+          }
+        }
+      } catch (processErr: any) {
+        await supabase.from('learning_tweet_queue').update({
+          status: 'failed',
+          error: String(processErr.message || processErr).slice(0, 500),
+          updated_at: new Date().toISOString()
+        }).eq('id', insertedTweet.id);
+        processResult = `\n\n⚠️ فشل التحليل الفوري: ${htmlEscape(String(processErr.message || '').slice(0, 100))}. ستُعالج لاحقاً في دورة التعلم.`;
+      }
       await clearFlow(supabase, chatId);
-      await reply(chatId, `تمت إضافة التغريدة لقائمة التعلم:\n${htmlEscape(tweetUrl)}`);
+      await reply(chatId, `تمت إضافة التغريدة لقائمة التعلم:\n${htmlEscape(tweetUrl)}${processResult}`);
       return Response.json({ ok: true });
     }
 
     if (text === '📊 حالة الحساب') return accountStatus(supabase, chatId);
     if (text === '📊 مسح الأداء') return triggerEndpoint(req, chatId, '/api/account-performance-scan');
     if (text === '🧠 حالة التعلم') return learningStatus(supabase, chatId);
-    if (text === '➕ إضافة حساب للتعلم') return startFlow(supabase, chatId, 'awaiting_learning_account', 'أرسل حساب X للتعلم منه. مثال: emollick أو @emollick');
+    if (text === '➕ إضافة حساب للتعلم') return startFlow(supabase, chatId, 'awaiting_learning_account', 'أرسل حساب X للتعلم منه. مثال: emollick أو @emollick أو رابط الحساب');
     if (text === '🔗 إضافة تغريدة للتعلم') return startFlow(supabase, chatId, 'awaiting_learning_tweet', 'أرسل رابط تغريدة X ليتم إدخالها في قائمة التعلم.');
     if (text === '📋 المهام اليومية') return dailyTasks(supabase, chatId);
     if (text === '✅ محتوى جاهز للنشر') return readyContent(supabase, chatId);
