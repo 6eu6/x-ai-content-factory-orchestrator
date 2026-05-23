@@ -51,6 +51,7 @@ async function run(req: Request) {
   try {
     assertAuthorized(req);
     const supabase = supabaseAdmin();
+    const u = new URL(req.url);
     const queries = [
       'AI productivity tools career growth workflow checklist',
       'open source AI agents productivity GitHub knowledge workers',
