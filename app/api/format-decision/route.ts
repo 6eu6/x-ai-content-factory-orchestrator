@@ -1,13 +1,8 @@
-import OpenAI from 'openai';
-import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
+import { assertAuthorized, optionalEnv } from '../../../lib/env';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
+import { callModel } from '../../../lib/model-router';
 
-const VERSION = 'format-decision-v1';
-
-function client() {
-  const baseURL = optionalEnv('OPENAI_BASE_URL');
-  return new OpenAI({ apiKey: requiredEnv('OPENAI_API_KEY'), baseURL: baseURL || undefined });
-}
+const VERSION = 'format-decision-v2-model-router';
 
 function asArray(value: any) {
   if (Array.isArray(value)) return value;
@@ -75,17 +70,12 @@ viralPatterns=${JSON.stringify(viralPatterns.data || [])}
 recentContent=${JSON.stringify(recentContent.data || [])}
 recentDecisions=${JSON.stringify(recentDecisions.data || [])}`;
 
-    const completion = await client().chat.completions.create({
-      model: optionalEnv('OPENAI_MODEL', 'gpt-4.1-mini'),
-      temperature: 0.05,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: 'Choose content formats with strict reasoning. Return JSON only.' },
-        { role: 'user', content: prompt }
-      ]
-    });
+    const modelResponse = await callModel('format_decision', [
+      { role: 'system', content: 'Choose content formats with strict reasoning. Return JSON only.' },
+      { role: 'user', content: prompt }
+    ]);
 
-    const raw = JSON.parse(completion.choices[0]?.message?.content || '{}');
+    const raw = JSON.parse(modelResponse || '{}');
     const decisions = asArray(raw.decisions).slice(0, limit);
     const inserted: any[] = [];
 

@@ -59,7 +59,7 @@ export async function fetchTwitterApiJson(url: string) {
   return json;
 }
 
-function extractTweets(json: any) {
+export function extractTweets(json: any) {
   const candidates = [
     json?.tweets,
     json?.data?.tweets,

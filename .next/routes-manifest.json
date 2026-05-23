@@ -42,6 +42,12 @@
       "namedRegex": "^/_not\\-found(?:/)?$"
     },
     {
+      "page": "/api/account-performance-scan",
+      "regex": "^/api/account\\-performance\\-scan(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/account\\-performance\\-scan(?:/)?$"
+    },
+    {
       "page": "/api/check-account",
       "regex": "^/api/check\\-account(?:/)?$",
       "routeKeys": {},
@@ -52,6 +58,12 @@
       "regex": "^/api/daily\\-run(?:/)?$",
       "routeKeys": {},
       "namedRegex": "^/api/daily\\-run(?:/)?$"
+    },
+    {
+      "page": "/api/db-setup",
+      "regex": "^/api/db\\-setup(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/db\\-setup(?:/)?$"
     },
     {
       "page": "/api/debug-twitterapi",
@@ -70,6 +82,12 @@
       "regex": "^/api/format\\-decision(?:/)?$",
       "routeKeys": {},
       "namedRegex": "^/api/format\\-decision(?:/)?$"
+    },
+    {
+      "page": "/api/generate-media",
+      "regex": "^/api/generate\\-media(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/generate\\-media(?:/)?$"
     },
     {
       "page": "/api/github-create-repo",
@@ -132,10 +150,22 @@
       "namedRegex": "^/api/memory\\-maintenance\\-run(?:/)?$"
     },
     {
+      "page": "/api/model-router",
+      "regex": "^/api/model\\-router(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/model\\-router(?:/)?$"
+    },
+    {
       "page": "/api/production-cycle",
       "regex": "^/api/production\\-cycle(?:/)?$",
       "routeKeys": {},
       "namedRegex": "^/api/production\\-cycle(?:/)?$"
+    },
+    {
+      "page": "/api/publish-pack",
+      "regex": "^/api/publish\\-pack(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/publish\\-pack(?:/)?$"
     },
     {
       "page": "/api/repo-artifact-repair",
@@ -214,6 +244,12 @@
       "regex": "^/api/research\\-intel\\-v4(?:/)?$",
       "routeKeys": {},
       "namedRegex": "^/api/research\\-intel\\-v4(?:/)?$"
+    },
+    {
+      "page": "/api/shield-check",
+      "regex": "^/api/shield\\-check(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/shield\\-check(?:/)?$"
     },
     {
       "page": "/api/system-cleanup",

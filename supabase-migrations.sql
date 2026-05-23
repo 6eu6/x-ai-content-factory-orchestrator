@@ -100,3 +100,29 @@ CREATE POLICY "Service role full access" ON model_routing_rules FOR ALL USING (t
 CREATE POLICY "Service role full access" ON performance_scans FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Service role full access" ON content_deliveries FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Service role full access" ON working_memory FOR ALL USING (true) WITH CHECK (true);
+
+-- 7. Learning Tweet Queue (tweets manually added for learning via Telegram bot)
+CREATE TABLE IF NOT EXISTS learning_tweet_queue (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tweet_url TEXT NOT NULL,
+  source TEXT DEFAULT 'telegram',
+  status TEXT NOT NULL DEFAULT 'pending',
+  notes TEXT,
+  learning_cycle_id UUID,
+  fetched_data JSONB,
+  error TEXT,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Add missing columns if table already existed without them
+DO $$ BEGIN
+  ALTER TABLE learning_tweet_queue ADD COLUMN IF NOT EXISTS learning_cycle_id UUID;
+  ALTER TABLE learning_tweet_queue ADD COLUMN IF NOT EXISTS fetched_data JSONB;
+  ALTER TABLE learning_tweet_queue ADD COLUMN IF NOT EXISTS error TEXT;
+  ALTER TABLE learning_tweet_queue ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
+
+ALTER TABLE learning_tweet_queue ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Service role full access" ON learning_tweet_queue FOR ALL USING (true) WITH CHECK (true);

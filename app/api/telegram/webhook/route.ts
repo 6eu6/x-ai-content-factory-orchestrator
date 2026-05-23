@@ -29,7 +29,12 @@ export async function POST(req: Request) {
     if (state?.current_flow === 'awaiting_learning_account') {
       const handle = extractHandle(text);
       if (!handle) return reply(chatId, 'أرسل اليوزر فقط مثل: emollick أو @emollick');
-      await supabase.from('accounts').upsert({ handle, username: handle, tier: 2, active: true, notes: 'Added from Telegram learning flow.' }, { onConflict: 'handle' });
+      try {
+        await supabase.from('accounts').upsert({ handle, username: handle, tier: 2, active: true, notes: 'Added from Telegram learning flow.' }, { onConflict: 'handle' });
+      } catch {
+        // Fallback: try with minimal columns in case of schema mismatch
+        try { await supabase.from('accounts').upsert({ handle, username: handle }, { onConflict: 'handle' }); } catch {}
+      }
       await clearFlow(supabase, chatId);
       await reply(chatId, `تمت إضافة حساب التعلم: @${htmlEscape(handle)}\n\nشغّل الآن: 🚀 تشغيل فحص تعلم أو 🔍 دورة تعلم ذكية`);
       return Response.json({ ok: true });

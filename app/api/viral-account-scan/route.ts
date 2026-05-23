@@ -1,18 +1,15 @@
-import OpenAI from 'openai';
 import { createHash } from 'crypto';
-import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
+import { assertAuthorized, optionalEnv } from '../../../lib/env';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 import { getXUserAndTimeline, analyzeXTweet } from '../../../lib/x';
 import { learnFromCrawlerItems, toArray } from '../../../lib/learning-memory';
+import { callModel } from '../../../lib/model-router';
 
-const VERSION = 'viral-account-scan-v5-deep-memory';
+const VERSION = 'viral-account-scan-v6-deep-memory-model-router';
 
 type AnyRecord = Record<string, any>;
 
-function client() {
-  const baseURL = optionalEnv('OPENAI_BASE_URL');
-  return new OpenAI({ apiKey: requiredEnv('OPENAI_API_KEY'), baseURL: baseURL || undefined });
-}
+// Removed direct OpenAI client — uses callModel via model-router
 
 function cleanHandle(value: string) {
   return String(value || '').replace(/^@/, '').trim();
@@ -99,8 +96,8 @@ async function readCachedScan(supabase: any, handle: string, cacheHours: number)
   return { creator_handle: handle, reused_cached_result: true, run, tweet_analyses: tweets.data || [], patterns: patterns.data || [] };
 }
 
-async function persistAccountAnalysis(input: { supabase: any; handle: string; scanResult: AnyRecord; accountAnalysis: AnyRecord; budget: AnyRecord; model: string; dataQuality: string; }) {
-  const { supabase, handle, scanResult, accountAnalysis, budget, model, dataQuality } = input;
+async function persistAccountAnalysis(input: { supabase: any; handle: string; scanResult: AnyRecord; accountAnalysis: AnyRecord; budget: AnyRecord; dataQuality: string; }) {
+  const { supabase, handle, scanResult, accountAnalysis, budget, dataQuality } = input;
   const analyzedTweets = scanResult.top_tweets || [];
   const best = analyzedTweets[0] || null;
   const weakest = analyzedTweets[analyzedTweets.length - 1] || null;
@@ -116,7 +113,7 @@ async function persistAccountAnalysis(input: { supabase: any; handle: string; sc
     timing_summary: { timing_patterns: accountAnalysis.timing_patterns || [] },
     budget,
     raw_summary: { user: scanResult.user, winner_vs_loser: accountAnalysis.winner_vs_loser || {}, account_summary: accountAnalysis.account_summary || null, today_adaptation: accountAnalysis.today_adaptation || null },
-    model_used: model,
+    model_used: 'model-router:learning_extraction',
     reused_cached_result: false
   }).select('*').single();
   if (runError) throw runError;
@@ -233,7 +230,6 @@ async function run(req: Request) {
       return Response.json({ ok: true, version: VERSION, budget, handles, cachedResults, errors, scanResults: [], intel: null, sessionLog: log });
     }
 
-    const model = optionalEnv('OPENAI_MODEL', 'gpt-4.1-mini');
     const prompt = `Deeply analyze X post mechanics for @${optionalEnv('X_USERNAME', '30piq')}, an English AI x Productivity x Career Growth account.
 Use only the provided scanResults and errors. Do not invent evidence.
 For each account: compare best_tweet vs weakest_tweet; classify every post as research_summary, opinion, demo, controversy, question, prediction, framework, tool_take, or other; extract hook_formula, claim_type, tone, format_pattern, timing_pattern, audience_pain, why_replies, why_quotes, why_bookmarks, why_views, adaptation_for_30piq, originality_risk.
@@ -242,8 +238,11 @@ Each account_analyses item must include: creator_handle, account_summary, tweet_
 scanResults=${JSON.stringify(scanResults)}
 errors=${JSON.stringify(errors)}`;
 
-    const completion = await client().chat.completions.create({ model, temperature: 0.08, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: 'Return operational viral mechanics from supplied metrics only. No invented facts.' }, { role: 'user', content: prompt }] });
-    const intel = normalizeDeepIntel(JSON.parse(completion.choices[0]?.message?.content || '{}'));
+    const modelResponse = await callModel('learning_extraction', [
+      { role: 'system', content: 'Return operational viral mechanics from supplied metrics only. No invented facts.' },
+      { role: 'user', content: prompt }
+    ]);
+    const intel = normalizeDeepIntel(JSON.parse(modelResponse || '{}'));
 
     const accountAnalysisByHandle = new Map<string, AnyRecord>();
     for (const a of intel.account_analyses) {
@@ -254,7 +253,7 @@ errors=${JSON.stringify(errors)}`;
     const persisted: any[] = [];
     for (const scanResult of scanResults) {
       const handle = cleanHandle(scanResult.creator_handle || scanResult.user?.username).toLowerCase();
-      persisted.push(await persistAccountAnalysis({ supabase, handle, scanResult, accountAnalysis: accountAnalysisByHandle.get(handle) || {}, budget, model, dataQuality: intel.data_quality }));
+      persisted.push(await persistAccountAnalysis({ supabase, handle, scanResult, accountAnalysis: accountAnalysisByHandle.get(handle) || {}, budget, dataQuality: intel.data_quality }));
     }
 
     if (intel.cross_account_patterns.length) await supabase.from('creator_intel').insert(intel.cross_account_patterns.slice(0, 10).map((p: any) => ({ creator_handle: 'account_scan', post_url: null, topic: p.pattern_type || 'deep_viral_pattern', hook_pattern: p.rule || p.pattern || null, format_pattern: p.evidence || p.mechanism || null, why_it_worked: p.evidence || p.why || null, adaptation_idea: p.apply_to_30piq || p.adaptation_for_30piq || p.adaptation || null, status: intel.data_quality || 'new', notes: p.avoid_note || null })));

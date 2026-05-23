@@ -104,7 +104,7 @@
         "transform": "lodash/{{member}}"
       }
     },
-    "outputFileTracingRoot": "/home/z/my-project/repo",
+    "outputFileTracingRoot": "/home/z/my-project/x-ai-content-factory-orchestrator",
     "cacheComponents": false,
     "cacheLife": {
       "default": {
@@ -304,11 +304,11 @@
     "bundlePagesRouterDependencies": false,
     "configFileName": "next.config.mjs",
     "turbopack": {
-      "root": "/home/z/my-project/repo"
+      "root": "/home/z/my-project/x-ai-content-factory-orchestrator"
     },
     "distDirRoot": ".next"
   },
-  "appDir": "/home/z/my-project/repo",
+  "appDir": "/home/z/my-project/x-ai-content-factory-orchestrator",
   "relativeAppDir": "",
   "files": [
     ".next/routes-manifest.json",

@@ -1,15 +1,11 @@
-import OpenAI from 'openai';
-import { assertAuthorized, optionalEnv, requiredEnv } from '../../../lib/env';
+import { assertAuthorized, optionalEnv } from '../../../lib/env';
 import { supabaseAdmin, insertSessionLog } from '../../../lib/supabase';
 import { webSearch } from '../../../lib/web-search';
 import { evaluateContentQuality } from '../../../lib/quality';
+import { fetchTwitterApiJson, twitterApiBase, extractTweets, analyzeXTweet } from '../../../lib/x';
+import { callModel } from '../../../lib/model-router';
 
-const VERSION = 'learning-cycle-v1-research-viral-fusion';
-
-function client() {
-  const baseURL = optionalEnv('OPENAI_BASE_URL');
-  return new OpenAI({ apiKey: requiredEnv('OPENAI_API_KEY'), baseURL: baseURL || undefined });
-}
+const VERSION = 'learning-cycle-v2-research-viral-fusion-model-router';
 
 function asArray(value: any) {
   if (Array.isArray(value)) return value;
@@ -44,6 +40,102 @@ function normalizeQueries(value: any) {
 export async function GET(req: Request) { return run(req); }
 export async function POST(req: Request) { return run(req); }
 
+async function processLearningTweetQueue(supabase: any, cycleId: string) {
+  const { data: pendingItems, error: fetchError } = await supabase
+    .from('learning_tweet_queue')
+    .select('*')
+    .eq('status', 'pending');
+
+  if (fetchError || !pendingItems?.length) return { tweets: [], processed: 0, failed: 0 };
+
+  const tweets: any[] = [];
+  let processed = 0;
+  let failed = 0;
+
+  for (const item of pendingItems) {
+    try {
+      const urlMatch = String(item.tweet_url || '').match(/\/status\/(\d+)/);
+      if (!urlMatch) {
+        await supabase.from('learning_tweet_queue').update({
+          status: 'failed',
+          error: 'Invalid tweet URL: cannot extract tweet ID',
+          updated_at: new Date().toISOString()
+        }).eq('id', item.id);
+        failed++;
+        continue;
+      }
+
+      const tweetId = urlMatch[1];
+      const base = twitterApiBase();
+      const json = await fetchTwitterApiJson(`${base}/twitter/tweet/${tweetId}`);
+      const rawTweets = extractTweets(json);
+
+      if (!rawTweets.length) {
+        await supabase.from('learning_tweet_queue').update({
+          status: 'failed',
+          error: 'No tweet data returned from API',
+          updated_at: new Date().toISOString()
+        }).eq('id', item.id);
+        failed++;
+        continue;
+      }
+
+      const raw = rawTweets[0];
+      const username = raw?.author?.userName || raw?.author?.username
+        || String(item.tweet_url || '').match(/(?:x|twitter)\.com\/([^/]+)\/status/)?.[1]
+        || 'unknown';
+      const user = {
+        username,
+        followers_count: Number(raw?.author?.followers || 0),
+        public_metrics: { followers_count: Number(raw?.author?.followers || 0) }
+      };
+
+      const normalized = {
+        id: String(raw.id || raw.tweetId || raw.rest_id || tweetId),
+        text: raw.text || raw.full_text || raw.content || '',
+        created_at: raw.createdAt || raw.created_at || raw.created_at_iso,
+        public_metrics: {
+          like_count: Number(raw.likeCount || raw.likes || raw.favorite_count || 0),
+          reply_count: Number(raw.replyCount || raw.replies || raw.reply_count || 0),
+          retweet_count: Number(raw.retweetCount || raw.retweets || raw.retweet_count || 0),
+          quote_count: Number(raw.quoteCount || raw.quotes || raw.quote_count || 0),
+          bookmark_count: Number(raw.bookmarkCount || raw.bookmarks || 0),
+          view_count: Number(raw.viewCount || raw.views || 0)
+        },
+        entities: raw.entities || {},
+        is_reply: Boolean(raw.isReply || raw.in_reply_to_status_id),
+        author: raw.author || raw.user
+      };
+
+      const analysis = analyzeXTweet(normalized, user);
+
+      await supabase.from('learning_tweet_queue').update({
+        status: 'processed',
+        learning_cycle_id: cycleId,
+        fetched_data: analysis,
+        updated_at: new Date().toISOString()
+      }).eq('id', item.id);
+
+      tweets.push({
+        ...analysis,
+        source: 'manual_learning_queue',
+        queue_item_id: item.id,
+        tweet_url: item.tweet_url
+      });
+      processed++;
+    } catch (err: any) {
+      await supabase.from('learning_tweet_queue').update({
+        status: 'failed',
+        error: String(err.message || err).slice(0, 500),
+        updated_at: new Date().toISOString()
+      }).eq('id', item.id);
+      failed++;
+    }
+  }
+
+  return { tweets, processed, failed };
+}
+
 async function run(req: Request) {
   try {
     assertAuthorized(req);
@@ -60,6 +152,10 @@ async function run(req: Request) {
       inputs: { queries, limit, version: VERSION }
     }).select('*').single();
     if (cycleError) throw cycleError;
+
+    // ── Process pending learning tweet queue BEFORE web searches ──
+    const queueResult = await processLearningTweetQueue(supabase, cycle.id);
+    const manualLearningTweets = queueResult.tweets;
 
     const searchResults: any[] = [];
     for (const query of queries) {
@@ -92,6 +188,7 @@ Goal: fuse source-backed web research with X viral mechanics to create original 
 Rules:
 - Use only rawItems/searchResults as factual sources.
 - Use viralTweets/viralPatterns only for structure, hook mechanics, timing, reply/bookmark reasons.
+- manual_learning_tweets are user-curated tweets added via the learning queue — treat them as high-priority signals with validated content and engagement data.
 - Do not copy creator wording.
 - Every opportunity and draft with factual claims must include source_urls copied exactly from rawItems.
 - Prefer practical, original angles for AI x Productivity x Career Growth.
@@ -104,23 +201,19 @@ Return strict JSON:
   "hypotheses":[{"opportunity_topic":"...","format":"single_tweet|thread|article|github_asset|tool","hook_formula":"...","draft_text":"...","source_urls":["..."],"viral_mechanic":"...","why_original":"...","why_replyable":"...","why_bookmarkable":"..."}],
   "needs_more_research":["..."]
 }
+manual_learning_tweets=${JSON.stringify(manualLearningTweets)}
 searchResults=${JSON.stringify(searchResults)}
 rawItems=${JSON.stringify(rawItems.data)}
 viralTweets=${JSON.stringify(viralTweets.data)}
 viralPatterns=${JSON.stringify(viralPatterns.data)}
 recentContent=${JSON.stringify(recentContent.data)}`;
 
-    const completion = await client().chat.completions.create({
-      model: optionalEnv('OPENAI_MODEL', 'gpt-4.1-mini'),
-      temperature: 0.08,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: 'Produce source-backed learning outputs. Facts from web sources only; viral data is structure only.' },
-        { role: 'user', content: prompt }
-      ]
-    });
+    const modelResponse = await callModel('learning_extraction', [
+      { role: 'system', content: 'Produce source-backed learning outputs. Facts from web sources only; viral data is structure only.' },
+      { role: 'user', content: prompt }
+    ]);
 
-    const intel = JSON.parse(completion.choices[0]?.message?.content || '{}');
+    const intel = JSON.parse(modelResponse || '{}');
     const opportunities = asArray(intel.opportunities).slice(0, 12);
     const insertedOpps: any[] = [];
 
@@ -184,13 +277,13 @@ recentContent=${JSON.stringify(recentContent.data)}`;
     }).eq('id', cycle.id);
 
     const log = await insertSessionLog({
-      actions_completed: ['learning_cycle', VERSION, 'web_research_saved', 'viral_memory_fused', 'opportunities_created', 'hypotheses_created'],
-      decisions_made: [intel.learning_summary || {}, { opportunities: insertedOpps.length, hypotheses: insertedHyps.length }],
+      actions_completed: ['learning_cycle', VERSION, 'web_research_saved', 'viral_memory_fused', 'opportunities_created', 'hypotheses_created', queueResult.processed ? `learning_queue_processed:${queueResult.processed}` : 'learning_queue_empty', queueResult.failed ? `learning_queue_failed:${queueResult.failed}` : ''].filter(Boolean),
+      decisions_made: [intel.learning_summary || {}, { opportunities: insertedOpps.length, hypotheses: insertedHyps.length, queue_processed: queueResult.processed, queue_failed: queueResult.failed }],
       pending_tasks: asArray(intel.needs_more_research).slice(0, 10),
       next_recommendation: 'Review original_content_hypotheses with quality_status=ready, then run daily-run after source-backed opportunities exist.'
     });
 
-    return Response.json({ ok: true, version: VERSION, cycle_id: cycle.id, searchResults, intel, inserted: { opportunities: insertedOpps.length, hypotheses: insertedHyps.length, ready_hypotheses: insertedHyps.filter((h) => h.quality_status === 'ready').length }, sessionLog: log });
+    return Response.json({ ok: true, version: VERSION, cycle_id: cycle.id, searchResults, intel, learningQueue: { processed: queueResult.processed, failed: queueResult.failed }, inserted: { opportunities: insertedOpps.length, hypotheses: insertedHyps.length, ready_hypotheses: insertedHyps.filter((h) => h.quality_status === 'ready').length }, sessionLog: log });
   } catch (err: any) {
     return Response.json({ ok: false, version: VERSION, error: err.message }, { status: 500 });
   }
