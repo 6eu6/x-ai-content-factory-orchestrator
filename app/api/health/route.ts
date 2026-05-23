@@ -85,11 +85,43 @@ export async function GET() {
     columnTests.creator_intel_columns = { ok: false, detail: e.message };
   }
 
+  // Test content_opportunities v3 columns
+  try {
+    const { data, error } = await supabase.from('content_opportunities').select('id,selected_format,format_decision_reason,depth_score,freshness_score,visual_score,technical_score,uniqueness_score,updated_at').limit(1);
+    columnTests.content_opportunities_v3_columns = { ok: !error, detail: error?.message || `${data?.length ?? 0} rows with v3 columns` };
+  } catch (e: any) {
+    columnTests.content_opportunities_v3_columns = { ok: false, detail: e.message };
+  }
+
+  // Test content_log v3 columns
+  try {
+    const { data, error } = await supabase.from('content_log').select('id,source_urls,quality_reasons,content_opportunity_id').limit(1);
+    columnTests.content_log_v3_columns = { ok: !error, detail: error?.message || `${data?.length ?? 0} rows with v3 columns` };
+  } catch (e: any) {
+    columnTests.content_log_v3_columns = { ok: false, detail: e.message };
+  }
+
+  // Test content_format_decisions v3 columns
+  try {
+    const { data, error } = await supabase.from('content_format_decisions').select('id,learning_cycle_id,content_opportunity_id,selected_format,format_reason,depth_score,freshness_score,visual_score,technical_score,uniqueness_score,source_quality_score,viral_fit_score,low_follower_risk,expected_primary_signal,expected_secondary_signal,production_requirements,decision_payload,updated_at').limit(1);
+    columnTests.content_format_decisions_v3_columns = { ok: !error, detail: error?.message || `${data?.length ?? 0} rows with v3 columns` };
+  } catch (e: any) {
+    columnTests.content_format_decisions_v3_columns = { ok: false, detail: e.message };
+  }
+
+  // Test content_production_cards v3 columns
+  try {
+    const { data, error } = await supabase.from('content_production_cards').select('id,format_decision_id,content_opportunity_id,source_urls,viral_mechanic,original_angle,audience_pain,algorithm_basis,source_basis,format_basis,quality_basis,quality_reasons,publish_status,status').limit(1);
+    columnTests.content_production_cards_v3_columns = { ok: !error, detail: error?.message || `${data?.length ?? 0} rows with v3 columns` };
+  } catch (e: any) {
+    columnTests.content_production_cards_v3_columns = { ok: false, detail: e.message };
+  }
+
   const allColumnsOk = Object.values(columnTests).every(t => t.ok);
 
   return Response.json({
     ok: checks.supabase?.ok && allTablesExist && allColumnsOk,
-    version: 'v2-db-migration-fix',
+    version: 'v3-db-migration-fix',
     checks,
     tables: tableStatus,
     total_tables_checked: keyTables.length,

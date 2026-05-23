@@ -1,5 +1,5 @@
 -- ═══════════════════════════════════════════════════════════════
--- X AI Content Factory — Database Migration (Complete v2)
+-- X AI Content Factory — Database Migration (Complete v3)
 -- Run this in Supabase SQL Editor (Dashboard → SQL Editor → New Query)
 -- ═══════════════════════════════════════════════════════════════
 
@@ -171,7 +171,7 @@ ALTER TABLE telegram_bot_state ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Service role full access" ON telegram_bot_state FOR ALL USING (true) WITH CHECK (true);
 
 -- ═══════════════════════════════════════════════════════════════
--- 11. Content Opportunities
+-- 11. Content Opportunities (ENHANCED v3 — matches format-decision code)
 -- ═══════════════════════════════════════════════════════════════
 CREATE TABLE IF NOT EXISTS content_opportunities (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -187,8 +187,16 @@ CREATE TABLE IF NOT EXISTS content_opportunities (
   risk_notes TEXT,
   confidence_score NUMERIC(4,2) DEFAULT 5,
   priority_score NUMERIC(4,2) DEFAULT 5,
+  selected_format TEXT,
+  format_decision_reason TEXT,
+  depth_score NUMERIC(4,2),
+  freshness_score NUMERIC(4,2),
+  visual_score NUMERIC(4,2),
+  technical_score NUMERIC(4,2),
+  uniqueness_score NUMERIC(4,2),
   status TEXT NOT NULL DEFAULT 'candidate',
-  created_at TIMESTAMPTZ DEFAULT now()
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
 );
 
 ALTER TABLE content_opportunities ENABLE ROW LEVEL SECURITY;
@@ -240,7 +248,7 @@ ALTER TABLE raw_research_items ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Service role full access" ON raw_research_items FOR ALL USING (true) WITH CHECK (true);
 
 -- ═══════════════════════════════════════════════════════════════
--- 14. Content Log
+-- 14. Content Log (ENHANCED v3 — matches production-cycle code)
 -- ═══════════════════════════════════════════════════════════════
 CREATE TABLE IF NOT EXISTS content_log (
   id SERIAL PRIMARY KEY,
@@ -251,6 +259,9 @@ CREATE TABLE IF NOT EXISTS content_log (
   target_audience TEXT,
   originality_element TEXT,
   source_used TEXT,
+  source_urls JSONB DEFAULT '[]',
+  quality_reasons JSONB DEFAULT '[]',
+  content_opportunity_id UUID,
   publish_status TEXT NOT NULL DEFAULT 'draft',
   notes JSONB DEFAULT '{}',
   tweet_url TEXT,
@@ -553,25 +564,44 @@ ALTER TABLE system_learning_rules ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Service role full access" ON system_learning_rules FOR ALL USING (true) WITH CHECK (true);
 
 -- ═══════════════════════════════════════════════════════════════
--- 27. Content Format Decisions
+-- 27. Content Format Decisions (ENHANCED v3 — matches format-decision code)
 -- ═══════════════════════════════════════════════════════════════
 CREATE TABLE IF NOT EXISTS content_format_decisions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  learning_cycle_id UUID REFERENCES learning_cycles(id),
   opportunity_id UUID REFERENCES content_opportunities(id),
+  content_opportunity_id UUID REFERENCES content_opportunities(id),
   chosen_format TEXT NOT NULL,
+  selected_format TEXT,
+  format_reason TEXT,
   reasoning TEXT,
+  depth_score NUMERIC(4,2),
+  freshness_score NUMERIC(4,2),
+  visual_score NUMERIC(4,2),
+  technical_score NUMERIC(4,2),
+  uniqueness_score NUMERIC(4,2),
+  source_quality_score NUMERIC(4,2),
+  viral_fit_score NUMERIC(4,2),
+  low_follower_risk TEXT DEFAULT 'medium',
+  expected_primary_signal TEXT,
+  expected_secondary_signal TEXT,
+  production_requirements JSONB DEFAULT '{}',
+  decision_payload JSONB DEFAULT '{}',
   status TEXT NOT NULL DEFAULT 'pending',
-  created_at TIMESTAMPTZ DEFAULT now()
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
 );
 
 ALTER TABLE content_format_decisions ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Service role full access" ON content_format_decisions FOR ALL USING (true) WITH CHECK (true);
 
 -- ═══════════════════════════════════════════════════════════════
--- 28. Content Production Cards
+-- 28. Content Production Cards (ENHANCED v3 — matches production-cycle code)
 -- ═══════════════════════════════════════════════════════════════
 CREATE TABLE IF NOT EXISTS content_production_cards (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  format_decision_id UUID REFERENCES content_format_decisions(id),
+  content_opportunity_id UUID REFERENCES content_opportunities(id),
   production_type TEXT NOT NULL,
   final_text TEXT,
   thread_items JSONB DEFAULT '[]',
@@ -579,7 +609,18 @@ CREATE TABLE IF NOT EXISTS content_production_cards (
   repo_plan JSONB DEFAULT '{}',
   video_script JSONB DEFAULT '{}',
   carousel_plan JSONB DEFAULT '{}',
+  source_urls JSONB DEFAULT '[]',
+  viral_mechanic TEXT,
+  original_angle TEXT,
+  audience_pain TEXT,
+  algorithm_basis TEXT,
+  source_basis TEXT,
+  format_basis TEXT,
+  quality_basis TEXT,
   quality_status TEXT NOT NULL DEFAULT 'needs_review',
+  quality_reasons JSONB DEFAULT '[]',
+  publish_status TEXT DEFAULT 'needs_review',
+  status TEXT DEFAULT 'needs_review',
   notes JSONB DEFAULT '{}',
   created_at TIMESTAMPTZ DEFAULT now()
 );
@@ -788,5 +829,70 @@ END $$;
 -- accounts: ensure all columns exist
 DO $$ BEGIN
   ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_scanned_at TIMESTAMPTZ;
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
+
+-- ═══════════════════════════════════════════════════════════════
+-- MIGRATION v3: Add missing columns for production-cycle & format-decision
+-- ═══════════════════════════════════════════════════════════════
+
+-- content_opportunities: add columns used by format-decision code
+DO $$ BEGIN
+  ALTER TABLE content_opportunities ADD COLUMN IF NOT EXISTS selected_format TEXT;
+  ALTER TABLE content_opportunities ADD COLUMN IF NOT EXISTS format_decision_reason TEXT;
+  ALTER TABLE content_opportunities ADD COLUMN IF NOT EXISTS depth_score NUMERIC(4,2);
+  ALTER TABLE content_opportunities ADD COLUMN IF NOT EXISTS freshness_score NUMERIC(4,2);
+  ALTER TABLE content_opportunities ADD COLUMN IF NOT EXISTS visual_score NUMERIC(4,2);
+  ALTER TABLE content_opportunities ADD COLUMN IF NOT EXISTS technical_score NUMERIC(4,2);
+  ALTER TABLE content_opportunities ADD COLUMN IF NOT EXISTS uniqueness_score NUMERIC(4,2);
+  ALTER TABLE content_opportunities ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
+
+-- content_log: add columns used by production-cycle code
+DO $$ BEGIN
+  ALTER TABLE content_log ADD COLUMN IF NOT EXISTS source_urls JSONB DEFAULT '[]';
+  ALTER TABLE content_log ADD COLUMN IF NOT EXISTS quality_reasons JSONB DEFAULT '[]';
+  ALTER TABLE content_log ADD COLUMN IF NOT EXISTS content_opportunity_id UUID;
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
+
+-- content_format_decisions: add columns used by format-decision code
+DO $$ BEGIN
+  ALTER TABLE content_format_decisions ADD COLUMN IF NOT EXISTS learning_cycle_id UUID REFERENCES learning_cycles(id);
+  ALTER TABLE content_format_decisions ADD COLUMN IF NOT EXISTS content_opportunity_id UUID REFERENCES content_opportunities(id);
+  ALTER TABLE content_format_decisions ADD COLUMN IF NOT EXISTS selected_format TEXT;
+  ALTER TABLE content_format_decisions ADD COLUMN IF NOT EXISTS format_reason TEXT;
+  ALTER TABLE content_format_decisions ADD COLUMN IF NOT EXISTS depth_score NUMERIC(4,2);
+  ALTER TABLE content_format_decisions ADD COLUMN IF NOT EXISTS freshness_score NUMERIC(4,2);
+  ALTER TABLE content_format_decisions ADD COLUMN IF NOT EXISTS visual_score NUMERIC(4,2);
+  ALTER TABLE content_format_decisions ADD COLUMN IF NOT EXISTS technical_score NUMERIC(4,2);
+  ALTER TABLE content_format_decisions ADD COLUMN IF NOT EXISTS uniqueness_score NUMERIC(4,2);
+  ALTER TABLE content_format_decisions ADD COLUMN IF NOT EXISTS source_quality_score NUMERIC(4,2);
+  ALTER TABLE content_format_decisions ADD COLUMN IF NOT EXISTS viral_fit_score NUMERIC(4,2);
+  ALTER TABLE content_format_decisions ADD COLUMN IF NOT EXISTS low_follower_risk TEXT DEFAULT 'medium';
+  ALTER TABLE content_format_decisions ADD COLUMN IF NOT EXISTS expected_primary_signal TEXT;
+  ALTER TABLE content_format_decisions ADD COLUMN IF NOT EXISTS expected_secondary_signal TEXT;
+  ALTER TABLE content_format_decisions ADD COLUMN IF NOT EXISTS production_requirements JSONB DEFAULT '{}';
+  ALTER TABLE content_format_decisions ADD COLUMN IF NOT EXISTS decision_payload JSONB DEFAULT '{}';
+  ALTER TABLE content_format_decisions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
+
+-- content_production_cards: add columns used by production-cycle code
+DO $$ BEGIN
+  ALTER TABLE content_production_cards ADD COLUMN IF NOT EXISTS format_decision_id UUID REFERENCES content_format_decisions(id);
+  ALTER TABLE content_production_cards ADD COLUMN IF NOT EXISTS content_opportunity_id UUID REFERENCES content_opportunities(id);
+  ALTER TABLE content_production_cards ADD COLUMN IF NOT EXISTS source_urls JSONB DEFAULT '[]';
+  ALTER TABLE content_production_cards ADD COLUMN IF NOT EXISTS viral_mechanic TEXT;
+  ALTER TABLE content_production_cards ADD COLUMN IF NOT EXISTS original_angle TEXT;
+  ALTER TABLE content_production_cards ADD COLUMN IF NOT EXISTS audience_pain TEXT;
+  ALTER TABLE content_production_cards ADD COLUMN IF NOT EXISTS algorithm_basis TEXT;
+  ALTER TABLE content_production_cards ADD COLUMN IF NOT EXISTS source_basis TEXT;
+  ALTER TABLE content_production_cards ADD COLUMN IF NOT EXISTS format_basis TEXT;
+  ALTER TABLE content_production_cards ADD COLUMN IF NOT EXISTS quality_basis TEXT;
+  ALTER TABLE content_production_cards ADD COLUMN IF NOT EXISTS quality_reasons JSONB DEFAULT '[]';
+  ALTER TABLE content_production_cards ADD COLUMN IF NOT EXISTS publish_status TEXT DEFAULT 'needs_review';
+  ALTER TABLE content_production_cards ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'needs_review';
 EXCEPTION WHEN OTHERS THEN NULL;
 END $$;
