@@ -1,4 +1,3 @@
-import { assertAuthorized } from '../../../lib/env';
 import { supabaseAdmin } from '../../../lib/supabase';
 
 /**
@@ -62,16 +61,12 @@ export async function GET(req: Request) {
           if (msg.includes('could not find') || msg.includes('does not exist') || msg.includes('pgrst205') || msg.includes('relation')) {
             tableStatus[table] = { exists: false, error: error.message };
           } else {
-            // Table exists but there might be RLS or column issues
             tableStatus[table] = { exists: true, error: error.message, columns_ok: false };
           }
         } else {
-          // Try to get count
           let rowCount = 0;
           try {
-            const { count } = await supabase
-              .from(table)
-              .select('*', { count: 'exact', head: true });
+            const { count } = await supabase.from(table).select('*', { count: 'exact', head: true });
             rowCount = count || 0;
           } catch {}
           tableStatus[table] = { exists: true, row_count: rowCount, columns_ok: true };
@@ -85,37 +80,26 @@ export async function GET(req: Request) {
     const tablesWithErrors = allTables.filter(t => tableStatus[t]?.exists && !tableStatus[t]?.columns_ok);
     const needsMigration = missingTables.length > 0 || tablesWithErrors.length > 0;
 
-    // Count routing rules
     let routingRulesCount = 0;
     if (tableStatus['model_routing_rules']?.exists) {
       try {
-        const { count } = await supabase
-          .from('model_routing_rules')
-          .select('*', { count: 'exact', head: true })
-          .eq('active', true);
+        const { count } = await supabase.from('model_routing_rules').select('*', { count: 'exact', head: true }).eq('active', true);
         routingRulesCount = count || 0;
       } catch {}
     }
 
-    // Count accounts
     let accountsCount = 0;
     if (tableStatus['accounts']?.exists) {
       try {
-        const { count } = await supabase
-          .from('accounts')
-          .select('*', { count: 'exact', head: true });
+        const { count } = await supabase.from('accounts').select('*', { count: 'exact', head: true });
         accountsCount = count || 0;
       } catch {}
     }
 
-    // Count learning tweet queue
     let pendingTweets = 0;
     if (tableStatus['learning_tweet_queue']?.exists) {
       try {
-        const { count } = await supabase
-          .from('learning_tweet_queue')
-          .select('*', { count: 'exact', head: true })
-          .eq('status', 'pending');
+        const { count } = await supabase.from('learning_tweet_queue').select('*', { count: 'exact', head: true }).eq('status', 'pending');
         pendingTweets = count || 0;
       } catch {}
     }
@@ -140,4 +124,16 @@ export async function GET(req: Request) {
   } catch (err: any) {
     return Response.json({ ok: false, error: err.message }, { status: 500 });
   }
+}
+
+function assertAuthorized(req: Request): void {
+  const secret = process.env.ORCHESTRATOR_SECRET;
+  if (!secret) throw new Error('Missing ORCHESTRATOR_SECRET');
+  const url = new URL(req.url);
+  const token = req.headers.get('x-orchestrator-secret') || url.searchParams.get('secret') || '';
+  const isCron = url.searchParams.get('cron') === '1';
+  const vercelCronHeader = req.headers.get('x-vercel-cron');
+  if (token === secret) return;
+  if (isCron && vercelCronHeader) return;
+  throw new Error('Unauthorized');
 }
