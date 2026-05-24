@@ -72,6 +72,13 @@ export type DeepAnalysis = {
   timingInsight: string;
   tweetTypeInsight: string;
   engagementQuality: string;
+  // v3.2: حقول التحليل متعدد الزوايا
+  psychologicalTrigger: string;      // الآلية النفسية اللي فعّلت الانتشار
+  audienceProfile: string;            // من تفاعل وليش
+  conversationContext: string;        // سياق المحادثة/الردود
+  preciseConcept: string;             // المفهوم الدقيق القابل للنقل
+  conceptEvidence: string;            // الدليل الملموس من البيانات
+  confidenceLevel: 'high' | 'medium' | 'low'; // مستوى الثقة بناءً على كمية الأدلة
 };
 
 // ═══ الزحف والتحليل ═══
@@ -655,14 +662,50 @@ function deepScanForMedia(obj: any, addMedia: (type: 'photo' | 'video' | 'animat
   } catch {}
 }
 
-// ═══ التحليل العميق بالذكاء الاصطناعي ═══
+// ═══ جلب سياق المحادثة ═══
 
 /**
- * تحليل عميق حقيقي باستخدام AI — يحلل ليش التغريدة انتشرت فعلياً
+ * يجلب ردود وتفاعلات التغريدة من TwitterAPI.io
+ * هذا يعطي العقل فهم أعمق: شنو قال الناس، كيف تفاعلوا، أيش السبب الحقيقي
+ */
+async function fetchConversationContext(
+  tweetId: string,
+  username: string
+): Promise<{ replies: string[]; topReplierInsight: string }> {
+  try {
+    const url = new URL(`${twitterApiBase()}/twitter/tweet/replies`);
+    url.searchParams.set('tweetId', tweetId);
+    const json = await fetchTwitterApiJson(url.toString());
+    const replies = extractTweets(json).slice(0, 10);
+
+    if (!replies.length) return { replies: [], topReplierInsight: '' };
+
+    const replyTexts = replies
+      .map(r => r.text || '')
+      .filter(t => t.length > 5)
+      .slice(0, 8);
+
+    // خلاصة سريعة: شنو الأغلبية تقول
+    const themes = replyTexts.slice(0, 5).map(t => t.slice(0, 100)).join(' | ');
+    const topReplierInsight = `Top reply themes: ${themes}`;
+
+    return { replies: replyTexts, topReplierInsight };
+  } catch (e: any) {
+    console.log('[fetchConversationContext] Could not fetch replies:', e.message);
+    return { replies: [], topReplierInsight: '' };
+  }
+}
+
+// ═══ التحليل العميق متعدد الزوايا ═══
+
+/**
+ * تحليل عميق متعدد الزوايا — v3.2
  *
- * الفرق عن النسخة القديمة:
- * - القديمة: if/else hardcoded تعطي نصوص ثابتة
- * - الجديدة: AI يحلل النص + المقاييس + الوسائط + السياق ويعطي تحليل حقيقي مخصص
+ * الفرق عن v3.1:
+ * - v3.1: باص واحد، 7 حقول عامة، بدون سياق محادثة
+ * - v3.2: جلب سياق المحادثة + تحليل من 5 زوايا + استخراج مفهوم دقيق
+ *         + تقييم ثقة بناءً على كمية الأدلة
+ *         + كل النتائج بالإنجليزية (لغة المحتوى)
  */
 async function deepAnalyzeWithAI(
   tweetText: string,
@@ -674,7 +717,9 @@ async function deepAnalyzeWithAI(
   quotedTweetText: string = '',
   quotedTweetAuthor: string = '',
   createdAt: string | null = null,
-  timeLabel: string | null = null
+  timeLabel: string | null = null,
+  tweetId: string = '',
+  existingBrainRules: any[] = []
 ): Promise<DeepAnalysis> {
   const score = (metrics.like_count || 0) + (metrics.reply_count || 0) * 2 +
     (metrics.retweet_count || 0) * 3 + (metrics.quote_count || 0) * 4 +
@@ -690,8 +735,14 @@ async function deepAnalyzeWithAI(
     ? `Contains ${media.map(m => m.type).join(' + ')}`
     : 'Text only, no media';
 
+  // ═══ جلب سياق المحادثة (ردود الناس) ═══
+  let conversationData = { replies: [] as string[], topReplierInsight: '' };
+  if (tweetId && (metrics.reply_count || 0) > 5) {
+    conversationData = await fetchConversationContext(tweetId, username);
+  }
+
   const quoteContext = tweetType === 'quote' && quotedTweetText
-    ? `\nQuoted Tweet by @${quotedTweetAuthor}: "${quotedTweetText.slice(0, 200)}"\nThis is a QUOTE TWEET — the author is commenting on the above tweet. Analyze how the commentary adds value or creates contrast with the original.`
+    ? `\nQuoted Tweet by @${quotedTweetAuthor}: "${quotedTweetText.slice(0, 300)}"\nThis is a QUOTE TWEET — the author is commenting on the above tweet. Analyze how the commentary adds value or creates contrast with the original.`
     : '';
 
   const replyContext = tweetType === 'reply'
@@ -702,42 +753,83 @@ async function deepAnalyzeWithAI(
     ? `\nPosted at: ${timeLabel}. Consider if this timing aligns with peak engagement hours for the audience.`
     : '';
 
+  const repliesContext = conversationData.replies.length > 0
+    ? `\n\nSample of real replies people wrote:\n${conversationData.replies.slice(0, 5).map((r, i) => `  ${i + 1}. "${r.slice(0, 120)}"`).join('\n')}\n\nThese replies reveal WHY people engaged — study them for the actual trigger.`
+    : '';
+
+  // ═══ المفاهيم الموجودة في العقل — عشان ما يكررها ويضيف عليها ═══
+  const existingConceptsSummary = existingBrainRules.length > 0
+    ? `\n\nExisting concepts already in the brain (do NOT repeat these — find NEW insights):\n${existingBrainRules.slice(0, 8).map(r => `- [${r.rule_type}] ${String(r.rule).slice(0, 100)}`).join('\n')}`
+    : '';
+
   try {
     const aiResponse = await callModel('deep_analysis' as TaskType, [
       {
         role: 'system',
-        content: `You are an expert viral content analyst. You analyze X (Twitter) posts to understand exactly WHY they went viral — not surface-level observations, but deep understanding of psychology, context, and spread mechanics.
+        content: `You are an expert viral content analyst who thinks like a researcher, not a content marketer. You analyze X (Twitter) posts to understand exactly WHY they went viral — from multiple angles, with evidence-based reasoning.
 
-You analyze for a tech/growth account @30piq to learn from real patterns. Do NOT assume a specific niche — the account can cover diverse topics (tech, culture, ideas, commentary). Focus on extracting transferable mechanics.
+CRITICAL RULES:
+1. ALL output must be in ENGLISH (the account content is English, analysis must match)
+2. Do NOT assume any specific niche for @30piq — the account covers diverse topics and can tweet about anything
+3. Be specific and precise — NEVER use vague phrases like "engaging content", "high interaction", "resonated with audience". Name the exact psychological mechanism.
+4. Every claim must reference SPECIFIC data from the tweet — text, metrics, replies, or context. No speculation without evidence.
+5. Think in angles — analyze from multiple perspectives, then synthesize
 
-Rules:
-1. Be specific and precise — never use vague phrases like "engaging content" or "high interaction". Name the exact mechanism.
-2. Analyze the TEXT itself — what specifically made it spread? (humor, surprise, validation, controversy, identity signaling, novelty, emotional resonance...)
-3. Analyze the METRICS — engagement ratios reveal the TYPE of spread:
-   - High reply/like = sparked discussion/debate
-   - High retweet/like = shareable opinion or information
-   - High quote/like = strong reactions, people adding their own take
-   - High bookmark/like = reference-worthy, saved for later use
-4. Analyze MEDIA — is the image/video the primary driver? What specifically about it?
-5. Analyze TWEET TYPE — is it original, a quote tweet, a reply, a thread starter? How does the type contribute to virality?
-6. Analyze TIMING — does the posting time suggest strategic timing or alignment with trending topics?
-7. Give a specific style pattern — how was it written (structure, tone, technique), not just "short tweet"
-8. Give a transferable adaptation — how can this MECHANIC (not topic) be applied to any account
+ANALYSIS FRAMEWORK — Think through these 5 angles:
+
+ANGLE 1: TEXT MECHANICS
+- What specifically about the wording made it spread? Not "short tweet" but exact technique: "Opens with a contrarian claim that challenges conventional wisdom, then reveals the insight in a single line"
+- Is it a question, a statement, a revelation, a hot take, humor, vulnerability, a challenge?
+- What structural technique? (setup→punchline, before→after, claim→evidence, observation→implication)
+
+ANGLE 2: PSYCHOLOGICAL TRIGGER
+- What specific psychological mechanism activated? Choose one or more:
+  Identity signaling (people RT to signal who they are), Validation (people see their experience reflected),
+  Surprise/Novelty (unexpected insight), Status sharing (sharing makes you look smart/connected),
+  Controversy/Debate (forces people to take sides), Humor/Social currency (sharing makes others laugh),
+  FOMO (fear of missing out), Practical value (bookmark-worthy utility)
+- Why did THIS specific trigger work for THIS specific audience?
+
+ANGLE 3: ENGAGEMENT ARCHAEOLOGY
+- Reply/Like ratio → Did it spark discussion? What were people discussing (see actual replies)?
+- RT/Like ratio → Was it shareable as an opinion or information?
+- Quote/Like ratio → Did people add their own takes? What angle did they take?
+- Bookmark/Like ratio → Was it reference-worthy? Why save it?
+- Like/Follower ratio → Did it break out of the author's audience? To whom?
+
+ANGLE 4: CONTEXT & TYPE
+- Is it original, quote, reply, thread starter? How does the TYPE create the viral condition?
+- If quote tweet: what's the contrast/added value between original and commentary?
+- If reply: what value did it add to the original conversation?
+- Timing: does the posting time suggest alignment with a trend, event, or peak hours?
+- Language/cultural context: any slang, references, or cultural signals?
+
+ANGLE 5: TRANSFERABLE CONCEPT
+- Extract the ONE transferable mechanic — not the topic, but the PATTERN
+- This must be so specific that someone could apply it to any niche
+- Example BAD: "Share valuable insights" → Example GOOD: "Make a bold counter-intuitive claim about a common tool, then reveal the hidden cost nobody considers"
+- What evidence from THIS tweet supports this concept?
 
 Respond in JSON only, no additional text:
 {
-  "viralReason": "The exact reason it went viral — be very specific, connect content to context",
-  "stylePattern": "The writing style technique used — structure, narrative devices, tone",
-  "adaptation": "How to apply this viral MECHANIC (not the topic) to any account — focus on the transferable pattern",
-  "mediaImpact": "How media contributed to spread — why this specific image/video helped",
-  "timingInsight": "Analysis of posting timing — peak hours, day patterns, event alignment",
-  "tweetTypeInsight": "How the tweet type (original/quote/reply/thread) contributed to its spread",
-  "engagementQuality": "What the engagement ratios reveal about audience behavior and content reception"
+  "viralReason": "The exact reason it went viral — specific mechanism connected to specific evidence",
+  "stylePattern": "The writing technique — name the specific structural device, not just 'concise'",
+  "adaptation": "How to apply this MECHANIC (not topic) — must be actionable and niche-independent",
+  "mediaImpact": "How media contributed — specific reason, or 'Text-driven virality, media not primary driver'",
+  "timingInsight": "Timing analysis with evidence — or 'Timing not a significant factor' with reason",
+  "tweetTypeInsight": "How the tweet type contributed — specific mechanism, not just 'quote tweet'",
+  "engagementQuality": "What ratios reveal about audience behavior — specific, not generic",
+  "psychologicalTrigger": "The primary psychological mechanism — name it specifically with evidence",
+  "audienceProfile": "Who engaged and why — based on reply analysis and ratio evidence",
+  "conversationContext": "What the replies reveal about WHY people engaged — quote actual reply themes",
+  "preciseConcept": "The ONE transferable concept — so specific it could be a formula",
+  "conceptEvidence": "Specific data points from THIS tweet that prove the concept",
+  "confidenceLevel": "high (3+ strong evidence points), medium (1-2 evidence points), or low (mostly inference)"
 }`
       },
       {
         role: 'user',
-        content: `Analyze this tweet:
+        content: `Analyze this tweet from multiple angles:
 
 Text: "${tweetText}"
 
@@ -761,13 +853,16 @@ Ratios:
 - Quote/Like: ${quoteRatio}
 - Bookmark/Like: ${bookmarkRatio}
 
-Media: ${mediaDesc}
+Media: ${mediaDesc}${repliesContext}${existingConceptsSummary}
 
-Give a deep, precise analysis — not generic templates.`
+Give a deep, multi-angle analysis with evidence. Every claim must reference specific data above.`
       }
-    ], { temperature: 0.15, max_tokens: 3000, response_format: { type: 'json_object' } });
+    ], { temperature: 0.12, max_tokens: 4000, response_format: { type: 'json_object' } });
 
     const parsed = parseModelJson(aiResponse);
+    const confidence = parsed.confidenceLevel;
+    const validConfidence = ['high', 'medium', 'low'].includes(confidence) ? confidence : 'medium';
+
     return {
       viralReason: parsed.viralReason || 'Analysis unavailable',
       stylePattern: parsed.stylePattern || 'Pattern unidentified',
@@ -775,7 +870,13 @@ Give a deep, precise analysis — not generic templates.`
       mediaImpact: parsed.mediaImpact || mediaDesc,
       timingInsight: parsed.timingInsight || 'No timing data available',
       tweetTypeInsight: parsed.tweetTypeInsight || `${tweetType} tweet`,
-      engagementQuality: parsed.engagementQuality || 'Standard engagement pattern'
+      engagementQuality: parsed.engagementQuality || 'Standard engagement pattern',
+      psychologicalTrigger: parsed.psychologicalTrigger || 'Unidentified trigger',
+      audienceProfile: parsed.audienceProfile || 'General audience',
+      conversationContext: parsed.conversationContext || 'No reply data available',
+      preciseConcept: parsed.preciseConcept || 'No concept extracted',
+      conceptEvidence: parsed.conceptEvidence || 'No specific evidence cited',
+      confidenceLevel: validConfidence as 'high' | 'medium' | 'low'
     };
   } catch (e: any) {
     console.error('[deepAnalyzeWithAI] AI analysis failed, using fallback:', e.message);
@@ -796,8 +897,84 @@ Give a deep, precise analysis — not generic templates.`
       mediaImpact: mediaDesc,
       timingInsight: timeLabel ? `Posted at ${timeLabel}` : 'No timing data',
       tweetTypeInsight: `${tweetType} tweet`,
-      engagementQuality: `Reply/Like: ${replyRatio}, RT/Like: ${rtRatio}, Quote/Like: ${quoteRatio}, Bookmark/Like: ${bookmarkRatio}`
+      engagementQuality: `Reply/Like: ${replyRatio}, RT/Like: ${rtRatio}, Quote/Like: ${quoteRatio}, Bookmark/Like: ${bookmarkRatio}`,
+      psychologicalTrigger: 'Could not determine — AI analysis failed',
+      audienceProfile: 'Unknown — AI analysis failed',
+      conversationContext: conversationData.topReplierInsight || 'No conversation data',
+      preciseConcept: 'No concept extracted — AI analysis failed',
+      conceptEvidence: reasons.slice(0, 2).join('; '),
+      confidenceLevel: 'low'
     };
+  }
+}
+
+// ═══ نظام التعلم الحقيقي — دمج وتطوير المفاهيم ═══
+
+/**
+ * upsertBrainConcept — العقل يتعلم فعليًا
+ *
+ * الفرق عن insertIfMissing:
+ * - insertIfMissing: يتخطى لو المفهوم موجود → تخزين فقط
+ * - upsertBrainConcept: يدمج الأدلة + يزيد الثقة + يحدّث القاعدة → تعلم حقيقي
+ *
+ * آلية التعلم:
+ * 1. لو المفهوم جديد → يضيفه بالثقة الأولية
+ * 2. لو المفهوم موجود ومتطابق → يزيد الثقة + يضيف دليل جديد
+ * 3. لو المفهوم موجود لكن مختلف شوي → يوسّع القاعدة
+ */
+async function upsertBrainConcept(
+  supabase: any,
+  table: 'x_algorithm_learning_rules' | 'viral_style_patterns',
+  matchKey: Record<string, any>,
+  payload: Record<string, any>,
+  newEvidence: string
+): Promise<'inserted' | 'reinforced' | 'failed'> {
+  try {
+    // ابحث عن مفهوم مشابه
+    let query = supabase.from(table).select('*').limit(1);
+    for (const [key, val] of Object.entries(matchKey)) {
+      query = val == null ? query.is(key, null) : query.eq(key, val);
+    }
+    const existing = await query.maybeSingle();
+
+    if (!existing.data?.id) {
+      // مفهوم جديد — أضفه
+      const inserted = await supabase.from(table).insert(payload).select('id').single();
+      if (inserted.error) throw inserted.error;
+      console.log(`[brain-learn] NEW concept: ${String(matchKey[Object.keys(matchKey)[0]]).slice(0, 60)}`);
+      return 'inserted';
+    }
+
+    // ═══ مفهوم موجود — علّم عليه (دمج + تطوير) ═══
+    const existingData = existing.data;
+    const currentConfidence = Number(existingData.confidence_score) || 5;
+
+    // زِد الثقة (لكن مو أكثر من 10)
+    const newConfidence = Math.min(10, currentConfidence + 0.5);
+
+    // أضف الدليل الجديد للأدلة الموجودة
+    const existingEvidence = existingData.evidence || '';
+    const updatedEvidence = existingEvidence.length > 800
+      ? `${existingEvidence.slice(0, 400)} | +${newEvidence.slice(0, 300)}`
+      : `${existingEvidence} | +${newEvidence}`;
+
+    // حدّث الثقة والأدلة
+    const updateResult = await supabase
+      .from(table)
+      .update({
+        confidence_score: newConfidence,
+        evidence: updatedEvidence.slice(0, 1000),
+        updated_at: new Date().toISOString(),
+        test_run: false
+      })
+      .eq('id', existingData.id);
+
+    if (updateResult.error) throw updateResult.error;
+    console.log(`[brain-learn] REINFORCED concept (${currentConfidence.toFixed(1)}→${newConfidence.toFixed(1)}): ${String(matchKey[Object.keys(matchKey)[0]]).slice(0, 60)}`);
+    return 'reinforced';
+  } catch (e: any) {
+    console.error('[upsertBrainConcept] failed:', e.message);
+    return 'failed';
   }
 }
 
@@ -814,7 +991,7 @@ async function discoverOpportunities(
 
   const { data: algoRules } = await supabase
     .from('x_algorithm_learning_rules')
-    .select('rule_type, rule, applies_to')
+    .select('rule_type, rule, applies_to, evidence')
     .eq('status', 'active')
     .order('confidence_score', { ascending: false })
     .limit(10);
@@ -904,7 +1081,7 @@ async function craftEngagement(
   rulesUsed: string[]
 ): Promise<string | null> {
   try {
-    const rulesContext = algoRules.slice(0, 5).map(r => `- ${r.rule}`).join('\n');
+    const rulesContext = algoRules.slice(0, 5).map(r => `- ${r.rule} (evidence: ${(r.evidence || '').slice(0, 80)})`).join('\n');
     const patternsContext = stylePatterns.slice(0, 5).map(p => `- ${p.pattern_name}: ${p.pattern_description}`).join('\n');
 
     const response = await callModel('content_crafting' as TaskType, [
@@ -1111,7 +1288,18 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
     const score = scoreXTweet(normalized);
     const media = extractMediaFromTweet(normalized, json);
 
+    // خزّن التحليل
+    const supabase = supabaseAdmin();
+
     // ═══ Deep analysis with AI — English, no hardcoded niche, full metadata ═══
+    // جلب المفاهيم الموجودة في العقل عشان التحليل ما يكررها
+    const { data: existingRules } = await supabase
+      .from('x_algorithm_learning_rules')
+      .select('rule_type, rule, evidence')
+      .eq('status', 'active')
+      .order('confidence_score', { ascending: false })
+      .limit(15);
+
     const deepAnalysis = await deepAnalyzeWithAI(
       analysis.text,
       analysis.metrics,
@@ -1122,11 +1310,11 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
       quotedTweetText,
       quotedTweetAuthor,
       analysis.created_at,
-      analysis.time_label
+      analysis.time_label,
+      analysis.tweet_id,
+      existingRules || []
     );
 
-    // خزّن التحليل
-    const supabase = supabaseAdmin();
     try {
       await supabase.from('viral_tweet_analyses').upsert({
         tweet_id: analysis.tweet_id,
@@ -1145,118 +1333,128 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
       console.error('[scanSingleTweet] upsert error:', dbErr.message);
     }
 
-    // ═══ خزّن التحليل العميق في العقل ═══
+    // ═══ خزّن التحليل العميق في العقل — v3.2: تعلم حقيقي ═══
     try {
-      // 1. قاعدة خوارزمية: نمط الانتشار
+      const confidenceBase = deepAnalysis.confidenceLevel === 'high' ? 7 : deepAnalysis.confidenceLevel === 'medium' ? 5 : 3;
+      const scoreBoost = Math.min(3, Math.round(score / 100));
+      const baseConfidence = Math.min(10, confidenceBase + scoreBoost);
+
+      // 1. المفهوم الدقيق — أهم شيء يتعلمه العقل
+      if (deepAnalysis.preciseConcept && deepAnalysis.preciseConcept !== 'No concept extracted') {
+        await upsertBrainConcept(supabase, 'x_algorithm_learning_rules',
+          { rule_type: 'precise_concept', rule: deepAnalysis.preciseConcept },
+          {
+            rule_type: 'precise_concept',
+            rule: deepAnalysis.preciseConcept,
+            evidence: `@${username}: ${deepAnalysis.conceptEvidence} | ${deepAnalysis.viralReason.slice(0, 150)}`,
+            source_type: 'multi_angle_analysis',
+            source_url: tweetUrl,
+            applies_to: 'content_strategy,engagement_crafting,viral_mechanics',
+            confidence_score: baseConfidence,
+            status: 'active',
+            test_run: false,
+            updated_at: new Date().toISOString()
+          },
+          `@${username} (${score} engagement): ${deepAnalysis.conceptEvidence}`
+        );
+      }
+
+      // 2. الآلية النفسية — كيف فعّل الناس
+      if (deepAnalysis.psychologicalTrigger && deepAnalysis.psychologicalTrigger !== 'Unidentified trigger') {
+        await upsertBrainConcept(supabase, 'x_algorithm_learning_rules',
+          { rule_type: 'psychological_trigger', rule: deepAnalysis.psychologicalTrigger },
+          {
+            rule_type: 'psychological_trigger',
+            rule: deepAnalysis.psychologicalTrigger,
+            evidence: `@${username} (${score} eng): ${deepAnalysis.audienceProfile.slice(0, 200)}`,
+            source_type: 'multi_angle_analysis',
+            source_url: tweetUrl,
+            applies_to: 'content_psychology,engagement_prediction',
+            confidence_score: Math.max(3, baseConfidence - 1),
+            status: 'active',
+            test_run: false,
+            updated_at: new Date().toISOString()
+          },
+          `@${username} tweet: ${deepAnalysis.conversationContext.slice(0, 150)}`
+        );
+      }
+
+      // 3. نمط الانتشار
       if (deepAnalysis.viralReason) {
-        await insertIfMissing(supabase, 'x_algorithm_learning_rules',
+        await upsertBrainConcept(supabase, 'x_algorithm_learning_rules',
           { rule_type: 'viral_pattern', rule: deepAnalysis.viralReason },
           {
             rule_type: 'viral_pattern',
             rule: deepAnalysis.viralReason,
-            evidence: `Tweet @${username} (${score} engagement, ${analysis.engagement_per_1k_followers}/1K): "${analysis.text.slice(0, 100)}"`,
+            evidence: `@${username} (${score} eng, ${analysis.engagement_per_1k_followers}/1K): "${analysis.text.slice(0, 80)}"`,
             source_type: 'manual_tweet_analysis',
             source_url: tweetUrl,
             applies_to: 'content_scoring,engagement_prediction',
-            confidence_score: Math.min(10, Math.max(3, Math.round(score / 50))),
+            confidence_score: Math.max(3, baseConfidence - 1),
             status: 'active',
             test_run: false,
             updated_at: new Date().toISOString()
-          }
+          },
+          `@${username} (${score} eng): ${deepAnalysis.viralReason.slice(0, 100)}`
         );
       }
 
-      // 2. نمط أسلوب: كيف كُتبت التغريدة
+      // 4. نمط أسلوبي — كيف كُتبت
       if (deepAnalysis.stylePattern) {
-        await insertIfMissing(supabase, 'viral_style_patterns',
+        await upsertBrainConcept(supabase, 'viral_style_patterns',
           { pattern_name: deepAnalysis.stylePattern.slice(0, 100) },
           {
             pattern_name: deepAnalysis.stylePattern.slice(0, 100),
-            pattern_description: deepAnalysis.stylePattern,
+            pattern_description: `${deepAnalysis.stylePattern}. Trigger: ${deepAnalysis.psychologicalTrigger}`,
             adaptation_for_30piq: deepAnalysis.adaptation || '',
-            evidence: `@${username}: "${analysis.text.slice(0, 80)}" → ${score} engagement`,
-            source_type: 'manual_tweet_analysis',
-            confidence_score: Math.min(10, Math.max(3, Math.round(score / 30))),
+            evidence: `@${username}: "${analysis.text.slice(0, 60)}" → ${score} eng. ${deepAnalysis.conceptEvidence}`,
+            source_type: 'multi_angle_analysis',
+            confidence_score: baseConfidence,
             status: 'active',
             updated_at: new Date().toISOString()
-          }
+          },
+          `@${username} (${score} eng): ${deepAnalysis.stylePattern.slice(0, 80)}`
         );
       }
 
-      // 3. قاعدة وسائط: نوع الوسائط وتأثيرها
-      if (media.length > 0) {
-        const mediaRule = `Tweets with ${media.map(m => m.type).join('+')} media: ${deepAnalysis.mediaImpact}`;
-        await insertIfMissing(supabase, 'x_algorithm_learning_rules',
+      // 5. قاعدة وسائط
+      if (media.length > 0 && deepAnalysis.mediaImpact) {
+        const mediaRule = `${media.map(m => m.type).join('+')}: ${deepAnalysis.mediaImpact}`;
+        await upsertBrainConcept(supabase, 'x_algorithm_learning_rules',
           { rule_type: 'media_impact', rule: mediaRule },
           {
             rule_type: 'media_impact',
             rule: mediaRule,
-            evidence: `@${username} tweet with ${media.map(m => m.type).join(',')} got ${score} engagement. ${deepAnalysis.mediaImpact}`,
-            source_type: 'manual_tweet_analysis',
+            evidence: `@${username} with ${media.map(m => m.type).join(',')} → ${score} eng`,
+            source_type: 'multi_angle_analysis',
             source_url: tweetUrl,
             applies_to: 'media_strategy,content_scoring',
-            confidence_score: Math.min(10, Math.max(3, Math.round(score / 40))),
+            confidence_score: Math.max(3, baseConfidence - 1),
             status: 'active',
             test_run: false,
             updated_at: new Date().toISOString()
-          }
+          },
+          `@${username}: ${media.map(m => m.type).join('+')} → ${score} eng`
         );
       }
 
-      // 4. قاعدة انتشار: التحليل الشامل كقاعدة
-      if (deepAnalysis.adaptation) {
-        await insertIfMissing(supabase, 'x_algorithm_learning_rules',
-          { rule_type: 'spread_pattern', rule: deepAnalysis.adaptation },
+      // 6. سياق المحادثة (إن وُجد)
+      if (deepAnalysis.conversationContext && deepAnalysis.conversationContext !== 'No reply data available') {
+        await upsertBrainConcept(supabase, 'x_algorithm_learning_rules',
+          { rule_type: 'conversation_context', rule: deepAnalysis.conversationContext.slice(0, 200) },
           {
-            rule_type: 'spread_pattern',
-            rule: deepAnalysis.adaptation,
-            evidence: `Viral analysis of @${username}: ${deepAnalysis.viralReason}`,
-            source_type: 'manual_tweet_analysis',
+            rule_type: 'conversation_context',
+            rule: deepAnalysis.conversationContext.slice(0, 200),
+            evidence: `@${username} (${analysis.metrics.reply_count || 0} replies): ${deepAnalysis.audienceProfile.slice(0, 150)}`,
+            source_type: 'multi_angle_analysis',
             source_url: tweetUrl,
-            applies_to: 'content_strategy,engagement_crafting',
-            confidence_score: Math.min(10, Math.max(3, Math.round(score / 40))),
+            applies_to: 'reply_strategy,engagement_crafting',
+            confidence_score: Math.max(3, baseConfidence - 2),
             status: 'active',
             test_run: false,
             updated_at: new Date().toISOString()
-          }
-        );
-      }
-
-      // 5. Timing insight as a learning rule
-      if (deepAnalysis.timingInsight && deepAnalysis.timingInsight !== 'No timing data available') {
-        await insertIfMissing(supabase, 'x_algorithm_learning_rules',
-          { rule_type: 'timing_pattern', rule: deepAnalysis.timingInsight },
-          {
-            rule_type: 'timing_pattern',
-            rule: deepAnalysis.timingInsight,
-            evidence: `@${username} posted at ${analysis.time_label || 'unknown'} → ${score} engagement`,
-            source_type: 'manual_tweet_analysis',
-            source_url: tweetUrl,
-            applies_to: 'content_timing,scheduling',
-            confidence_score: Math.min(10, Math.max(3, Math.round(score / 60))),
-            status: 'active',
-            test_run: false,
-            updated_at: new Date().toISOString()
-          }
-        );
-      }
-
-      // 6. Tweet type insight
-      if (deepAnalysis.tweetTypeInsight && tweetType !== 'original') {
-        await insertIfMissing(supabase, 'x_algorithm_learning_rules',
-          { rule_type: 'tweet_type_pattern', rule: deepAnalysis.tweetTypeInsight },
-          {
-            rule_type: 'tweet_type_pattern',
-            rule: deepAnalysis.tweetTypeInsight,
-            evidence: `@${username} ${tweetType} tweet → ${score} engagement. ${deepAnalysis.engagementQuality}`,
-            source_type: 'manual_tweet_analysis',
-            source_url: tweetUrl,
-            applies_to: 'content_format,engagement_crafting',
-            confidence_score: Math.min(10, Math.max(3, Math.round(score / 50))),
-            status: 'active',
-            test_run: false,
-            updated_at: new Date().toISOString()
-          }
+          },
+          `@${username} replies: ${deepAnalysis.conversationContext.slice(0, 100)}`
         );
       }
     } catch (brainErr: any) {
