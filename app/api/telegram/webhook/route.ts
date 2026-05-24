@@ -83,9 +83,9 @@ async function handleMessage(chatId: string, userId: string, username: string, t
       const maxHandles = 10; // حد أقصى للحماية
 
       for (const handle of handles.slice(0, maxHandles)) {
-        // حفظ في قاعدة البيانات
+        // حفظ في قاعدة البيانات — بدون active (العمود غير موجود)
         try {
-          await supabase.from('accounts').upsert({ handle, tier: 2, active: true, notes: 'Added from Telegram' }, { onConflict: 'handle' });
+          await supabase.from('accounts').upsert({ handle, tier: 2, notes: 'Added from Telegram' }, { onConflict: 'handle' });
         } catch {
           try { await supabase.from('accounts').upsert({ handle }, { onConflict: 'handle' }); } catch {}
         }
@@ -113,6 +113,43 @@ async function handleMessage(chatId: string, userId: string, username: string, t
       if (skippedCount > 0) msg += `\n\n⚠️ تم تجاهل ${skippedCount} يوزر (الحد الأقصى ${maxHandles})`;
       msg += `\n\nشغّل 🧠 تشغيل كامل لبدء التحليل.`;
       await sendReply(chatId, msg);
+      return;
+    }
+
+    // ═══ قائمة الحسابات ═══
+    if (text === '📋 قائمة الحسابات') {
+      try {
+        const { data: accounts, error } = await supabase
+          .from('accounts')
+          .select('handle, tier, category, followers, notes, last_checked')
+          .order('tier', { ascending: true });
+
+        if (error || !accounts?.length) {
+          await sendReply(chatId, 'ℹ️ لا توجد حسابات مضافة حالياً.\nأضف حسابات عبر زر ➕ إضافة حساب.');
+          return;
+        }
+
+        const tierLabels: Record<number, string> = { 1: '⭐', 2: '✅', 3: '📌' };
+        const lines: string[] = [];
+        lines.push(`📋 <b>قائمة الحسابات (${accounts.length})</b>`);
+        lines.push('━━━━━━━━━━━━━━━━━━━━');
+
+        for (const a of accounts) {
+          const icon = tierLabels[a.tier] || '📌';
+          const followerInfo = a.followers ? ` | ${a.followers.toLocaleString()} متابع` : '';
+          const categoryInfo = a.category ? ` | ${a.category}` : '';
+          const lastCheck = a.last_checked ? ` | فحص: ${a.last_checked}` : '';
+          lines.push(`${icon} @${htmlEscape(a.handle)}${followerInfo}${categoryInfo}${lastCheck}`);
+        }
+
+        lines.push('━━━━━━━━━━━━━━━━━━━━');
+        lines.push(`⭐ = Tier 1 | ✅ = Tier 2 | 📌 = Tier 3`);
+        lines.push(`<i>شغّل 🧠 تشغيل كامل لزحف هذه الحسابات.</i>`);
+
+        await sendReply(chatId, lines.join('\n'));
+      } catch (e: any) {
+        await sendReply(chatId, `❌ فشل جلب الحسابات: ${htmlEscape(e.message || '')}`);
+      }
       return;
     }
 

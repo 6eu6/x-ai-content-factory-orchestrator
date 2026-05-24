@@ -4,7 +4,8 @@ export const MAIN_KEYBOARD = {
   keyboard: [
     [{ text: '🧠 تشغيل كامل' }, { text: '📊 تقرير الأداء' }],
     [{ text: '🧩 محتويات العقل' }, { text: '🔗 إضافة تغريدة' }],
-    [{ text: '➕ إضافة حساب' }, { text: '🔄 تصفير البيانات' }]
+    [{ text: '➕ إضافة حساب' }, { text: '📋 قائمة الحسابات' }],
+    [{ text: '🔄 تصفير البيانات' }]
   ],
   resize_keyboard: true,
   one_time_keyboard: false

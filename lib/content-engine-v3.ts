@@ -172,16 +172,16 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10): Pro
         allAnalyzed.push({
           tweet_id: t.tweet_id,
           tweet_url: t.tweet_url,
-          username: t.username,
-          text: t.text,
+          username: t.creator_handle,
+          text: t.tweet_text,
           score: t.engagement_score,
           engagement_per_1k_followers: t.engagement_per_1k_followers,
           metrics: t.metrics || {},
-          has_media: t.has_media,
+          has_media: (t.media_type || '').length > 0,
           media: tweetMedia,
-          has_question: (t.text || '').includes('?'),
+          has_question: (t.tweet_text || '').includes('?'),
           is_reply: t.tweet_type === 'reply',
-          handle: t.username
+          handle: t.creator_handle
         });
 
         allMedia.push(...tweetMedia);
@@ -220,10 +220,10 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10): Pro
           viralFound++;
           try {
             await supabase.from('viral_tweet_analyses').upsert({
-              tweet_id: analysis.tweet_id,
-              tweet_url: analysis.tweet_url,
-              username: handle,
-              text: analysis.text.slice(0, 500),
+              tweet_id: String(analysis.tweet_id || tweet.id || ''),
+              tweet_url: analysis.tweet_url || '',
+              creator_handle: handle,
+              tweet_text: (analysis.text || '').slice(0, 500),
               engagement_score: score,
               engagement_per_1k_followers: analysis.engagement_per_1k_followers,
               tweet_type: media.length > 0 ? 'media' : (analysis.is_reply ? 'reply' : 'original'),
@@ -246,10 +246,10 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10): Pro
         // خزّن كمان تغريدات بدون فيروسية عشان تحليل الأنماط
         try {
           await supabase.from('viral_tweet_analyses').upsert({
-            tweet_id: analysis.tweet_id,
-            tweet_url: analysis.tweet_url,
-            username: handle,
-            text: analysis.text.slice(0, 500),
+            tweet_id: String(analysis.tweet_id || tweet.id || ''),
+            tweet_url: analysis.tweet_url || '',
+            creator_handle: handle,
+            tweet_text: (analysis.text || '').slice(0, 500),
             engagement_score: score,
             engagement_per_1k_followers: analysis.engagement_per_1k_followers,
             tweet_type: media.length > 0 ? 'media' : (analysis.is_reply ? 'reply' : 'original'),
@@ -260,12 +260,13 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10): Pro
         }
       }
 
-      // حدّث حالة الحساب — فقط notes و last_scanned_at (أعمدة مضمونة)
+      // حدّث حالة الحساب — فقط الأعمدة الموجودة فعلاً
       try {
         const snapshot = await getXUserByUsername(handle);
         await supabase.from('accounts').update({
           notes: `Followers: ${snapshot.followers_count}, Scanned: ${new Date().toISOString()}`,
-          last_scanned_at: new Date().toISOString()
+          followers: snapshot.followers_count,
+          last_checked: new Date().toISOString().split('T')[0]
         }).eq('handle', handle);
       } catch (updErr: any) {
         debugLog.push(`[scan] update account error: ${updErr.message}`);
