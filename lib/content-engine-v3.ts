@@ -274,15 +274,54 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10): Pro
     }
   }
 
-  // 3. علّم العقل من البيانات المزحوفة
+  // 3. علّم العقل من البيانات المزحوفة — باستخدام التحليل العميق المخزّن
   let brainUpdates = { algorithmRules: 0, stylePatterns: 0, mcpOpportunities: 0 };
   try {
-    const crawlerItems = allAnalyzed.map(a => ({
-      title: a.text?.slice(0, 200) || 'X tweet analysis',
-      url: a.tweet_url,
-      summary: `Engagement: ${a.score}, Per1K: ${a.engagement_per_1k_followers}, Type: ${a.media?.length > 0 ? 'media' : 'text'}, Media: ${a.media?.map((m: MediaFromTweet) => m.type).join(',') || 'none'}, Has question: ${a.has_question}`,
-      confidence_score: Math.min(10, Math.max(1, Math.round(a.score / 10))),
-    }));
+    // جلب قواعد الانتشار المخزّنة من التحليلات السابقة (من التغريدات اللي أُضيفت يدوياً)
+    const { data: existingViralRules } = await supabase
+      .from('x_algorithm_learning_rules')
+      .select('rule_type, rule, evidence')
+      .in('rule_type', ['viral_pattern', 'spread_pattern', 'media_impact'])
+      .eq('status', 'active')
+      .order('confidence_score', { ascending: false })
+      .limit(30);
+
+    // جلب أنماط الأسلوب المخزّنة
+    const { data: existingStylePatterns } = await supabase
+      .from('viral_style_patterns')
+      .select('pattern_name, pattern_description, adaptation_for_30piq')
+      .eq('status', 'active')
+      .order('confidence_score', { ascending: false })
+      .limit(30);
+
+    // بناء عناصر تعليمية غنية — تشمل التحليل العميق + المقاييس
+    const crawlerItems = allAnalyzed.map(a => {
+      // ابحث عن قاعدة الانتشار المرتبطة بهذي التغريدة
+      const relatedRule = (existingViralRules || []).find((r: any) =>
+        r.evidence?.includes(a.username) || r.evidence?.includes(a.tweet_id)
+      );
+      const relatedStyle = (existingStylePatterns || []).find((p: any) =>
+        p.pattern_name?.includes(a.username) || p.evidence?.includes(a.username)
+      );
+
+      // بناء ملخص غني يشمل التحليل العميق
+      const mediaDesc = a.media?.length > 0
+        ? `يحتوي ${a.media.map((m: MediaFromTweet) => m.type === 'photo' ? 'صورة' : m.type === 'video' ? 'فيديو' : 'GIF').join('+')}`
+        : 'نص فقط';
+      const deepInsight = relatedRule?.rule || '';
+      const styleInsight = relatedStyle?.pattern_description || '';
+
+      let summary = `تفاعل: ${a.score}، لكل 1K متابع: ${a.engagement_per_1k_followers}، ${mediaDesc}`;
+      if (deepInsight) summary += ` | سبب الانتشار: ${deepInsight.slice(0, 150)}`;
+      if (styleInsight) summary += ` | الأسلوب: ${styleInsight.slice(0, 100)}`;
+
+      return {
+        title: a.text?.slice(0, 200) || 'تحليل تغريدة',
+        url: a.tweet_url,
+        summary,
+        confidence_score: Math.min(10, Math.max(1, Math.round(a.score / 10))),
+      };
+    });
 
     if (crawlerItems.length > 0) {
       const learned = await learnFromCrawlerItems(supabase, {
@@ -300,6 +339,100 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10): Pro
   } catch (e: any) {
     debugLog.push(`[brain] learning failed: ${e.message}`);
     console.error('Brain learning failed:', e.message);
+  }
+
+  // 3.5. تعليم مفاهيمي: اجمع أنماط مشتركة بين التغريدات واكتشف مفاهيم عامة
+  try {
+    if (allAnalyzed.length >= 2) {
+      // اجمع كل نصوص التغريدات والتحليلات مع بعض عشان AI يكتشف مفاهيم مشتركة
+      const tweetsForConcept = allAnalyzed
+        .filter(a => (a.score || 0) > 20)
+        .slice(0, 15)
+        .map(a => ({
+          text: a.text?.slice(0, 150),
+          score: a.score,
+          handle: a.handle || a.username,
+          media: a.media?.map((m: MediaFromTweet) => m.type).join(',') || 'none',
+          per1k: a.engagement_per_1k_followers
+        }));
+
+      if (tweetsForConcept.length >= 2) {
+        const conceptResponse = await callModel('learning_extraction' as TaskType, [
+          {
+            role: 'system',
+            content: `أنت محلل أنماط فيروسية خبير. تُعطى مجموعة تغريدات ناجحة وتكتشف المفاهيم المشتركة بينها.
+
+المطلوب: اكتشف 1-3 مفاهيم/أنماط عامة مشتركة بين هذي التغريدات. كل مفهوم لازم يكون:
+1. محدد وقابل للتطبيق (مو عام مثل "محتوى جيد")
+2. يربط بين عدة تغريدات
+3. يعطي توصية عملية لحساب @30piq (AI × الإنتاجية × النمو المهني)
+
+أجب بصيغة JSON فقط:
+{
+  "concepts": [
+    {
+      "name": "اسم المفهوم",
+      "description": "شرح المفهوم وعلاقته بالتغريدات",
+      "adaptation": "كيف يطبق @30piq هذا المفهوم"
+    }
+  ]
+}`
+          },
+          {
+            role: 'user',
+            content: `حلّل هذي التغريدات واكتشف المفاهيم المشتركة:
+
+${tweetsForConcept.map((t, i) => `${i + 1}. @${t.handle} (تفاعل: ${t.score}, وسائط: ${t.media}): "${t.text}"`).join('\n\n')}`
+          }
+        ], { temperature: 0.15, max_tokens: 2000, response_format: { type: 'json_object' } });
+
+        const parsed = parseModelJson(conceptResponse);
+        const concepts = parsed.concepts || [];
+
+        for (const concept of concepts.slice(0, 3)) {
+          if (concept.name && concept.description) {
+            await insertIfMissing(supabase, 'x_algorithm_learning_rules',
+              { rule_type: 'viral_concept', rule: `${concept.name}: ${concept.description}` },
+              {
+                rule_type: 'viral_concept',
+                rule: `${concept.name}: ${concept.description}`,
+                evidence: `مفهوم مشترك مستخرج من ${tweetsForConcept.length} تغريدات فيروسية`,
+                source_type: 'batch_concept_extraction',
+                source_url: '',
+                applies_to: 'content_strategy,engagement_crafting',
+                confidence_score: Math.min(10, 5 + Math.floor(tweetsForConcept.length / 3)),
+                status: 'active',
+                test_run: false,
+                updated_at: new Date().toISOString()
+              }
+            );
+            brainUpdates.algorithmRules++;
+
+            // خزّن كمان كنمط أسلوبي
+            if (concept.adaptation) {
+              await insertIfMissing(supabase, 'viral_style_patterns',
+                { pattern_name: concept.name.slice(0, 100) },
+                {
+                  pattern_name: concept.name.slice(0, 100),
+                  pattern_description: concept.description,
+                  adaptation_for_30piq: concept.adaptation,
+                  evidence: `مفهوم مشترك من ${tweetsForConcept.length} تغريدات فيروسية`,
+                  source_type: 'batch_concept_extraction',
+                  confidence_score: Math.min(10, 5 + Math.floor(tweetsForConcept.length / 3)),
+                  status: 'active',
+                  updated_at: new Date().toISOString()
+                }
+              );
+              brainUpdates.stylePatterns++;
+            }
+          }
+        }
+        debugLog.push(`[brain-concepts] extracted ${concepts.length} concepts from ${tweetsForConcept.length} tweets`);
+      }
+    }
+  } catch (e: any) {
+    debugLog.push(`[brain-concepts] concept extraction failed: ${e.message}`);
+    console.error('Concept extraction failed:', e.message);
   }
 
   // 3.5. علّم العقل أنماط الوسائط
