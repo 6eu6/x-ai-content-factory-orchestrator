@@ -16,6 +16,7 @@ import { supabaseAdmin } from './supabase';
 
 export type TaskType =
   | 'content_generation'      // توليد محتوى يومي (tweets, replies, quotes)
+  | 'content_crafting'        // تصنيع محتوى مخصص (quotes, replies, threads)
   | 'deep_analysis'           // تحليل عميق (repo analysis, algorithm extraction)
   | 'research_synthesis'      // تركيب بحثي (research-intel, trend analysis)
   | 'quality_evaluation'      // تقييم جودة (quality gate, slop detection)
@@ -38,90 +39,100 @@ export type ModelConfig = {
   description?: string;
 };
 
+/**
+ * النماذج المتاحة على OpenRouter (محظور openai/* و anthropic/* في منطقتنا)
+ * llama-4-maverick: أقوى نموذج مفتوح (400B MoE) — للتحليل العميق والتعلم
+ * deepseek-chat-v3: توازن جيد بين القوة والسرعة — لتوليد المحتوى
+ * mistral-small-3.1: سريع ورخيص — للمهام البسيطة
+ */
 const DEFAULT_ROUTING: Record<TaskType, ModelConfig> = {
   content_generation: {
-    model: 'openai/gpt-4.1-mini',
+    model: 'deepseek/deepseek-chat-v3-0324',
     temperature: 0.18,
     max_tokens: 2000,
-    response_format: { type: 'json_object' },
     description: 'توليد محتوى يومي — يحتاج دقة واتباع قواعد صارمة'
   },
+  content_crafting: {
+    model: 'deepseek/deepseek-chat-v3-0324',
+    temperature: 0.2,
+    max_tokens: 2500,
+    description: 'تصنيع محتوى مخصص — اقتباسات، ردود، ثريدات'
+  },
   deep_analysis: {
-    model: 'anthropic/claude-sonnet-4',
+    model: 'meta-llama/llama-4-maverick',
     temperature: 0.12,
     max_tokens: 4000,
     response_format: { type: 'json_object' },
     description: 'تحليل عميق — يحتاج نموذج قوي يفهم التعقيدات'
   },
   research_synthesis: {
-    model: 'openai/gpt-4.1-mini',
+    model: 'deepseek/deepseek-chat-v3-0324',
     temperature: 0.2,
     max_tokens: 3000,
     response_format: { type: 'json_object' },
     description: 'تركيب بحثي — يجمع معلومات من مصادر متعددة'
   },
   quality_evaluation: {
-    model: 'openai/gpt-4.1-mini',
+    model: 'mistralai/mistral-small-3.1-24b-instruct',
     temperature: 0.05,
     max_tokens: 1000,
     response_format: { type: 'json_object' },
     description: 'تقييم جودة — يحتاج دقة عالية بدون إبداع'
   },
   media_description: {
-    model: 'openai/gpt-4o',
+    model: 'deepseek/deepseek-chat-v3-0324',
     temperature: 0.4,
     max_tokens: 1500,
     description: 'وصف وسائط — يحتاج إبداع بصري + دقة تقنية'
   },
   learning_extraction: {
-    model: 'anthropic/claude-sonnet-4',
+    model: 'meta-llama/llama-4-maverick',
     temperature: 0.15,
     max_tokens: 3000,
     response_format: { type: 'json_object' },
     description: 'استخراج تعليمي — يحتاج فهم عميق + استنتاج'
   },
   format_decision: {
-    model: 'openai/gpt-4.1-mini',
+    model: 'mistralai/mistral-small-3.1-24b-instruct',
     temperature: 0.1,
     max_tokens: 800,
     response_format: { type: 'json_object' },
     description: 'قرار صيغة — يحتاج منطق + تقييم أبعاد'
   },
   article_writing: {
-    model: 'anthropic/claude-sonnet-4',
+    model: 'meta-llama/llama-4-maverick',
     temperature: 0.25,
     max_tokens: 6000,
     description: 'كتابة مقالات — محتوى طويل يحتاج عمق + تنوع'
   },
   thread_writing: {
-    model: 'openai/gpt-4.1-mini',
+    model: 'deepseek/deepseek-chat-v3-0324',
     temperature: 0.2,
     max_tokens: 4000,
-    response_format: { type: 'json_object' },
     description: 'كتابة ثريد — يحتاج تنوع + ارتباط منطقي'
   },
   performance_analysis: {
-    model: 'anthropic/claude-sonnet-4',
+    model: 'meta-llama/llama-4-maverick',
     temperature: 0.1,
     max_tokens: 2000,
     response_format: { type: 'json_object' },
     description: 'تحليل أداء — يحتاج استنتاج من بيانات + تعلم'
   },
   shield_check: {
-    model: 'openai/gpt-4.1-mini',
+    model: 'mistralai/mistral-small-3.1-24b-instruct',
     temperature: 0.0,
     max_tokens: 800,
     response_format: { type: 'json_object' },
     description: 'فحص حماية — يحتاج دقة صارمة بدون إبداع'
   },
   repo_artifact: {
-    model: 'anthropic/claude-sonnet-4',
+    model: 'meta-llama/llama-4-maverick',
     temperature: 0.15,
     max_tokens: 4000,
     description: 'كتابة ملفات مستودع — يحتاج دقة تقنية + أسلوب بشري'
   },
   casual_generation: {
-    model: 'openai/gpt-4.1-mini',
+    model: 'mistralai/mistral-small-3.1-24b-instruct',
     temperature: 0.35,
     max_tokens: 500,
     description: 'توليد سريع — ردود قصيرة + آراء سريعة'
