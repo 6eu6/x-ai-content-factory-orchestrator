@@ -250,8 +250,10 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10): Pro
  * يستخرج الوسائط من تغريدة X (صور، فيديو، GIF)
  * يدعم صيغ TwitterAPI.io المختلفة:
  * - raw.media (مصفوفة مباشرة)
+ * - raw.photos / raw.videos (صيغة TwitterAPI.io)
  * - raw.entities.media (صيغة Twitter القياسية)
  * - raw.extended_entities.media
+ * - raw.mediaDetails (صيغة TwitterAPI.io أحياناً)
  */
 function extractMediaFromTweet(tweet: any): MediaFromTweet[] {
   const media: MediaFromTweet[] = [];
@@ -260,29 +262,46 @@ function extractMediaFromTweet(tweet: any): MediaFromTweet[] {
   // نجمع الوسائط من كل المصادر المحتملة
   const sources: any[] = [];
 
-  // 1. raw.media (TwitterAPI.io غالباً يرجع هنا)
+  // 1. raw.media (مصفوفة مباشرة — TwitterAPI.io غالباً يرجع هنا)
   if (Array.isArray(raw.media)) sources.push(...raw.media);
 
-  // 2. raw.entities.media
+  // 2. raw.mediaDetails (صيغة أخرى من TwitterAPI.io)
+  if (Array.isArray(raw.mediaDetails)) sources.push(...raw.mediaDetails);
+
+  // 3. raw.entities.media
   if (Array.isArray(raw.entities?.media)) sources.push(...raw.entities.media);
 
-  // 3. raw.extended_entities.media
+  // 4. raw.extended_entities.media
   if (Array.isArray(raw.extended_entities?.media)) sources.push(...raw.extended_entities.media);
 
-  // 4. raw.photos (بعض صيغ TwitterAPI.io)
+  // 5. raw.photos (صيغة TwitterAPI.io — مصفوفة روابط أو كائنات)
   if (Array.isArray(raw.photos)) {
     for (const p of raw.photos) {
       media.push({
         type: 'photo',
-        url: typeof p === 'string' ? p : (p.media_url_https || p.url || p.media_url || ''),
+        url: typeof p === 'string' ? p : (p.media_url_https || p.url || p.media_url || p.imageUrl || ''),
         alt_text: typeof p === 'object' ? (p.alt_text || '') : ''
       });
     }
   }
 
-  // 5. raw.video (بعض صيغ TwitterAPI.io)
-  if (raw.video) {
-    const vidUrl = raw.video.video_url || raw.video.url || '';
+  // 6. raw.videos (صيغة TwitterAPI.io)
+  if (Array.isArray(raw.videos)) {
+    for (const v of raw.videos) {
+      const vidUrl = typeof v === 'string' ? v : (v.video_url || v.url || v.preview_url || '');
+      if (vidUrl) {
+        media.push({
+          type: v.type === 'animated_gif' ? 'animated_gif' : 'video',
+          url: vidUrl,
+          alt_text: typeof v === 'object' ? (v.alt_text || '') : ''
+        });
+      }
+    }
+  }
+
+  // 7. raw.video (كائن واحد)
+  if (raw.video && typeof raw.video === 'object' && !Array.isArray(raw.video)) {
+    const vidUrl = raw.video.video_url || raw.video.url || raw.video.preview_url || '';
     if (vidUrl) {
       media.push({
         type: raw.video.type === 'animated_gif' ? 'animated_gif' : 'video',
@@ -292,33 +311,44 @@ function extractMediaFromTweet(tweet: any): MediaFromTweet[] {
     }
   }
 
-  // معالجة المصادر الموحدة
+  // 8. raw.imageUrl / raw.image (صيغة مبسطة)
+  if (raw.imageUrl) media.push({ type: 'photo', url: raw.imageUrl, alt_text: '' });
+  if (raw.image && typeof raw.image === 'string') media.push({ type: 'photo', url: raw.image, alt_text: '' });
+
+  // معالجة المصادر الموحدة (من sources array)
   for (const m of sources) {
     if (!m || typeof m !== 'object') continue;
 
-    if (m.type === 'photo' || m.media_url_https || m.media_url) {
+    // صور
+    if (m.type === 'photo' || m.media_url_https || m.media_url || m.display_url) {
       media.push({
         type: 'photo',
-        url: m.media_url_https || m.media_url || m.url || '',
+        url: m.media_url_https || m.media_url || m.url || m.display_url || m.imageUrl || '',
         alt_text: m.alt_text || m.ext_alt_text || ''
       });
-    } else if (m.type === 'video') {
+    }
+    // فيديو
+    else if (m.type === 'video') {
       const variant = m.video_info?.variants?.find((v: any) => v.content_type === 'video/mp4')
         || m.video_info?.variants?.[0];
-      if (variant?.url) {
+      const vidUrl = variant?.url || m.video_url || m.url || '';
+      if (vidUrl) {
         media.push({
           type: 'video',
-          url: variant.url,
+          url: vidUrl,
           alt_text: m.alt_text || m.ext_alt_text || ''
         });
       }
-    } else if (m.type === 'animated_gif') {
+    }
+    // GIF متحرك
+    else if (m.type === 'animated_gif') {
       const variant = m.video_info?.variants?.find((v: any) => v.content_type === 'video/mp4')
         || m.video_info?.variants?.[0];
-      if (variant?.url) {
+      const gifUrl = variant?.url || m.video_url || m.url || '';
+      if (gifUrl) {
         media.push({
           type: 'animated_gif',
-          url: variant.url,
+          url: gifUrl,
           alt_text: m.alt_text || m.ext_alt_text || ''
         });
       }
@@ -327,11 +357,18 @@ function extractMediaFromTweet(tweet: any): MediaFromTweet[] {
 
   // إزالة التكرارات بناءً على URL
   const seen = new Set<string>();
-  return media.filter(m => {
+  const unique = media.filter(m => {
     if (!m.url || seen.has(m.url)) return false;
     seen.add(m.url);
     return true;
   });
+
+  // تشخيص: سجّل نتيجة الاستخراج
+  if (unique.length === 0 && (raw.photos?.length || raw.videos?.length || raw.media?.length || raw.mediaDetails?.length)) {
+    console.warn(`[extractMedia] WARNING: Raw has media fields but extraction returned empty! Raw keys: ${Object.keys(raw).filter(k => /media|photo|video|image|gif/i.test(k)).join(', ')}`);
+  }
+
+  return unique;
 }
 
 /**
@@ -571,6 +608,22 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
     if (!tweets.length) return { ok: false, error: 'لم يتم العثور على التغريدة' };
 
     const raw = tweets[0];
+
+    // ═══ تشخيص: سجّل مفاتيح الرد الخام لاكتشاف صيغة الوسائط ═══
+    const rawKeys = Object.keys(raw || {});
+    const mediaRelatedKeys = rawKeys.filter(k => /media|photo|video|image|gif|attach|entity/i.test(k));
+    console.log(`[scanSingleTweet] Raw keys: ${rawKeys.join(', ')}`);
+    console.log(`[scanSingleTweet] Media-related keys: ${mediaRelatedKeys.join(', ') || 'NONE'}`);
+    for (const key of mediaRelatedKeys) {
+      const val = raw[key];
+      console.log(`[scanSingleTweet] raw.${key}: type=${typeof val}, isArray=${Array.isArray(val)}, preview=${JSON.stringify(val)?.slice(0, 300)}`);
+    }
+    // Also log entities if present
+    if (raw.entities) {
+      console.log(`[scanSingleTweet] raw.entities keys: ${Object.keys(raw.entities).join(', ')}`);
+      if (raw.entities.media) console.log(`[scanSingleTweet] raw.entities.media: ${JSON.stringify(raw.entities.media)?.slice(0, 300)}`);
+    }
+
     const author = raw.author || raw.user || {};
     const username = author.userName || author.username || 'unknown';
     const user = { username, followers_count: Number(author.followers || 0) };
