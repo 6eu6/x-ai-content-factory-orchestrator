@@ -248,127 +248,190 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10): Pro
 
 /**
  * يستخرج الوسائط من تغريدة X (صور، فيديو، GIF)
- * يدعم صيغ TwitterAPI.io المختلفة:
- * - raw.media (مصفوفة مباشرة)
- * - raw.photos / raw.videos (صيغة TwitterAPI.io)
- * - raw.entities.media (صيغة Twitter القياسية)
- * - raw.extended_entities.media
- * - raw.mediaDetails (صيغة TwitterAPI.io أحياناً)
+ * إصدار 2 — استكشاف عميق يشمل:
+ * - كل المسارات المعروفة (entities, extendedEntities, photos, videos, mediaDetails...)
+ * - فحص عميق متكرر (deep scan) يبحث عن أي كائن وسائط في الشجرة كاملة
+ * - فحص الرد الكامل (includes.media) من مستوى API
  */
-function extractMediaFromTweet(tweet: any): MediaFromTweet[] {
+function extractMediaFromTweet(tweet: any, fullApiResponse?: any): MediaFromTweet[] {
   const media: MediaFromTweet[] = [];
   const raw = tweet.raw || tweet;
+  const seen = new Set<string>();
 
-  // نجمع الوسائط من كل المصادر المحتملة
-  const sources: any[] = [];
+  function addMedia(type: 'photo' | 'video' | 'animated_gif', url: string, alt_text = '') {
+    if (!url || seen.has(url)) return;
+    seen.add(url);
+    media.push({ type, url, alt_text });
+  }
 
-  // 1. raw.media (مصفوفة مباشرة — TwitterAPI.io غالباً يرجع هنا)
-  if (Array.isArray(raw.media)) sources.push(...raw.media);
+  // ═══ 1. المسارات المباشرة المعروفة ═══
 
-  // 2. raw.mediaDetails (صيغة أخرى من TwitterAPI.io)
-  if (Array.isArray(raw.mediaDetails)) sources.push(...raw.mediaDetails);
-
-  // 3. raw.entities.media
-  if (Array.isArray(raw.entities?.media)) sources.push(...raw.entities.media);
-
-  // 4. raw.extended_entities.media
-  if (Array.isArray(raw.extended_entities?.media)) sources.push(...raw.extended_entities.media);
-
-  // 5. raw.photos (صيغة TwitterAPI.io — مصفوفة روابط أو كائنات)
+  // 1a. raw.photos (TwitterAPI.io — مصفوفة روابط أو كائنات)
   if (Array.isArray(raw.photos)) {
     for (const p of raw.photos) {
-      media.push({
-        type: 'photo',
-        url: typeof p === 'string' ? p : (p.media_url_https || p.url || p.media_url || p.imageUrl || ''),
-        alt_text: typeof p === 'object' ? (p.alt_text || '') : ''
-      });
+      const url = typeof p === 'string' ? p : (p.media_url_https || p.url || p.media_url || p.imageUrl || '');
+      if (url) addMedia('photo', url, typeof p === 'object' ? (p.alt_text || '') : '');
     }
   }
 
-  // 6. raw.videos (صيغة TwitterAPI.io)
+  // 1b. raw.videos (TwitterAPI.io)
   if (Array.isArray(raw.videos)) {
     for (const v of raw.videos) {
       const vidUrl = typeof v === 'string' ? v : (v.video_url || v.url || v.preview_url || '');
-      if (vidUrl) {
-        media.push({
-          type: v.type === 'animated_gif' ? 'animated_gif' : 'video',
-          url: vidUrl,
-          alt_text: typeof v === 'object' ? (v.alt_text || '') : ''
-        });
-      }
+      if (vidUrl) addMedia(v.type === 'animated_gif' ? 'animated_gif' : 'video', vidUrl, typeof v === 'object' ? (v.alt_text || '') : '');
     }
   }
 
-  // 7. raw.video (كائن واحد)
+  // 1c. raw.video (كائن واحد)
   if (raw.video && typeof raw.video === 'object' && !Array.isArray(raw.video)) {
     const vidUrl = raw.video.video_url || raw.video.url || raw.video.preview_url || '';
-    if (vidUrl) {
-      media.push({
-        type: raw.video.type === 'animated_gif' ? 'animated_gif' : 'video',
-        url: vidUrl,
-        alt_text: raw.video.alt_text || ''
-      });
-    }
+    if (vidUrl) addMedia(raw.video.type === 'animated_gif' ? 'animated_gif' : 'video', vidUrl, raw.video.alt_text || '');
   }
 
-  // 8. raw.imageUrl / raw.image (صيغة مبسطة)
-  if (raw.imageUrl) media.push({ type: 'photo', url: raw.imageUrl, alt_text: '' });
-  if (raw.image && typeof raw.image === 'string') media.push({ type: 'photo', url: raw.image, alt_text: '' });
+  // 1d. raw.imageUrl / raw.image
+  if (raw.imageUrl) addMedia('photo', raw.imageUrl);
+  if (raw.image && typeof raw.image === 'string') addMedia('photo', raw.image);
 
-  // معالجة المصادر الموحدة (من sources array)
+  // ═══ 2. مصفوفات الوسائط الموحدة (media, mediaDetails, entities.media, extended_entities.media) ═══
+  const sources: any[] = [];
+  if (Array.isArray(raw.media)) sources.push(...raw.media);
+  if (Array.isArray(raw.mediaDetails)) sources.push(...raw.mediaDetails);
+  if (Array.isArray(raw.entities?.media)) sources.push(...raw.entities.media);
+  if (Array.isArray(raw.extended_entities?.media)) sources.push(...raw.extended_entities.media);
+  if (Array.isArray(raw.extendedEntities?.media)) sources.push(...raw.extendedEntities.media);
+  // TwitterAPI.io camelCase
+  if (Array.isArray(raw.entities?.medias)) sources.push(...raw.entities.medias);
+  if (Array.isArray(raw.extendedEntities?.medias)) sources.push(...raw.extendedEntities.medias);
+
   for (const m of sources) {
     if (!m || typeof m !== 'object') continue;
-
-    // صور
     if (m.type === 'photo' || m.media_url_https || m.media_url || m.display_url) {
-      media.push({
-        type: 'photo',
-        url: m.media_url_https || m.media_url || m.url || m.display_url || m.imageUrl || '',
-        alt_text: m.alt_text || m.ext_alt_text || ''
-      });
+      addMedia('photo', m.media_url_https || m.media_url || m.url || m.display_url || m.imageUrl || '', m.alt_text || m.ext_alt_text || '');
+    } else if (m.type === 'video') {
+      const variant = m.video_info?.variants?.find((v: any) => v.content_type === 'video/mp4') || m.video_info?.variants?.[0];
+      addMedia('video', variant?.url || m.video_url || m.url || '', m.alt_text || m.ext_alt_text || '');
+    } else if (m.type === 'animated_gif') {
+      const variant = m.video_info?.variants?.find((v: any) => v.content_type === 'video/mp4') || m.video_info?.variants?.[0];
+      addMedia('animated_gif', variant?.url || m.video_url || m.url || '', m.alt_text || m.ext_alt_text || '');
     }
-    // فيديو
-    else if (m.type === 'video') {
-      const variant = m.video_info?.variants?.find((v: any) => v.content_type === 'video/mp4')
-        || m.video_info?.variants?.[0];
-      const vidUrl = variant?.url || m.video_url || m.url || '';
-      if (vidUrl) {
-        media.push({
-          type: 'video',
-          url: vidUrl,
-          alt_text: m.alt_text || m.ext_alt_text || ''
-        });
-      }
-    }
-    // GIF متحرك
-    else if (m.type === 'animated_gif') {
-      const variant = m.video_info?.variants?.find((v: any) => v.content_type === 'video/mp4')
-        || m.video_info?.variants?.[0];
-      const gifUrl = variant?.url || m.video_url || m.url || '';
-      if (gifUrl) {
-        media.push({
-          type: 'animated_gif',
-          url: gifUrl,
-          alt_text: m.alt_text || m.ext_alt_text || ''
-        });
+  }
+
+  // ═══ 3. فحص includes.media (صيغة Twitter API v2) ═══
+  if (fullApiResponse) {
+    const includesMedia = fullApiResponse?.includes?.media || fullApiResponse?.data?.includes?.media;
+    if (Array.isArray(includesMedia)) {
+      for (const m of includesMedia) {
+        if (!m || typeof m !== 'object') continue;
+        if (m.type === 'photo') {
+          addMedia('photo', m.url || m.media_url || m.media_url_https || '');
+        } else if (m.type === 'video') {
+          const variant = m.variants?.find((v: any) => v.content_type === 'video/mp4') || m.variants?.[0];
+          addMedia('video', variant?.url || m.url || '');
+        } else if (m.type === 'animated_gif') {
+          const variant = m.variants?.find((v: any) => v.content_type === 'video/mp4') || m.variants?.[0];
+          addMedia('animated_gif', variant?.url || m.url || '');
+        }
       }
     }
   }
 
-  // إزالة التكرارات بناءً على URL
-  const seen = new Set<string>();
-  const unique = media.filter(m => {
-    if (!m.url || seen.has(m.url)) return false;
-    seen.add(m.url);
-    return true;
-  });
-
-  // تشخيص: سجّل نتيجة الاستخراج
-  if (unique.length === 0 && (raw.photos?.length || raw.videos?.length || raw.media?.length || raw.mediaDetails?.length)) {
-    console.warn(`[extractMedia] WARNING: Raw has media fields but extraction returned empty! Raw keys: ${Object.keys(raw).filter(k => /media|photo|video|image|gif/i.test(k)).join(', ')}`);
+  // ═══ 4. فحص entities.urls اللي تحتوي روابط صور/فيديو ═══
+  const urlSources: any[] = [];
+  if (Array.isArray(raw.entities?.urls)) urlSources.push(...raw.entities.urls);
+  if (Array.isArray(raw.extended_entities?.urls)) urlSources.push(...raw.extended_entities.urls);
+  if (Array.isArray(raw.extendedEntities?.urls)) urlSources.push(...raw.extendedEntities.urls);
+  for (const u of urlSources) {
+    if (!u || typeof u !== 'object') continue;
+    const expandedUrl = u.expanded_url || u.expandedUrl || u.url || '';
+    // روابط صور تويتر
+    if (/twimg\.com\/media/i.test(expandedUrl)) {
+      addMedia('photo', expandedUrl);
+    }
   }
 
-  return unique;
+  // ═══ 5. فحص روابط t.co في النص اللي تشير لوسائط ═══
+  const tweetText = raw.text || raw.full_text || raw.content || '';
+  const tcoMatches = tweetText.match(/https?:\/\/t\.co\/\S+/g) || [];
+  for (const tcoUrl of tcoMatches) {
+    // لو في entities.urls فيه expanded_url لهذا t.co
+    const match = urlSources.find((u: any) => u.url === tcoUrl);
+    const expanded = match?.expanded_url || match?.expandedUrl;
+    if (expanded && /twimg\.com/i.test(expanded)) {
+      addMedia('photo', expanded);
+    }
+  }
+
+  // ═══ 6. فحص mallizedUrls و photoUrls (صيغ TwitterAPI.io إضافية) ═══
+  if (Array.isArray(raw.mallizedUrls)) {
+    for (const u of raw.mallizedUrls) {
+      if (u?.media_url_https) addMedia('photo', u.media_url_https);
+      if (u?.video_url) addMedia('video', u.video_url);
+    }
+  }
+  if (Array.isArray(raw.photoUrls)) {
+    for (const p of raw.photoUrls) {
+      if (typeof p === 'string' && p) addMedia('photo', p);
+    }
+  }
+  if (Array.isArray(raw.videoUrls)) {
+    for (const v of raw.videoUrls) {
+      if (typeof v === 'string' && v) addMedia('video', v);
+    }
+  }
+
+  // ═══ 7. استكشاف عميق — فحص متكرر لكل الكائنات المتداخلة ═══
+  // هذا يفحص كل كائن في الشجرة ويبحث عن أنماط الوسائط المعروفة
+  if (media.length === 0) {
+    deepScanForMedia(raw, addMedia, '', 0);
+  }
+
+  return media;
+}
+
+/**
+ * فحص عميق متكرر — يبحث عن أي كائن وسائط في أي مكان في الشجرة
+ * يبحث عن الأنماط التالية:
+ * - كائن فيه media_url_https أو media_url (صورة)
+ * - كائن فيه video_info أو video_url (فيديو)
+ * - كائن فيه type: 'photo' أو type: 'video' أو type: 'animated_gif'
+ * - كائن فيه display_url يشير لصورة twimg
+ */
+function deepScanForMedia(obj: any, addMedia: (type: 'photo' | 'video' | 'animated_gif', url: string, alt?: string) => void, path: string, depth: number) {
+  if (!obj || typeof obj !== 'object' || depth > 8) return;
+  if (Array.isArray(obj)) {
+    for (let i = 0; i < obj.length; i++) {
+      deepScanForMedia(obj[i], addMedia, `${path}[${i}]`, depth + 1);
+    }
+    return;
+  }
+
+  // تحقق هل هذا الكائن نفسه يبدو ككائن وسائط
+  const type = obj.type;
+  const mediaUrl = obj.media_url_https || obj.media_url || obj.imageUrl || obj.display_url;
+  const videoUrl = obj.video_url || obj.video_info?.variants?.[0]?.url;
+  const thumbUrl = obj.thumbnail_url || obj.thumbnail_image_url || obj.preview_url;
+
+  if (type === 'photo' && mediaUrl) {
+    addMedia('photo', mediaUrl, obj.alt_text || obj.ext_alt_text || '');
+  } else if (type === 'video' && (videoUrl || thumbUrl)) {
+    addMedia('video', videoUrl || thumbUrl || '', obj.alt_text || '');
+  } else if (type === 'animated_gif' && (videoUrl || thumbUrl)) {
+    addMedia('animated_gif', videoUrl || thumbUrl || '', obj.alt_text || '');
+  } else if (mediaUrl && /twimg\.com|pbs\.twimg/i.test(mediaUrl)) {
+    // كائن فيه رابط صورة تويتر بدون type صريح
+    addMedia('photo', mediaUrl, obj.alt_text || '');
+  } else if (videoUrl && /twimg\.com|video\.twimg/i.test(videoUrl)) {
+    addMedia('video', videoUrl, obj.alt_text || '');
+  }
+
+  // فحص الخصائص المتداخلة
+  try {
+    for (const key of Object.keys(obj)) {
+      // تخطي الخصائص اللي فحصناها أو اللي ما تهمنا
+      if (['raw', 'author', 'user', '__proto__', 'constructor'].includes(key)) continue;
+      deepScanForMedia(obj[key], addMedia, `${path}.${key}`, depth + 1);
+    }
+  } catch {}
 }
 
 /**
@@ -595,6 +658,7 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
   media?: MediaFromTweet[];
   opportunity?: ContentOpportunity;
   error?: string;
+  diagInfo?: string;
 }> {
   try {
     const match = tweetUrl.match(/\/status\/(\d+)/);
@@ -609,20 +673,27 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
 
     const raw = tweets[0];
 
-    // ═══ تشخيص: سجّل مفاتيح الرد الخام لاكتشاف صيغة الوسائط ═══
+    // ═══ تشخيص شامل: سجّل الرد الخام بالكامل ═══
     const rawKeys = Object.keys(raw || {});
     const mediaRelatedKeys = rawKeys.filter(k => /media|photo|video|image|gif|attach|entity/i.test(k));
     console.log(`[scanSingleTweet] Raw keys: ${rawKeys.join(', ')}`);
     console.log(`[scanSingleTweet] Media-related keys: ${mediaRelatedKeys.join(', ') || 'NONE'}`);
+    console.log(`[scanSingleTweet] Full API response top keys: ${Object.keys(json || {}).join(', ')}`);
     for (const key of mediaRelatedKeys) {
       const val = raw[key];
-      console.log(`[scanSingleTweet] raw.${key}: type=${typeof val}, isArray=${Array.isArray(val)}, preview=${JSON.stringify(val)?.slice(0, 300)}`);
+      console.log(`[scanSingleTweet] raw.${key}: type=${typeof val}, isArray=${Array.isArray(val)}, preview=${JSON.stringify(val)?.slice(0, 500)}`);
     }
     // Also log entities if present
     if (raw.entities) {
       console.log(`[scanSingleTweet] raw.entities keys: ${Object.keys(raw.entities).join(', ')}`);
-      if (raw.entities.media) console.log(`[scanSingleTweet] raw.entities.media: ${JSON.stringify(raw.entities.media)?.slice(0, 300)}`);
+      if (raw.entities.media) console.log(`[scanSingleTweet] raw.entities.media: ${JSON.stringify(raw.entities.media)?.slice(0, 500)}`);
     }
+    if (raw.extendedEntities) {
+      console.log(`[scanSingleTweet] raw.extendedEntities keys: ${Object.keys(raw.extendedEntities).join(', ')}`);
+      if (raw.extendedEntities.media) console.log(`[scanSingleTweet] raw.extendedEntities.media: ${JSON.stringify(raw.extendedEntities.media)?.slice(0, 500)}`);
+    }
+    // Dump full raw for debugging (first 2000 chars)
+    console.log(`[scanSingleTweet] FULL RAW: ${JSON.stringify(raw)?.slice(0, 2000)}`);
 
     const author = raw.author || raw.user || {};
     const username = author.userName || author.username || 'unknown';
@@ -640,7 +711,6 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
         bookmark_count: Number(raw.bookmarkCount || raw.bookmarks || 0),
         view_count: Number(raw.viewCount || raw.views || 0)
       },
-      // دمج entities + extendedEntities (TwitterAPI.io يرسل الوسائط في extendedEntities)
       entities: raw.entities || raw.extendedEntities || {},
       extended_entities: raw.extendedEntities || raw.extended_entities || raw.entities || {},
       is_reply: Boolean(raw.isReply || raw.in_reply_to_status_id),
@@ -650,7 +720,12 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
 
     const analysis = analyzeXTweet(normalized, user);
     const score = scoreXTweet(normalized);
-    const media = extractMediaFromTweet(normalized);
+    // نمرر الرد الكامل (json) لدالة الاستخراج عشان تفحص includes.media
+    const media = extractMediaFromTweet(normalized, json);
+
+    // معلومات تشخيصية للرد
+    const diagKeys = mediaRelatedKeys.length > 0 ? mediaRelatedKeys : ['NONE'];
+    const diagInfo = `🔍 تشخيص: مفاتيح الوسائط=[${diagKeys.join(', ')}] | وسائط مستخرجة=${media.length}`;
 
     // خزّن التحليل
     const supabase = supabaseAdmin();
@@ -674,6 +749,7 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
       ok: true,
       analysis: { ...analysis, score },
       media,
+      diagInfo,
       opportunity: score > 10 ? {
         type: 'quote',
         source_tweet_url: tweetUrl,

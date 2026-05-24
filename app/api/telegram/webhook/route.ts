@@ -121,6 +121,7 @@ async function handleMessage(chatId: string, userId: string, username: string, t
 
       const a = result.analysis;
       const m = result.media || [];
+      const diag = (result as any).diagInfo || '';
 
       let msg = `✅ <b>تم تحليل التغريدة</b>\n`;
       msg += `━━━━━━━━━━━━━━━━━━━━\n`;
@@ -131,6 +132,8 @@ async function handleMessage(chatId: string, userId: string, username: string, t
       msg += `━━━━━━━━━━━━━━━━━━━━\n`;
       msg += `<i>${htmlEscape(shortText(a.text || '', 200))}</i>\n`;
       msg += `━━━━━━━━━━━━━━━━━━━━\n`;
+      // عرض معلومات تشخيصية للوسائط
+      if (diag) msg += `${diag}\n`;
       msg += `<i>تم تخزين التحليل في العقل. شغّل 🧠 تشغيل كامل لاستخدامه.</i>`;
 
       await sendReply(chatId, msg);
