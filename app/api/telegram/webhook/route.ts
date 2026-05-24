@@ -80,9 +80,9 @@ async function handleMessage(chatId: string, userId: string, username: string, t
       if (!handle) { await sendReply(chatId, 'أرسل يوزر صحيح مثل: emollick أو @emollick'); return; }
 
       try {
-        await supabase.from('accounts').upsert({ handle, username: handle, tier: 2, active: true, notes: 'Added from Telegram' }, { onConflict: 'handle' });
+        await supabase.from('accounts').upsert({ handle, tier: 2, active: true, notes: 'Added from Telegram' }, { onConflict: 'handle' });
       } catch {
-        try { await supabase.from('accounts').upsert({ handle, username: handle }, { onConflict: 'handle' }); } catch {}
+        try { await supabase.from('accounts').upsert({ handle }, { onConflict: 'handle' }); } catch {}
       }
 
       // جلب معلومات الحساب
@@ -94,8 +94,7 @@ async function handleMessage(chatId: string, userId: string, username: string, t
           info = `\n\n✅ @${htmlEscape(handle)}\nالمتابعين: ${snapshot.followers_count ?? '?'}\nالتغريدات: ${snapshot.tweet_count ?? '?'}`;
           try {
             await supabase.from('accounts').update({
-              notes: `Followers: ${snapshot.followers_count}, Added: ${new Date().toISOString()}`,
-              updated_at: new Date().toISOString()
+              notes: `Followers: ${snapshot.followers_count}, Added: ${new Date().toISOString()}`
             }).eq('handle', handle);
           } catch {}
         }

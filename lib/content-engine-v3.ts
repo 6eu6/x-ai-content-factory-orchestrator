@@ -95,12 +95,11 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10): Pro
   // 1. جلب الحسابات المحفوظة — جرب عدة طرق مع تسجيل الأخطاء
   let accounts: any[] = [];
 
-  // محاولة 1: بدون فلترات — أوسع استعلام ممكن
+  // محاولة 1: select فقط handle — العمود الوحيد المضمون
   try {
     const { data, error } = await supabase
       .from('accounts')
-      .select('*')
-      .order('updated_at', { ascending: false })
+      .select('handle')
       .limit(maxAccounts);
 
     if (error) {
@@ -117,12 +116,12 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10): Pro
     console.error(`[scanXAccounts] accounts exception:`, e.message);
   }
 
-  // محاولة 2: select فقط الأعمدة الأساسية
+  // محاولة 2: لو ما رجع شيء، جرب select *
   if (!accounts.length) {
     try {
       const { data, error } = await supabase
         .from('accounts')
-        .select('handle, username')
+        .select('*')
         .limit(maxAccounts);
 
       if (error) {
@@ -149,7 +148,7 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10): Pro
     const { data: manualTweets, error: mtError } = await supabase
       .from('viral_tweet_analyses')
       .select('*')
-      .order('analyzed_at', { ascending: false })
+      .order('created_at', { ascending: false })
       .limit(50);
 
     if (mtError) {
@@ -228,10 +227,7 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10): Pro
               engagement_score: score,
               engagement_per_1k_followers: analysis.engagement_per_1k_followers,
               tweet_type: media.length > 0 ? 'media' : (analysis.is_reply ? 'reply' : 'original'),
-              metrics: analysis.metrics,
-              has_media: media.length > 0,
-              media_type: media.map(m => m.type).join(','),
-              analyzed_at: new Date().toISOString()
+              metrics: analysis.metrics
             }, { onConflict: 'tweet_id' });
           } catch (dbErr: any) {
             debugLog.push(`[scan] upsert viral error: ${dbErr.message}`);
@@ -257,22 +253,19 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10): Pro
             engagement_score: score,
             engagement_per_1k_followers: analysis.engagement_per_1k_followers,
             tweet_type: media.length > 0 ? 'media' : (analysis.is_reply ? 'reply' : 'original'),
-            metrics: analysis.metrics,
-            has_media: media.length > 0,
-            media_type: media.map(m => m.type).join(','),
-            analyzed_at: new Date().toISOString()
+            metrics: analysis.metrics
           }, { onConflict: 'tweet_id' });
         } catch (dbErr: any) {
           debugLog.push(`[scan] upsert non-viral error: ${dbErr.message}`);
         }
       }
 
-      // حدّث حالة الحساب
+      // حدّث حالة الحساب — فقط notes و last_scanned_at (أعمدة مضمونة)
       try {
         const snapshot = await getXUserByUsername(handle);
         await supabase.from('accounts').update({
           notes: `Followers: ${snapshot.followers_count}, Scanned: ${new Date().toISOString()}`,
-          updated_at: new Date().toISOString()
+          last_scanned_at: new Date().toISOString()
         }).eq('handle', handle);
       } catch (updErr: any) {
         debugLog.push(`[scan] update account error: ${updErr.message}`);
@@ -1363,10 +1356,7 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
         engagement_score: score,
         engagement_per_1k_followers: analysis.engagement_per_1k_followers,
         tweet_type: tweetType,
-        metrics: analysis.metrics,
-        has_media: media.length > 0,
-        media_type: media.map(m => m.type).join(','),
-        analyzed_at: new Date().toISOString()
+        metrics: analysis.metrics
       }, { onConflict: 'tweet_id' });
     } catch (dbErr: any) {
       console.error('[scanSingleTweet] upsert error:', dbErr.message);
