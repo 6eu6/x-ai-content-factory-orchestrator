@@ -167,7 +167,7 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10): Pro
     const crawlerItems = allAnalyzed.map(a => ({
       title: a.text?.slice(0, 200) || 'X tweet analysis',
       url: a.tweet_url,
-      summary: `Engagement: ${a.score}, Per1K: ${a.engagement_per_1k_followers}, Type: ${a.media?.length > 0 ? 'media' : 'text'}, Has question: ${a.has_question}`,
+      summary: `Engagement: ${a.score}, Per1K: ${a.engagement_per_1k_followers}, Type: ${a.media?.length > 0 ? 'media' : 'text'}, Media: ${a.media?.map((m: MediaFromTweet) => m.type).join(',') || 'none'}, Has question: ${a.has_question}`,
       confidence_score: Math.min(10, Math.max(1, Math.round(a.score / 10))),
     }));
 
@@ -186,6 +186,47 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10): Pro
     }
   } catch (e: any) {
     console.error('Brain learning failed:', e.message);
+  }
+
+  // 3.5. علّم العقل أنماط الوسائط — أي حسابات تستخدم صور/فيديو/GIF
+  try {
+    // احسب نسبة التغريدات اللي فيها وسائط لكل حساب
+    const accountMediaStats: Record<string, { total: number; withMedia: number; types: Set<string> }> = {};
+    for (const a of allAnalyzed) {
+      const handle = a.handle || a.username || 'unknown';
+      if (!accountMediaStats[handle]) accountMediaStats[handle] = { total: 0, withMedia: 0, types: new Set() };
+      accountMediaStats[handle].total++;
+      if (a.media?.length > 0) {
+        accountMediaStats[handle].withMedia++;
+        for (const m of a.media) accountMediaStats[handle].types.add(m.type);
+      }
+    }
+
+    for (const [handle, stats] of Object.entries(accountMediaStats)) {
+      if (stats.withMedia > 0) {
+        const mediaRatio = Math.round((stats.withMedia / stats.total) * 100);
+        const mediaTypes = [...stats.types].join(', ');
+        const rule = `@${handle} uses media in ${mediaRatio}% of tweets (${mediaTypes}). Accounts with high media usage get better engagement. Consider media when crafting engagement with their tweets.`;
+        await insertIfMissing(supabase, 'x_algorithm_learning_rules',
+          { rule_type: 'media_pattern', rule },
+          {
+            rule_type: 'media_pattern',
+            rule,
+            evidence: `Scanned ${stats.total} tweets from @${handle}: ${stats.withMedia} had media (${mediaTypes})`,
+            source_type: 'x_account_scan_v3',
+            source_url: `https://x.com/${handle}`,
+            applies_to: 'crawl_strategy,content_score,engagement_crafting',
+            confidence_score: Math.min(10, 5 + Math.floor(mediaRatio / 20)),
+            status: 'active',
+            test_run: false,
+            updated_at: new Date().toISOString()
+          }
+        );
+        brainUpdates.algorithmRules++;
+      }
+    }
+  } catch (e: any) {
+    console.error('Media pattern learning failed:', e.message);
   }
 
   // 4. اكتشف فرص المحتوى
@@ -207,37 +248,90 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10): Pro
 
 /**
  * يستخرج الوسائط من تغريدة X (صور، فيديو، GIF)
+ * يدعم صيغ TwitterAPI.io المختلفة:
+ * - raw.media (مصفوفة مباشرة)
+ * - raw.entities.media (صيغة Twitter القياسية)
+ * - raw.extended_entities.media
  */
 function extractMediaFromTweet(tweet: any): MediaFromTweet[] {
   const media: MediaFromTweet[] = [];
   const raw = tweet.raw || tweet;
-  const entities = raw.entities || raw.extended_entities || {};
 
-  // صور
-  const photos = entities.media?.filter((m: any) => m.type === 'photo' || m.media_url_https) || [];
-  for (const photo of photos) {
-    media.push({
-      type: 'photo',
-      url: photo.media_url_https || photo.media_url || photo.url,
-      alt_text: photo.alt_text || photo.ext_alt_text || ''
-    });
-  }
+  // نجمع الوسائط من كل المصادر المحتملة
+  const sources: any[] = [];
 
-  // فيديو
-  const videos = entities.media?.filter((m: any) => m.type === 'video' || m.type === 'animated_gif') || [];
-  for (const video of videos) {
-    const variant = video.video_info?.variants?.find((v: any) => v.content_type === 'video/mp4')
-      || video.video_info?.variants?.[0];
-    if (variant?.url) {
+  // 1. raw.media (TwitterAPI.io غالباً يرجع هنا)
+  if (Array.isArray(raw.media)) sources.push(...raw.media);
+
+  // 2. raw.entities.media
+  if (Array.isArray(raw.entities?.media)) sources.push(...raw.entities.media);
+
+  // 3. raw.extended_entities.media
+  if (Array.isArray(raw.extended_entities?.media)) sources.push(...raw.extended_entities.media);
+
+  // 4. raw.photos (بعض صيغ TwitterAPI.io)
+  if (Array.isArray(raw.photos)) {
+    for (const p of raw.photos) {
       media.push({
-        type: video.type === 'animated_gif' ? 'animated_gif' : 'video',
-        url: variant.url,
-        alt_text: video.alt_text || video.ext_alt_text || ''
+        type: 'photo',
+        url: typeof p === 'string' ? p : (p.media_url_https || p.url || p.media_url || ''),
+        alt_text: typeof p === 'object' ? (p.alt_text || '') : ''
       });
     }
   }
 
-  return media;
+  // 5. raw.video (بعض صيغ TwitterAPI.io)
+  if (raw.video) {
+    const vidUrl = raw.video.video_url || raw.video.url || '';
+    if (vidUrl) {
+      media.push({
+        type: raw.video.type === 'animated_gif' ? 'animated_gif' : 'video',
+        url: vidUrl,
+        alt_text: raw.video.alt_text || ''
+      });
+    }
+  }
+
+  // معالجة المصادر الموحدة
+  for (const m of sources) {
+    if (!m || typeof m !== 'object') continue;
+
+    if (m.type === 'photo' || m.media_url_https || m.media_url) {
+      media.push({
+        type: 'photo',
+        url: m.media_url_https || m.media_url || m.url || '',
+        alt_text: m.alt_text || m.ext_alt_text || ''
+      });
+    } else if (m.type === 'video') {
+      const variant = m.video_info?.variants?.find((v: any) => v.content_type === 'video/mp4')
+        || m.video_info?.variants?.[0];
+      if (variant?.url) {
+        media.push({
+          type: 'video',
+          url: variant.url,
+          alt_text: m.alt_text || m.ext_alt_text || ''
+        });
+      }
+    } else if (m.type === 'animated_gif') {
+      const variant = m.video_info?.variants?.find((v: any) => v.content_type === 'video/mp4')
+        || m.video_info?.variants?.[0];
+      if (variant?.url) {
+        media.push({
+          type: 'animated_gif',
+          url: variant.url,
+          alt_text: m.alt_text || m.ext_alt_text || ''
+        });
+      }
+    }
+  }
+
+  // إزالة التكرارات بناءً على URL
+  const seen = new Set<string>();
+  return media.filter(m => {
+    if (!m.url || seen.has(m.url)) return false;
+    seen.add(m.url);
+    return true;
+  });
 }
 
 /**
