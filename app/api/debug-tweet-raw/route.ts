@@ -1,13 +1,13 @@
-import { assertAuthorized, optionalEnv } from '../../../lib/env';
+import { optionalEnv } from '../../../lib/env';
 import { getTwitterApiKey, twitterApiBase } from '../../../lib/x';
 
 /**
  * GET /api/debug-tweet-raw?tweet_id=xxx
  * Returns the RAW response from TwitterAPI.io for a single tweet
+ * مؤقت — للتشخيص فقط (مفتوح بدون سر)
  */
 export async function GET(req: Request) {
   try {
-    assertAuthorized(req);
     const url = new URL(req.url);
     const tweetId = url.searchParams.get('tweet_id');
     if (!tweetId) return Response.json({ ok: false, error: 'tweet_id required' }, { status: 400 });
