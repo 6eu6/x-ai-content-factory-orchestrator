@@ -14,6 +14,7 @@ import {
 import { learnFromCrawlerItems } from './learning-memory';
 import { shieldCheck, quickShieldCheck } from './account-shield';
 import { insertIfMissing } from './db-helpers';
+import { queryBrainForContent } from './brain-query';
 
 /**
  * Content Engine v3 — محرك محتوى مبني على الزحف لا على التوليد
@@ -1081,13 +1082,23 @@ async function craftEngagement(
   rulesUsed: string[]
 ): Promise<string | null> {
   try {
-    const rulesContext = algoRules.slice(0, 5).map(r => `- ${r.rule} (evidence: ${(r.evidence || '').slice(0, 80)})`).join('\n');
-    const patternsContext = stylePatterns.slice(0, 5).map(p => `- ${p.pattern_name}: ${p.pattern_description}`).join('\n');
+    // ═══ استرجاع ذكي من العقل مع تعليمات تطبيق دقيقة ═══
+    const brainQuery = await queryBrainForContent(type === 'reply' ? 'reply' : 'quote', 6, 3);
+    const brainContext = brainQuery.compiled_prompt_context;
+
+    // لو العقل فيه مفاهيم، استخدمها؛ لو فارغ، استخدم القواعد القديمة
+    const hasBrainLearning = brainQuery.concepts.length > 0 || brainQuery.patterns.length > 0;
+    const fallbackRules = algoRules.slice(0, 5).map(r => `- ${r.rule} (evidence: ${(r.evidence || '').slice(0, 80)})`).join('\n');
+    const fallbackPatterns = stylePatterns.slice(0, 5).map(p => `- ${p.pattern_name}: ${p.pattern_description}`).join('\n');
+
+    const learningContext = hasBrainLearning
+      ? brainContext
+      : `Algorithm rules:\n${fallbackRules}\n\nStyle patterns:\n${fallbackPatterns}`;
 
     const response = await callModel('content_crafting' as TaskType, [
       {
         role: 'system',
-        content: `أنت تكتب لتغريدات X لحساب @${optionalEnv('X_USERNAME', '30piq')} عن AI × الإنتاجية × النمو المهني.
+        content: `أنت تكتب لتغريدات X لحساب @${optionalEnv('X_USERNAME', '30piq')}.
 
 قواعد صارمة:
 1. لا تستخدم أي كلمات AI slop (delve, crucial, leverage, game-changer, unlock, etc.)
@@ -1099,11 +1110,9 @@ async function craftEngagement(
 7. لا تكرر نفس الفكرة بطريقة مختلفة
 8. أضف عنصر شخصي أو مرجع محدد
 
-قواعد العقل اللي تتبعها:
-${rulesContext}
+${learningContext}
 
-أنماط أسلوبية ناجحة:
-${patternsContext}
+IMPORTANT: When you write, you MUST follow the APPLICATION INSTRUCTION for each concept. Each concept tells you HOW to apply it — read the "HOW TO APPLY" instruction and follow it precisely. Do not just reference the concept — embody it in your writing technique.
 
 اكتب نص واحد فقط. بدون شرح أو ملاحظات.`
       },
@@ -1118,8 +1127,15 @@ ${patternsContext}
     const text = String(response || '').trim();
     if (text.length < 10 || text.length > 280) return null;
 
-    for (const rule of algoRules.slice(0, 3)) {
-      rulesUsed.push(rule.rule_type || 'unknown');
+    // سجّل إيش استخدم من المفاهيم
+    if (hasBrainLearning) {
+      for (const c of brainQuery.concepts.slice(0, 3)) {
+        rulesUsed.push(c.concept_type || 'unknown');
+      }
+    } else {
+      for (const rule of algoRules.slice(0, 3)) {
+        rulesUsed.push(rule.rule_type || 'unknown');
+      }
     }
 
     return text;
@@ -1133,13 +1149,32 @@ async function craftThreadFromBrain(
   stylePatterns: any[]
 ): Promise<{ type: 'thread' | 'article'; text: string; why: string; rules: string[] } | null> {
   try {
-    const topPatterns = stylePatterns.slice(0, 5);
-    const topRules = algoRules.slice(0, 5);
+    // ═══ استرجاع ذكي من العقل ═══
+    const brainQuery = await queryBrainForContent('thread', 6, 5);
+    const hasBrainLearning = brainQuery.concepts.length > 0 || brainQuery.patterns.length > 0;
+
+    // fallback لو العقل فارغ
+    const fallbackPatterns = stylePatterns.slice(0, 5);
+    const fallbackRules = algoRules.slice(0, 5);
+
+    let learningContext: string;
+    let topPatterns: any[];
+    let topRules: any[];
+
+    if (hasBrainLearning) {
+      learningContext = brainQuery.compiled_prompt_context;
+      topPatterns = brainQuery.patterns;
+      topRules = brainQuery.concepts;
+    } else {
+      topPatterns = fallbackPatterns;
+      topRules = fallbackRules;
+      learningContext = `أنماط ناجحة لتستلهم منها:\n${topPatterns.map(p => `- ${p.pattern_name}: ${p.pattern_description}`).join('\n')}\n\nقواعد الخوارزمية:\n${topRules.map(r => `- ${r.rule}`).join('\n')}`;
+    }
 
     const response = await callModel('content_crafting' as TaskType, [
       {
         role: 'system',
-        content: `أنت تكتب لحساب @${optionalEnv('X_USERNAME', '30piq')} عن AI × الإنتاجية × النمو المهني.
+        content: `أنت تكتب لحساب @${optionalEnv('X_USERNAME', '30piq')}.
 
 قواعد صارمة:
 1. لا AI slop (delve, crucial, leverage, game-changer, unlock, etc.)
@@ -1150,28 +1185,32 @@ async function craftThreadFromBrain(
 6. التغريدة الأولى = هوك قوي (سؤال أو حقيقة صادمة أو رأي مثير)
 7. لا تكرار
 
-أنماط ناجحة لتستلهم منها:
-${topPatterns.map(p => `- ${p.pattern_name}: ${p.pattern_description}`).join('\n')}
+${learningContext}
 
-قواعد الخوارزمية:
-${topRules.map(r => `- ${r.rule}`).join('\n')}
+CRITICAL: You MUST follow the APPLICATION INSTRUCTION for each concept. Each concept tells you exactly HOW to apply it — follow the "HOW TO APPLY" instruction precisely. Do not just reference the concept — embody it in your writing technique and thread structure.
 
 اكتب ثريد من 3-5 تغريدات. افصل بين كل تغريدة بسطر فيه "---" فقط.`
       },
       {
         role: 'user',
-        content: `اكتب ثريد عن واحد من هذي المواضيع بناءً على أنماط العقل:\n${topPatterns.map(p => p.pattern_name).join('، ')}`
+        content: hasBrainLearning
+          ? `اكتب ثريد مبني على مفاهيم العقل المتعلمة. كل مفهوم فيه تعليمة تطبيق — اتبعها بدقة.`
+          : `اكتب ثريد عن واحد من هذي المواضيع بناءً على أنماط العقل:\n${topPatterns.map(p => p.pattern_name).join('، ')}`
       }
     ]);
 
     const text = String(response || '').trim();
     if (text.length < 50) return null;
 
+    const usedRules = hasBrainLearning
+      ? brainQuery.concepts.slice(0, 5).map(c => c.concept_type || 'unknown')
+      : topRules.map(r => r.rule_type || 'unknown');
+
     return {
       type: 'thread',
       text,
-      why: `مبني على ${topPatterns.length} أنماط ناجحة و${topRules.length} قاعدة خوارزمية`,
-      rules: topRules.map(r => r.rule_type || 'unknown')
+      why: `مبني على ${brainQuery.concepts.length || topRules.length} مفاهيم و${brainQuery.patterns.length || topPatterns.length} أنماط من العقل`,
+      rules: usedRules
     };
   } catch {
     return null;

@@ -173,6 +173,18 @@ async function handleMessage(chatId: string, userId: string, username: string, t
       return;
     }
 
+    // ═══ محتويات العقل ═══
+    if (text === '🧩 محتويات العقل') {
+      await sendReply(chatId, '⏳ جاري استرجاع محتويات العقل...');
+      try {
+        const brainReport = await getBrainContents(supabase);
+        await sendReply(chatId, brainReport);
+      } catch (e: any) {
+        await sendReply(chatId, `❌ فشل الاسترجاع: ${htmlEscape(e.message || '')}`);
+      }
+      return;
+    }
+
     // ═══ تقرير الأداء ═══
     if (text === '📊 تقرير الأداء') {
       await sendReply(chatId, '⏳ جاري فحص الحساب...');
@@ -283,6 +295,143 @@ async function deliverScanResults(chatId: string, result: any) {
   }
 
   await sendReply(chatId, lines.join('\n'));
+}
+
+// ═══ استرجاع محتويات العقل ═══
+
+async function getBrainContents(supabase: any): Promise<string> {
+  const lines: string[] = [];
+  lines.push('🧩 <b>محتويات العقل</b>');
+  lines.push('━━━━━━━━━━━━━━━━━━━━');
+
+  // 1. القواعد الخوارزمية — حسب النوع
+  const { data: algoRules } = await supabase
+    .from('x_algorithm_learning_rules')
+    .select('id, rule_type, rule, evidence, confidence_score, applies_to, status, source_type')
+    .eq('status', 'active')
+    .order('confidence_score', { ascending: false })
+    .limit(50);
+
+  const algoRulesList = algoRules || [];
+  const totalAlgo = algoRulesList.length;
+
+  // تجميع حسب rule_type
+  const byType: Record<string, any[]> = {};
+  for (const r of algoRulesList) {
+    const t = r.rule_type || 'unknown';
+    if (!byType[t]) byType[t] = [];
+    byType[t].push(r);
+  }
+
+  lines.push(`\n📊 <b>القواعد الخوارزمية (${totalAlgo})</b>`);
+
+  const typeLabels: Record<string, string> = {
+    'precise_concept': '🎯 مفاهيم دقيقة',
+    'psychological_trigger': '🧠 آليات نفسية',
+    'viral_pattern': '🔥 أنماط انتشار',
+    'media_impact': '🎬 تأثير الوسائط',
+    'conversation_context': '💬 سياق المحادثة',
+    'viral_concept': '⚡ مفاهيم فيروسية',
+    'ranking': '📈 ترتيب',
+    'reply': '↩️ ردود',
+    'bookmark': '🔖 حفظ',
+    'safety': '🛡️ أمان'
+  };
+
+  for (const [type, rules] of Object.entries(byType)) {
+    const label = typeLabels[type] || `📌 ${type}`;
+    lines.push(`\n<b>${label} (${rules.length})</b>`);
+    for (const r of rules.slice(0, 8)) {
+      const conf = Number(r.confidence_score || 0).toFixed(1);
+      const ruleText = String(r.rule || '').slice(0, 120);
+      const evidenceText = String(r.evidence || '').slice(0, 80);
+      lines.push(`  ${conf}⭐ <i>${htmlEscape(ruleText)}</i>`);
+      if (evidenceText) lines.push(`     └ ${htmlEscape(evidenceText)}`);
+    }
+    if (rules.length > 8) lines.push(`  ... +${rules.length - 8} أكثر`);
+  }
+
+  // 2. أنماط الأسلوب
+  const { data: stylePatterns } = await supabase
+    .from('viral_style_patterns')
+    .select('id, pattern_name, pattern_type, pattern_description, why_it_works, adaptation_for_30piq, confidence_score, status')
+    .eq('status', 'active')
+    .order('confidence_score', { ascending: false })
+    .limit(20);
+
+  const styleList = stylePatterns || [];
+  lines.push(`\n\n✍️ <b>أنماط الأسلوب (${styleList.length})</b>`);
+  for (const p of styleList.slice(0, 10)) {
+    const conf = Number(p.confidence_score || 0).toFixed(1);
+    const name = String(p.pattern_name || '').slice(0, 80);
+    const desc = String(p.pattern_description || '').slice(0, 100);
+    lines.push(`  ${conf}⭐ <b>${htmlEscape(name)}</b>`);
+    lines.push(`     ${htmlEscape(desc)}`);
+    if (p.adaptation_for_30piq) {
+      lines.push(`     → ${htmlEscape(String(p.adaptation_for_30piq).slice(0, 80))}`);
+    }
+  }
+  if (styleList.length > 10) lines.push(`  ... +${styleList.length - 10} أكثر`);
+
+  // 3. فرص MCP
+  const { data: mcpOpps } = await supabase
+    .from('mcp_opportunity_map')
+    .select('id, opportunity_area, mcp_use_case, confidence_score, status')
+    .eq('status', 'active')
+    .order('confidence_score', { ascending: false })
+    .limit(10);
+
+  const mcpList = mcpOpps || [];
+  if (mcpList.length > 0) {
+    lines.push(`\n\n🛠️ <b>فرص MCP (${mcpList.length})</b>`);
+    for (const m of mcpList) {
+      const conf = Number(m.confidence_score || 0).toFixed(1);
+      lines.push(`  ${conf}⭐ ${htmlEscape(String(m.opportunity_area || '').slice(0, 80))}`);
+      lines.push(`     └ ${htmlEscape(String(m.mcp_use_case || '').slice(0, 80))}`);
+    }
+  }
+
+  // 4. قواعد النظام
+  const { data: sysRules } = await supabase
+    .from('system_learning_rules')
+    .select('id, rule_type, rule, confidence_score, status')
+    .eq('status', 'active')
+    .order('confidence_score', { ascending: false })
+    .limit(10);
+
+  const sysList = sysRules || [];
+  if (sysList.length > 0) {
+    lines.push(`\n\n⚙️ <b>قواعد النظام (${sysList.length})</b>`);
+    for (const s of sysList) {
+      const conf = Number(s.confidence_score || 0).toFixed(1);
+      lines.push(`  ${conf}⭐ ${htmlEscape(String(s.rule || '').slice(0, 100))}`);
+    }
+  }
+
+  // 5. ملخص التطبيق
+  lines.push('\n\n━━━━━━━━━━━━━━━━━━━━');
+  lines.push('🤖 <b>كيف يطبّق الذكاء الاصطناعي التعلم:</b>');
+  lines.push('');
+  lines.push('<b>عند إنشاء تغريدة:</b>');
+  lines.push('• يأخذ أعلى 5 قواعد خوارزمية');
+  lines.push('• يأخذ أعلى 3 أنماط أسلوبية');
+  lines.push('• يدمجها في برومبت التوليد');
+  lines.push('');
+  lines.push('<b>عند إنشاء ثريد:</b>');
+  lines.push('• يأخذ أعلى 5 قواعد + 5 أنماط');
+  lines.push('• يبني الثريد على الأساس المتعلم');
+  lines.push('');
+  lines.push('<b>عند إنشاء فرص تفاعل:</b>');
+  lines.push('• يأخذ أعلى 10 قواعد + 10 أنماط');
+  lines.push('• يصيغ اقتباسات/ردود حسب القواعد');
+
+  if (totalAlgo === 0 && styleList.length === 0) {
+    lines.push('');
+    lines.push('⚠️ <b>العقل فارغ!</b>');
+    lines.push('شغّل 🧠 تشغيل كامل أو أضف تغريدات لتعليم العقل.');
+  }
+
+  return lines.join('\n');
 }
 
 // ═══ مساعدات ═══

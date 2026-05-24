@@ -3,8 +3,8 @@ import { optionalEnv, requiredEnv } from './env';
 export const MAIN_KEYBOARD = {
   keyboard: [
     [{ text: '🧠 تشغيل كامل' }, { text: '📊 تقرير الأداء' }],
-    [{ text: '➕ إضافة حساب' }, { text: '🔗 إضافة تغريدة' }],
-    [{ text: '🔄 تصفير البيانات' }]
+    [{ text: '🧩 محتويات العقل' }, { text: '🔗 إضافة تغريدة' }],
+    [{ text: '➕ إضافة حساب' }, { text: '🔄 تصفير البيانات' }]
   ],
   resize_keyboard: true,
   one_time_keyboard: false

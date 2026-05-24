@@ -1,6 +1,7 @@
 import { callModel, parseModelJson, TaskType } from './model-router';
 import { supabaseAdmin } from './supabase';
 import { optionalEnv } from './env';
+import { queryBrainForContent } from './brain-query';
 
 /**
  * Content Type Engine v2 — محرك تنوع أنواع المحتوى
@@ -359,10 +360,26 @@ export async function generateContentByType(
 }
 
 async function generateSingleTweet(ctx: any, taskType: TaskType): Promise<any> {
+  // ═══ استرجاع ذكي من العقل ═══
+  let brainContext = '';
+  try {
+    const brainQuery = await queryBrainForContent('single_tweet', 5, 3);
+    if (brainQuery.concepts.length > 0 || brainQuery.patterns.length > 0) {
+      brainContext = brainQuery.compiled_prompt_context;
+    }
+  } catch {}
+
+  const fallbackAlgoRules = ctx.learningMemory ? JSON.stringify(ctx.learningMemory.algorithm_rules?.slice(0, 5)) : '';
+  const fallbackViralPatterns = ctx.viralMemory ? JSON.stringify(ctx.viralMemory.high_confidence_patterns?.slice(0, 3)) : '';
+
+  const learningSection = brainContext
+    ? brainContext
+    : `${fallbackAlgoRules ? `Algorithm rules to apply: ${fallbackAlgoRules}` : ''}\n${fallbackViralPatterns ? `Working mechanics: ${fallbackViralPatterns}` : ''}`;
+
   const response = await callModel(taskType, [
     {
       role: 'system',
-      content: `Write a single tweet for @${optionalEnv('X_USERNAME', '30piq')} about AI x Productivity x Career Growth.
+      content: `Write a single tweet for @${optionalEnv('X_USERNAME', '30piq')}.
 
 ANTI-SLOP RULES (CRITICAL — your text will be rejected if it contains any of these):
 - NEVER use: delve, crucial, leverage, synergy, transform, unleash, navigate, foster, elevate, empower, streamline, harness, pioneer, game-changer, cutting-edge, state-of-the-art
@@ -375,13 +392,15 @@ ANTI-SLOP RULES (CRITICAL — your text will be rejected if it contains any of t
 
 Content rules: Under 240 chars. No hashtags. No first-person claims unless true.
 
+${learningSection}
+
+IMPORTANT: When you write, you MUST follow the APPLICATION INSTRUCTION for each concept. Each concept tells you HOW to apply it — read the "HOW TO APPLY" instruction and follow it precisely. Do not just reference the concept — embody it in your writing technique.
+
 Output valid JSON.`
     },
     {
       role: 'user',
       content: `Topic: ${ctx.topic}
-${ctx.learningMemory ? `Algorithm rules to apply: ${JSON.stringify(ctx.learningMemory.algorithm_rules?.slice(0, 5))}` : ''}
-${ctx.viralMemory ? `Working mechanics: ${JSON.stringify(ctx.viralMemory.high_confidence_patterns?.slice(0, 3))}` : ''}
 
 Return: {"text":"...","why_it_works":"...","originality_element":"...","reply_trigger":"...","bookmark_trigger":"...","mechanic_used":"...","best_time_utc":"..."}`
     }
@@ -390,10 +409,25 @@ Return: {"text":"...","why_it_works":"...","originality_element":"...","reply_tr
 }
 
 async function generateThread(ctx: any, taskType: TaskType): Promise<any> {
+  // ═══ استرجاع ذكي من العقل ═══
+  let brainContext = '';
+  try {
+    const brainQuery = await queryBrainForContent('thread', 6, 5);
+    if (brainQuery.concepts.length > 0 || brainQuery.patterns.length > 0) {
+      brainContext = brainQuery.compiled_prompt_context;
+    }
+  } catch {}
+
+  const fallbackAlgoRules = ctx.learningMemory ? JSON.stringify(ctx.learningMemory.algorithm_rules?.slice(0, 5)) : '';
+
+  const learningSection = brainContext
+    ? brainContext
+    : `${fallbackAlgoRules ? `Algorithm rules: ${fallbackAlgoRules}` : ''}\n${ctx.sources?.length ? `Sources: ${ctx.sources.join(', ')}` : ''}`;
+
   const response = await callModel(taskType, [
     {
       role: 'system',
-      content: `Write a 5-8 tweet thread for @${optionalEnv('X_USERNAME', '30piq')} about AI x Productivity x Career Growth.
+      content: `Write a 5-8 tweet thread for @${optionalEnv('X_USERNAME', '30piq')}.
 
 ANTI-SLOP RULES (CRITICAL):
 - NEVER start with "Thread" or "A thread on X" or "Let me show you" or "Here's what I learned"
@@ -408,13 +442,15 @@ ANTI-SLOP RULES (CRITICAL):
 - End with YOUR original insight, not just a summary
 - Each tweet under 280 chars. No hashtags. No Slop words.
 
+${learningSection}
+
+CRITICAL: You MUST follow the APPLICATION INSTRUCTION for each concept. Each concept tells you exactly HOW to apply it — follow the "HOW TO APPLY" instruction precisely. Do not just reference the concept — embody it in your thread structure and writing technique.
+
 Output valid JSON.`
     },
     {
       role: 'user',
       content: `Topic: ${ctx.topic}
-${ctx.learningMemory ? `Algorithm rules: ${JSON.stringify(ctx.learningMemory.algorithm_rules?.slice(0, 5))}` : ''}
-${ctx.sources?.length ? `Sources: ${ctx.sources.join(', ')}` : ''}
 
 Return JSON:
 {
@@ -541,6 +577,15 @@ Return JSON:
 }
 
 async function generateReply(ctx: any, taskType: TaskType): Promise<any> {
+  // ═══ استرجاع ذكي من العقل ═══
+  let brainContext = '';
+  try {
+    const brainQuery = await queryBrainForContent('reply', 4, 2);
+    if (brainQuery.concepts.length > 0 || brainQuery.patterns.length > 0) {
+      brainContext = brainQuery.compiled_prompt_context;
+    }
+  } catch {}
+
   const response = await callModel(taskType, [
     {
       role: 'system',
@@ -553,6 +598,10 @@ CRITICAL REPLY RULES (ReplyScorer VLM scores replies 0.0-1.0):
 - Add new facts, counter-arguments, or practical angle
 - Keep under 240 chars. No hashtags. No Slop words.
 - Sound like a knowledgeable peer, not a fan
+
+${brainContext || ''}
+
+IMPORTANT: When you write, you MUST follow the APPLICATION INSTRUCTION for each concept. Each concept tells you HOW to apply it — follow the "HOW TO APPLY" instruction precisely. Do not just reference the concept — embody it in your writing technique.
 
 Output valid JSON.`
     },
@@ -573,6 +622,15 @@ Return JSON:
 }
 
 async function generateQuotePost(ctx: any, taskType: TaskType): Promise<any> {
+  // ═══ استرجاع ذكي من العقل ═══
+  let brainContext = '';
+  try {
+    const brainQuery = await queryBrainForContent('quote', 4, 2);
+    if (brainQuery.concepts.length > 0 || brainQuery.patterns.length > 0) {
+      brainContext = brainQuery.compiled_prompt_context;
+    }
+  } catch {}
+
   const response = await callModel(taskType, [
     {
       role: 'system',
@@ -583,6 +641,10 @@ Rules:
 - Make the quote standalone valuable even without original tweet
 - Under 240 chars. No hashtags. No Slop words.
 - No "This!" or "So true!" — these add zero value
+
+${brainContext || ''}
+
+IMPORTANT: When you write, you MUST follow the APPLICATION INSTRUCTION for each concept. Each concept tells you HOW to apply it — follow the "HOW TO APPLY" instruction precisely. Do not just reference the concept — embody it in your writing technique.
 
 Output valid JSON.`
     },
