@@ -122,6 +122,7 @@ async function handleMessage(chatId: string, userId: string, username: string, t
       const a = result.analysis;
       const m = result.media || [];
       const diag = (result as any).diagInfo || '';
+      const deep = (result as any).deepAnalysis as { viralReason: string; stylePattern: string; adaptation: string; mediaImpact: string } | undefined;
 
       let msg = `✅ <b>تم تحليل التغريدة</b>\n`;
       msg += `━━━━━━━━━━━━━━━━━━━━\n`;
@@ -132,24 +133,17 @@ async function handleMessage(chatId: string, userId: string, username: string, t
       msg += `━━━━━━━━━━━━━━━━━━━━\n`;
       msg += `<i>${htmlEscape(shortText(a.text || '', 200))}</i>\n`;
       msg += `━━━━━━━━━━━━━━━━━━━━\n`;
+      // تحليل عميق
+      if (deep) {
+        msg += `🔥 <b>ليش انتشرت:</b> ${htmlEscape(deep.viralReason.slice(0, 200))}\n`;
+        msg += `✍️ <b>نمط الأسلوب:</b> ${htmlEscape(deep.stylePattern.slice(0, 150))}\n`;
+        msg += `🎬 <b>تأثير الوسائط:</b> ${htmlEscape(deep.mediaImpact.slice(0, 150))}\n`;
+      }
       // عرض معلومات تشخيصية للوسائط
       if (diag) msg += `${diag}\n`;
-      msg += `<i>تم تخزين التحليل في العقل. شغّل 🧠 تشغيل كامل لاستخدامه.</i>`;
+      msg += `\n<i>✅ تم تخزين التحليل + قواعد الانتشار + أنماط الأسلوب في العقل.</i>`;
 
       await sendReply(chatId, msg);
-
-      // أرسل الوسائط إن وجدت
-      for (const mediaItem of m.slice(0, 4)) {
-        try {
-          if (mediaItem.type === 'photo') {
-            await sendTelegramPhoto(chatId, mediaItem.url, `📷 من تغريدة @${htmlEscape(a.username || '')}`);
-          } else if (mediaItem.type === 'video') {
-            await sendTelegramVideo(chatId, mediaItem.url, `🎬 من تغريدة @${htmlEscape(a.username || '')}`);
-          } else if (mediaItem.type === 'animated_gif') {
-            await sendTelegramAnimation(chatId, mediaItem.url, `🎞️ من تغريدة @${htmlEscape(a.username || '')}`);
-          }
-        } catch {}
-      }
       return;
     }
 
@@ -250,21 +244,6 @@ async function deliverScanResults(chatId: string, result: any) {
   lines.push('<i>انسخ المحتوى وانشره يدوياً على X</i>');
 
   await sendReply(chatId, lines.join('\n'));
-
-  // 3. أرسل الوسائط
-  for (const opp of opps) {
-    for (const media of (opp.media_urls || []).slice(0, 3)) {
-      try {
-        if (media.type === 'photo') {
-          await sendTelegramPhoto(chatId, media.url, `📷 للاقتباس مع التغريدة`);
-        } else if (media.type === 'video') {
-          await sendTelegramVideo(chatId, media.url, `🎬 للاقتباس مع التغريدة`);
-        } else if (media.type === 'animated_gif') {
-          await sendTelegramAnimation(chatId, media.url, `🎞️ للاقتباس مع التغريدة`);
-        }
-      } catch {}
-    }
-  }
 }
 
 // ═══ مساعدات ═══

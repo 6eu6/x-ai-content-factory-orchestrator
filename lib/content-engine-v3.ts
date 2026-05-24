@@ -65,32 +65,97 @@ export type ScanResult = {
 
 /**
  * يزحف حسابات X المحفوظة ويحلل تغريداتها
+ * + يحلل التغريدات المضافة يدوياً
  */
 export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10): Promise<ScanResult> {
   const supabase = supabaseAdmin();
   const username = optionalEnv('X_USERNAME', '30piq');
 
-  // 1. جلب الحسابات المحفوظة
-  const { data: accounts } = await supabase
-    .from('accounts')
-    .select('handle, username')
-    .eq('active', true)
-    .order('updated_at', { ascending: false })
-    .limit(maxAccounts);
+  // 1. جلب الحسابات المحفوظة — جرب عدة طرق
+  let accounts: any[] = [];
+  
+  // محاولة 1: مع active=true
+  try {
+    const { data } = await supabase
+      .from('accounts')
+      .select('handle, username, active')
+      .eq('active', true)
+      .order('updated_at', { ascending: false })
+      .limit(maxAccounts);
+    if (data?.length) accounts = data;
+  } catch {}
 
-  if (!accounts?.length) {
-    return emptyResult('لا توجد حسابات تعلم. أضف حسابات عبر زر "➕ إضافة حساب".');
+  // محاولة 2: بدون فلتر active (لو العمود غير موجود)
+  if (!accounts.length) {
+    try {
+      const { data } = await supabase
+        .from('accounts')
+        .select('handle, username')
+        .order('updated_at', { ascending: false })
+        .limit(maxAccounts);
+      if (data?.length) accounts = data;
+    } catch {}
   }
 
-  let totalAnalyzed = 0;
+  console.log(`[scanXAccounts] Found ${accounts.length} accounts to scan`);
+
+  // 1.5. جلب التغريدات المضافة يدوياً (من viral_tweet_analyses)
+  let manualTweetsCount = 0;
+  let allAnalyzed: any[] = [];
+  let allMedia: MediaFromTweet[] = [];
   let viralFound = 0;
-  const allAnalyzed: any[] = [];
-  const allMedia: MediaFromTweet[] = [];
+  let totalAnalyzed = 0;
+
+  try {
+    const { data: manualTweets } = await supabase
+      .from('viral_tweet_analyses')
+      .select('*')
+      .order('analyzed_at', { ascending: false })
+      .limit(50);
+    
+    if (manualTweets?.length) {
+      manualTweetsCount = manualTweets.length;
+      for (const t of manualTweets) {
+        totalAnalyzed++;
+        const mediaTypes = (t.media_type || '').split(',').filter(Boolean);
+        const tweetMedia: MediaFromTweet[] = mediaTypes.map((mt: string) => ({
+          type: mt as 'photo' | 'video' | 'animated_gif',
+          url: '',
+          alt_text: ''
+        }));
+        
+        if (t.engagement_score > 20 || t.engagement_per_1k_followers > 5) {
+          viralFound++;
+        }
+        
+        allAnalyzed.push({
+          tweet_id: t.tweet_id,
+          tweet_url: t.tweet_url,
+          username: t.username,
+          text: t.text,
+          score: t.engagement_score,
+          engagement_per_1k_followers: t.engagement_per_1k_followers,
+          metrics: t.metrics || {},
+          has_media: t.has_media,
+          media: tweetMedia,
+          has_question: (t.text || '').includes('?'),
+          is_reply: t.tweet_type === 'reply',
+          handle: t.username
+        });
+        
+        allMedia.push(...tweetMedia);
+      }
+      console.log(`[scanXAccounts] Loaded ${manualTweetsCount} manually analyzed tweets`);
+    }
+  } catch (e: any) {
+    console.error(`[scanXAccounts] Failed to load manual tweets: ${e.message}`);
+  }
 
   // 2. زحف كل حساب
   for (const account of accounts.slice(0, maxAccounts)) {
     try {
       const handle = account.handle || account.username;
+      console.log(`[scanXAccounts] Scanning @${handle}...`);
       const tweets = await getXUserTimeline(handle, tweetsPerAccount, true);
 
       for (const tweet of tweets) {
@@ -233,7 +298,7 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10): Pro
   const opportunities = await discoverOpportunities(allAnalyzed, allMedia);
 
   return {
-    accounts_scanned: accounts.length,
+    accounts_scanned: accounts.length + manualTweetsCount,
     tweets_analyzed: totalAnalyzed,
     viral_tweets_found: viralFound,
     opportunities,
@@ -650,6 +715,101 @@ ${topRules.map(r => `- ${r.rule}`).join('\n')}
 }
 
 /**
+ * تحليل عميق لنمط الانتشار — يكتشف ليش التغريدة انتشرت
+ * ينتج: سبب الانتشار، نمط الأسلوب، كيف نطبقه على @30piq
+ */
+function analyzeViralPatterns(tweet: any, media: MediaFromTweet[], user: any): {
+  viralReason: string;
+  stylePattern: string;
+  adaptation: string;
+  mediaImpact: string;
+} {
+  const text = tweet.text || '';
+  const metrics = tweet.public_metrics || {};
+  const followers = user?.followers_count || 1;
+  const score = scoreXTweet(tweet);
+  
+  // ═══ اكتشاف سبب الانتشار ═══
+  const viralReasons: string[] = [];
+  
+  // 1. تفاعل عالي نسبة للمتابعين
+  const likeToFollowers = (metrics.like_count || 0) / followers;
+  if (likeToFollowers > 0.1) viralReasons.push('Extremely high engagement-to-follower ratio — content resonated far beyond existing audience');
+  else if (likeToFollowers > 0.01) viralReasons.push('Strong engagement-to-follower ratio — content reached beyond core audience');
+  
+  // 2. نسبة الردود العالية = نقاش
+  const replyRatio = (metrics.reply_count || 0) / Math.max(metrics.like_count || 1, 1);
+  if (replyRatio > 0.5) viralReasons.push('High reply ratio — sparked intense discussion/debate');
+  else if (replyRatio > 0.2) viralReasons.push('Good reply ratio — encouraged conversation');
+  
+  // 3. نسبة الريتويت = محتوى قابل للمشاركة
+  const rtRatio = (metrics.retweet_count || 0) / Math.max(metrics.like_count || 1, 1);
+  if (rtRatio > 0.5) viralReasons.push('Very high retweet ratio — highly shareable/relatable content');
+  else if (rtRatio > 0.25) viralReasons.push('Good retweet ratio — content worth amplifying');
+  
+  // 4. نسبة الاقتباس = رأي مثير
+  const quoteRatio = (metrics.quote_count || 0) / Math.max(metrics.like_count || 1, 1);
+  if (quoteRatio > 0.3) viralReasons.push('High quote ratio — strong opinion/perspective that people wanted to comment on');
+  
+  // 5. البوكمارك = محتوى مفيد
+  const bookmarkRatio = (metrics.bookmark_count || 0) / Math.max(metrics.like_count || 1, 1);
+  if (bookmarkRatio > 0.15) viralReasons.push('High bookmark ratio — practical/valuable content people want to save');
+  
+  // 6. أنماط المحتوى
+  if (text.includes('?')) viralReasons.push('Contains a question — drives replies and engagement');
+  if (/(\d+)%|(\d+)\s*(x|times|طرق|نصائح|أسباب|حيل)/i.test(text)) viralReasons.push('Contains numbers/percentages — specific claims drive engagement');
+  if (text.length < 100) viralReasons.push('Short and punchy — brief content gets more reads');
+  if (text.includes('\n\n') || text.split('\n').length > 3) viralReasons.push('Multi-line formatting — structured content is easier to read');
+  if (/^["\u201C\u201D]/.test(text.trim())) viralReasons.push('Opens with a quote — hooks attention immediately');
+  if (/contrarian|unpopular opinion|hot take|الرأي الآخر/i.test(text)) viralReasons.push('Contrarian/unpopular opinion — drives debate and quote tweets');
+  if (media.length > 0) {
+    const mediaTypes = media.map(m => m.type === 'photo' ? 'photo' : m.type === 'video' ? 'video' : 'GIF');
+    viralReasons.push(`Includes ${mediaTypes.join(' + ')} — visual content gets significantly more engagement`);
+  }
+  if (metrics.view_count && metrics.view_count > 1000000) viralReasons.push('Massive view count — algorithm amplified this content');
+  
+  // ═══ اكتشاف نمط الأسلوب ═══
+  const stylePatterns: string[] = [];
+  
+  // طول التغريدة
+  if (text.length < 50) stylePatterns.push('Ultra-short statement');
+  else if (text.length < 140) stylePatterns.push('Concise tweet');
+  else if (text.length < 280) stylePatterns.push('Standard-length tweet');
+  else stylePatterns.push('Long-form thread-style');
+  
+  // تنسيق
+  if (/^\d+[\.\)]/.test(text.trim())) stylePatterns.push('Numbered list format');
+  if (text.includes('→') || text.includes('➜') || text.includes('=>')) stylePatterns.push('Uses arrow formatting');
+  if (text.includes('\n•') || text.includes('\n-')) stylePatterns.push('Bullet-point format');
+  
+  // نبرة
+  if (/!{2,}/.test(text)) stylePatterns.push('Emphatic/exclamatory tone');
+  if (text === text.toUpperCase() && text.length > 10) stylePatterns.push('ALL CAPS emphasis');
+  if (/👇|🧵|💡|⚡|🔥|🚀/.test(text)) stylePatterns.push('Uses attention-grabbing emojis');
+  
+  // بناء السرد
+  if (/^(imagine|picture this|think about|تصور|تخيل)/i.test(text)) stylePatterns.push('Story/opener hook pattern');
+  if (/^(the|this|that|every|most|ال|هذا|ذلك)/i.test(text.trim())) stylePatterns.push('Direct statement opener');
+  if (text.includes('\n\n')) stylePatterns.push('Double line-break for emphasis/spacing');
+  
+  const viralReason = viralReasons.length > 0 
+    ? viralReasons.slice(0, 3).join('. ') + '.'
+    : 'High overall engagement metrics suggest strong content resonance.';
+  
+  const stylePattern = stylePatterns.length > 0
+    ? `Viral style: ${stylePatterns.join(' + ')}. Tweet by @${user?.username || 'unknown'} with ${score} engagement score.`
+    : `Standard tweet format with ${score} engagement score from @${user?.username || 'unknown'}.`;
+  
+  const adaptation = `For @30piq: Apply this viral pattern by ${viralReasons.length > 0 ? viralReasons[0].toLowerCase().replace('—', 'by').replace('—', 'by') : 'matching content resonance'}. ${stylePatterns.length > 0 ? 'Use ' + stylePatterns[0].toLowerCase() + ' format.' : ''} ${media.length > 0 ? 'Include ' + media.map(m => m.type).join('/') + ' media.' : ''}`;
+  
+  const mediaImpact = media.length > 0
+    ? `This tweet includes ${media.map(m => m.type).join(' + ')} media. Visual content typically increases engagement by 2-5x on X.`
+    : 'This tweet is text-only. Adding relevant media could boost engagement significantly.';
+  
+  return { viralReason, stylePattern, adaptation, mediaImpact };
+}
+
+/**
  * يزحف تغريدة واحدة بالمعرف (للإضافة اليدوية)
  */
 export async function scanSingleTweet(tweetUrl: string): Promise<{
@@ -659,6 +819,12 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
   opportunity?: ContentOpportunity;
   error?: string;
   diagInfo?: string;
+  deepAnalysis?: {
+    viralReason: string;
+    stylePattern: string;
+    adaptation: string;
+    mediaImpact: string;
+  };
 }> {
   try {
     const match = tweetUrl.match(/\/status\/(\d+)/);
@@ -723,6 +889,9 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
     // نمرر الرد الكامل (json) لدالة الاستخراج عشان تفحص includes.media
     const media = extractMediaFromTweet(normalized, json);
 
+    // ═══ تحليل عميق: ليش انتشرت؟ + نمط الأسلوب + الوسائط ═══
+    const deepAnalysis = analyzeViralPatterns(normalized, media, user);
+
     // معلومات تشخيصية للرد
     const diagKeys = mediaRelatedKeys.length > 0 ? mediaRelatedKeys : ['NONE'];
     const diagInfo = `🔍 تشخيص: مفاتيح الوسائط=[${diagKeys.join(', ')}] | وسائط مستخرجة=${media.length}`;
@@ -745,11 +914,73 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
       }, { onConflict: 'tweet_id' });
     } catch {}
 
+    // ═══ خزّن التحليل العميق في العقل مباشرة ═══
+    try {
+      // 1. قاعدة خوارزمية: نمط الانتشار
+      if (deepAnalysis.viralReason) {
+        await insertIfMissing(supabase, 'x_algorithm_learning_rules',
+          { rule_type: 'viral_pattern', rule: deepAnalysis.viralReason },
+          {
+            rule_type: 'viral_pattern',
+            rule: deepAnalysis.viralReason,
+            evidence: `Tweet @${username} (${score} engagement, ${analysis.engagement_per_1k_followers}/1K): "${analysis.text.slice(0, 100)}"`,
+            source_type: 'manual_tweet_analysis',
+            source_url: tweetUrl,
+            applies_to: 'content_scoring,engagement_prediction',
+            confidence_score: Math.min(10, Math.max(3, Math.round(score / 50))),
+            status: 'active',
+            test_run: false,
+            updated_at: new Date().toISOString()
+          }
+        );
+      }
+
+      // 2. نمط أسلوب: كيف كُتبت التغريدة
+      if (deepAnalysis.stylePattern) {
+        await insertIfMissing(supabase, 'viral_style_patterns',
+          { pattern_name: deepAnalysis.stylePattern.slice(0, 100) },
+          {
+            pattern_name: deepAnalysis.stylePattern.slice(0, 100),
+            pattern_description: deepAnalysis.stylePattern,
+            adaptation_for_30piq: deepAnalysis.adaptation || '',
+            evidence: `@${username}: "${analysis.text.slice(0, 80)}" → ${score} engagement`,
+            source_type: 'manual_tweet_analysis',
+            confidence_score: Math.min(10, Math.max(3, Math.round(score / 30))),
+            status: 'active',
+            updated_at: new Date().toISOString()
+          }
+        );
+      }
+
+      // 3. قاعدة وسائط: نوع الوسائط وتأثيرها
+      if (media.length > 0) {
+        const mediaRule = `Tweets with ${media.map(m => m.type).join('+')} get high engagement. @${username} used ${media.map(m => m.type === 'photo' ? 'photo' : m.type === 'video' ? 'video' : 'GIF').join('+')} and got ${score} engagement (${analysis.engagement_per_1k_followers}/1K followers).`;
+        await insertIfMissing(supabase, 'x_algorithm_learning_rules',
+          { rule_type: 'media_pattern', rule: mediaRule },
+          {
+            rule_type: 'media_pattern',
+            rule: mediaRule,
+            evidence: `@${username}: ${media.map(m => m.type).join(',')} → ${score} engagement`,
+            source_type: 'manual_tweet_analysis',
+            source_url: tweetUrl,
+            applies_to: 'content_scoring,media_strategy',
+            confidence_score: Math.min(10, Math.max(4, Math.round(score / 40))),
+            status: 'active',
+            test_run: false,
+            updated_at: new Date().toISOString()
+          }
+        );
+      }
+    } catch (e: any) {
+      console.error('[scanSingleTweet] Brain storage failed:', e.message);
+    }
+
     return {
       ok: true,
       analysis: { ...analysis, score },
       media,
       diagInfo,
+      deepAnalysis,
       opportunity: score > 10 ? {
         type: 'quote',
         source_tweet_url: tweetUrl,
