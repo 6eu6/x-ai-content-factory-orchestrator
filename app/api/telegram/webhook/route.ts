@@ -177,8 +177,9 @@ async function handleMessage(chatId: string, userId: string, username: string, t
     if (text === '🧩 محتويات العقل') {
       await sendReply(chatId, '⏳ جاري استرجاع محتويات العقل...');
       try {
-        const brainReport = await getBrainContents(supabase);
-        await sendReply(chatId, brainReport);
+        const summary = await getBrainSummary(supabase);
+        const viewerUrl = `${optionalEnv('VERCEL_URL', 'https://x-ai-content-factory-orchestrator.vercel.app')}/api/brain-viewer`;
+        await sendReply(chatId, `${summary}\n\n🔗 <a href="${viewerUrl}">عرض تفصيلي في المتصفح</a>\n📊 <a href="${viewerUrl}?format=json">بيانات خام JSON</a>`);
       } catch (e: any) {
         await sendReply(chatId, `❌ فشل الاسترجاع: ${htmlEscape(e.message || '')}`);
       }
@@ -190,67 +191,133 @@ async function handleMessage(chatId: string, userId: string, username: string, t
       await sendReply(chatId, '⏳ جاري فحص الحساب وتحليل الأداء...');
 
       try {
-        const { scanAccountPerformance } = await import('../../../../lib/performance-feedback');
         const username = optionalEnv('X_USERNAME', '30piq');
-        const result = await scanAccountPerformance(10, username);
 
-        // ═══ عرض النتائج مباشرة — مو يعتمد على allowedChatId ═══
-        if (!result.ok) {
-          await sendReply(chatId, `❌ فشل الفحص: ${htmlEscape(result.brain_summary || 'خطأ غير معروف')}`);
-        } else if (result.scanned_tweets === 0) {
-          await sendReply(chatId, 'ℹ️ لم يتم العثور على تغريدات في حسابك. انشر محتوى أول ثم أعد الفحص.');
-        } else {
-          const lines: string[] = [];
-          lines.push(`📊 <b>تقرير الأداء</b> — @${username}`);
-          lines.push('━━━━━━━━━━━━━━━━━━━━');
-          lines.push(`📝 تغريدات مُفحوصة: ${result.scanned_tweets}`);
-
-          const winners = result.performance_analysis.filter((a: any) => a.verdict === 'high_performer');
-          const losers = result.performance_analysis.filter((a: any) => a.verdict === 'underperformer');
-          const avg = result.performance_analysis.length > 0
-            ? (result.performance_analysis.reduce((s: number, a: any) => s + a.performance_score, 0) / result.performance_analysis.length).toFixed(2)
-            : '0';
-
-          lines.push(`✅ ناجحة: ${winners.length} | ⚠️ عادية: ${result.scanned_tweets - winners.length - losers.length} | ❌ ضعيفة: ${losers.length}`);
-          lines.push(`📈 متوسط الأداء: ${avg}`);
-          lines.push('━━━━━━━━━━━━━━━━━━━━');
-
-          if (winners.length > 0) {
-            lines.push('\n🏆 <b>التغريدات الناجحة:</b>');
-            for (const w of winners.slice(0, 3)) {
-              lines.push(`  📌 ${htmlEscape(shortText(w.text_preview, 80))}`);
-              if (w.success_factors?.length) lines.push(`     ✦ ${htmlEscape(w.success_factors[0].slice(0, 80))}`);
-              lines.push(`     نقاط: ${w.performance_score} | ❤️ ${w.metrics.likes} 🔁 ${w.metrics.retweets} 🔖 ${w.metrics.bookmarks}`);
-            }
-          }
-
-          if (losers.length > 0) {
-            lines.push('\n📉 <b>التغريدات الضعيفة:</b>');
-            for (const l of losers.slice(0, 3)) {
-              lines.push(`  📌 ${htmlEscape(shortText(l.text_preview, 80))}`);
-              if (l.failure_factors?.length) lines.push(`     ✦ ${htmlEscape(l.failure_factors[0].slice(0, 80))}`);
-              lines.push(`     نقاط: ${l.performance_score} | ❤️ ${l.metrics.likes} 🔁 ${l.metrics.retweets} 🔖 ${l.metrics.bookmarks}`);
-            }
-          }
-
-          if (result.learning_updates?.length > 0) {
-            lines.push(`\n🧠 <b>تحديثات التعلم:</b> ${result.learning_updates.length}`);
-            const boosts = result.learning_updates.filter((u: any) => u.type === 'rule_boost').length;
-            const decays = result.learning_updates.filter((u: any) => u.type === 'rule_decay').length;
-            const antiPatterns = result.learning_updates.filter((u: any) => u.type === 'anti_pattern').length;
-            const newPatterns = result.learning_updates.filter((u: any) => u.type === 'new_pattern').length;
-            if (boosts) lines.push(`  ⬆️ تعزيز قواعد: ${boosts}`);
-            if (decays) lines.push(`  ⬇️ تضعيف قواعد: ${decays}`);
-            if (newPatterns) lines.push(`  ✨ أنماط جديدة: ${newPatterns}`);
-            if (antiPatterns) lines.push(`  🚫 أنماط مضادة: ${antiPatterns}`);
-          }
-
-          lines.push('\n━━━━━━━━━━━━━━━━━━━━');
-          lines.push(`<i>تم تحديث العقل بناءً على الأداء الفعلي.</i>`);
-
-          await sendReply(chatId, lines.join('\n'));
+        // ═══ خطوة 1: جلب التغريدات ═══
+        let tweets: any[] = [];
+        try {
+          const { getXUserTimeline, scoreXTweet } = await import('../../../../lib/x');
+          tweets = await getXUserTimeline(username, 10, true);
+        } catch (fetchErr: any) {
+          await sendReply(chatId, `❌ فشل جلب التغريدات: ${htmlEscape(fetchErr.message || 'خطأ في الاتصال بـ X')}`);
+          return;
         }
+
+        if (!tweets.length) {
+          await sendReply(chatId, 'ℹ️ لم يتم العثور على تغريدات في حسابك. انشر محتوى أول ثم أعد الفحص.');
+          return;
+        }
+
+        // ═══ خطوة 2: تحليل سريع بدون AI (مقاييس فقط) ═══
+        const { scoreXTweet } = await import('../../../../lib/x');
+        const analyses: any[] = [];
+
+        for (const tweet of tweets) {
+          const m = tweet.public_metrics || {};
+          const views = m.view_count || 0;
+          const likes = m.like_count || 0;
+          const replies = m.reply_count || 0;
+          const retweets = m.retweet_count || 0;
+          const quotes = m.quote_count || 0;
+          const bookmarks = m.bookmark_count || 0;
+
+          const engagementScore = scoreXTweet(tweet);
+          const viewAdjustedScore = views > 0 ? (engagementScore / views) * 1000 : 0;
+
+          let verdict = 'average';
+          if (viewAdjustedScore > 50 || (likes > 5 && bookmarks > 2)) verdict = 'high_performer';
+          if (viewAdjustedScore < 5 && views > 100) verdict = 'underperformer';
+
+          analyses.push({
+            text_preview: (tweet.text || '').slice(0, 200),
+            tweet_url: `https://x.com/${username}/status/${tweet.id}`,
+            performance_score: Math.round(viewAdjustedScore * 100) / 100,
+            verdict,
+            metrics: { views, likes, replies, retweets, quotes, bookmarks },
+            success_factors: [],
+            failure_factors: []
+          });
+        }
+
+        // ═══ خطوة 3: تحليل AI (محاولة — لو فشل نكمل بدونها) ═══
+        try {
+          const { callModel, parseModelJson } = await import('../../../../lib/model-router');
+          const analysisContext = analyses.map(a => ({
+            text: a.text_preview,
+            verdict: a.verdict,
+            score: a.performance_score,
+            metrics: a.metrics
+          }));
+
+          const aiResponse = await callModel('performance_analysis', [
+            {
+              role: 'system',
+              content: 'You are an X/Twitter growth analyst. Analyze tweet performance briefly. Output valid JSON array only.'
+            },
+            {
+              role: 'user',
+              content: `Analyze these tweets from @${username}. For each, give success/failure factors:\n${JSON.stringify(analysisContext, null, 2)}\n\nReturn JSON: [{"text_preview":"...","success_factors":["..."],"failure_factors":["..."]}]`
+            }
+          ]);
+
+          const parsed = parseModelJson(aiResponse);
+          if (Array.isArray(parsed)) {
+            for (let i = 0; i < analyses.length && i < parsed.length; i++) {
+              analyses[i].success_factors = parsed[i]?.success_factors || [];
+              analyses[i].failure_factors = parsed[i]?.failure_factors || [];
+            }
+          }
+        } catch (aiErr: any) {
+          console.log('[Performance Report] AI analysis failed, continuing without it:', aiErr.message);
+        }
+
+        // ═══ خطوة 4: عرض النتائج ═══
+        const winners = analyses.filter((a: any) => a.verdict === 'high_performer');
+        const losers = analyses.filter((a: any) => a.verdict === 'underperformer');
+        const avg = analyses.length > 0
+          ? (analyses.reduce((s: number, a: any) => s + a.performance_score, 0) / analyses.length).toFixed(2)
+          : '0';
+
+        const lines: string[] = [];
+        lines.push(`📊 <b>تقرير الأداء</b> — @${username}`);
+        lines.push('━━━━━━━━━━━━━━━━━━━━');
+        lines.push(`📝 تغريدات مُفحوصة: ${tweets.length}`);
+        lines.push(`✅ ناجحة: ${winners.length} | ⚠️ عادية: ${tweets.length - winners.length - losers.length} | ❌ ضعيفة: ${losers.length}`);
+        lines.push(`📈 متوسط الأداء: ${avg}`);
+        lines.push('━━━━━━━━━━━━━━━━━━━━');
+
+        if (winners.length > 0) {
+          lines.push('\n🏆 <b>التغريدات الناجحة:</b>');
+          for (const w of winners.slice(0, 3)) {
+            lines.push(`  📌 ${htmlEscape(shortText(w.text_preview, 80))}`);
+            if (w.success_factors?.length) lines.push(`     ✦ ${htmlEscape(w.success_factors[0].slice(0, 80))}`);
+            lines.push(`     نقاط: ${w.performance_score} | ❤️ ${w.metrics.likes} 🔁 ${w.metrics.retweets} 🔖 ${w.metrics.bookmarks}`);
+          }
+        }
+
+        if (losers.length > 0) {
+          lines.push('\n📉 <b>التغريدات الضعيفة:</b>');
+          for (const l of losers.slice(0, 3)) {
+            lines.push(`  📌 ${htmlEscape(shortText(l.text_preview, 80))}`);
+            if (l.failure_factors?.length) lines.push(`     ✦ ${htmlEscape(l.failure_factors[0].slice(0, 80))}`);
+            lines.push(`     نقاط: ${l.performance_score} | ❤️ ${l.metrics.likes} 🔁 ${l.metrics.retweets} 🔖 ${l.metrics.bookmarks}`);
+          }
+        }
+
+        lines.push('\n━━━━━━━━━━━━━━━━━━━━');
+        lines.push(`<i>تم التحليل. شغّل 🧠 تشغيل كامل لتعلم العقل من النتائج.</i>`);
+
+        await sendReply(chatId, lines.join('\n'));
+
+        // ═══ خطوة 5: تحديثات التعلم في الخلفية (بدون انتظار) ═══
+        try {
+          const { scanAccountPerformance } = await import('../../../../lib/performance-feedback');
+          // هذا يشغّل التحليل الكامل في الخلفية — لو فشل ما يأثر على التقرير المعروض
+          scanAccountPerformance(10, username).catch(() => {});
+        } catch {}
+
       } catch (e: any) {
+        console.error('[Performance Report] Fatal error:', e.message);
         await sendReply(chatId, `❌ فشل الفحص: ${htmlEscape(e.message || 'خطأ غير معروف')}`);
       }
       return;
@@ -354,135 +421,85 @@ async function deliverScanResults(chatId: string, result: any) {
   await sendReply(chatId, lines.join('\n'));
 }
 
-// ═══ استرجاع محتويات العقل ═══
+// ═══ ملخص محتويات العقل (قصير لتلقرام — التفاصيل في رابط المتصفح) ═══
 
-async function getBrainContents(supabase: any): Promise<string> {
+async function getBrainSummary(supabase: any): Promise<string> {
   const lines: string[] = [];
-  lines.push('🧩 <b>محتويات العقل</b>');
+  lines.push('🧩 <b>ملخص العقل</b>');
   lines.push('━━━━━━━━━━━━━━━━━━━━');
 
-  // 1. القواعد الخوارزمية — حسب النوع
-  const { data: algoRules } = await supabase
+  // إحصائيات سريعة
+  const { count: algoCount } = await supabase
     .from('x_algorithm_learning_rules')
-    .select('id, rule_type, rule, evidence, confidence_score, applies_to, status, source_type')
-    .eq('status', 'active')
-    .order('confidence_score', { ascending: false })
-    .limit(50);
+    .select('*', { count: 'exact', head: true })
+    .eq('status', 'active');
 
-  const algoRulesList = algoRules || [];
-  const totalAlgo = algoRulesList.length;
-
-  // تجميع حسب rule_type
-  const byType: Record<string, any[]> = {};
-  for (const r of algoRulesList) {
-    const t = r.rule_type || 'unknown';
-    if (!byType[t]) byType[t] = [];
-    byType[t].push(r);
-  }
-
-  lines.push(`\n📊 <b>القواعد الخوارزمية (${totalAlgo})</b>`);
-
-  const typeLabels: Record<string, string> = {
-    'precise_concept': '🎯 مفاهيم دقيقة',
-    'psychological_trigger': '🧠 آليات نفسية',
-    'viral_pattern': '🔥 أنماط انتشار',
-    'media_impact': '🎬 تأثير الوسائط',
-    'conversation_context': '💬 سياق المحادثة',
-    'viral_concept': '⚡ مفاهيم فيروسية',
-    'ranking': '📈 ترتيب',
-    'reply': '↩️ ردود',
-    'bookmark': '🔖 حفظ',
-    'safety': '🛡️ أمان'
-  };
-
-  for (const [type, rules] of Object.entries(byType)) {
-    const label = typeLabels[type] || `📌 ${type}`;
-    lines.push(`\n<b>${label} (${rules.length})</b>`);
-    for (const r of rules.slice(0, 8)) {
-      const conf = Number(r.confidence_score || 0).toFixed(1);
-      const ruleText = String(r.rule || '').slice(0, 120);
-      const evidenceText = String(r.evidence || '').slice(0, 80);
-      lines.push(`  ${conf}⭐ <i>${htmlEscape(ruleText)}</i>`);
-      if (evidenceText) lines.push(`     └ ${htmlEscape(evidenceText)}`);
-    }
-    if (rules.length > 8) lines.push(`  ... +${rules.length - 8} أكثر`);
-  }
-
-  // 2. أنماط الأسلوب
-  const { data: stylePatterns } = await supabase
+  const { count: styleCount } = await supabase
     .from('viral_style_patterns')
-    .select('id, pattern_name, pattern_type, pattern_description, why_it_works, adaptation_for_30piq, confidence_score, status')
-    .eq('status', 'active')
-    .order('confidence_score', { ascending: false })
-    .limit(20);
+    .select('*', { count: 'exact', head: true })
+    .eq('status', 'active');
 
-  const styleList = stylePatterns || [];
-  lines.push(`\n\n✍️ <b>أنماط الأسلوب (${styleList.length})</b>`);
-  for (const p of styleList.slice(0, 10)) {
-    const conf = Number(p.confidence_score || 0).toFixed(1);
-    const name = String(p.pattern_name || '').slice(0, 80);
-    const desc = String(p.pattern_description || '').slice(0, 100);
-    lines.push(`  ${conf}⭐ <b>${htmlEscape(name)}</b>`);
-    lines.push(`     ${htmlEscape(desc)}`);
-    if (p.adaptation_for_30piq) {
-      lines.push(`     → ${htmlEscape(String(p.adaptation_for_30piq).slice(0, 80))}`);
-    }
-  }
-  if (styleList.length > 10) lines.push(`  ... +${styleList.length - 10} أكثر`);
-
-  // 3. فرص MCP
-  const { data: mcpOpps } = await supabase
-    .from('mcp_opportunity_map')
-    .select('id, opportunity_area, mcp_use_case, confidence_score, status')
-    .eq('status', 'active')
-    .order('confidence_score', { ascending: false })
-    .limit(10);
-
-  const mcpList = mcpOpps || [];
-  if (mcpList.length > 0) {
-    lines.push(`\n\n🛠️ <b>فرص MCP (${mcpList.length})</b>`);
-    for (const m of mcpList) {
-      const conf = Number(m.confidence_score || 0).toFixed(1);
-      lines.push(`  ${conf}⭐ ${htmlEscape(String(m.opportunity_area || '').slice(0, 80))}`);
-      lines.push(`     └ ${htmlEscape(String(m.mcp_use_case || '').slice(0, 80))}`);
-    }
-  }
-
-  // 4. قواعد النظام
-  const { data: sysRules } = await supabase
+  const { count: sysCount } = await supabase
     .from('system_learning_rules')
-    .select('id, rule_type, rule, confidence_score, status')
-    .eq('status', 'active')
-    .order('confidence_score', { ascending: false })
-    .limit(10);
+    .select('*', { count: 'exact', head: true })
+    .eq('status', 'active');
 
-  const sysList = sysRules || [];
-  if (sysList.length > 0) {
-    lines.push(`\n\n⚙️ <b>قواعد النظام (${sysList.length})</b>`);
-    for (const s of sysList) {
-      const conf = Number(s.confidence_score || 0).toFixed(1);
-      lines.push(`  ${conf}⭐ ${htmlEscape(String(s.rule || '').slice(0, 100))}`);
+  const { count: mcpCount } = await supabase
+    .from('mcp_opportunity_map')
+    .select('*', { count: 'exact', head: true })
+    .eq('status', 'active');
+
+  const { count: antiCount } = await supabase
+    .from('x_algorithm_learning_rules')
+    .select('*', { count: 'exact', head: true })
+    .eq('status', 'anti_pattern');
+
+  const totalAlgo = algoCount || 0;
+  const totalStyle = styleCount || 0;
+  const totalSys = sysCount || 0;
+  const totalMcp = mcpCount || 0;
+  const totalAnti = antiCount || 0;
+
+  lines.push(`📊 القواعد الخوارزمية: ${totalAlgo}`);
+  lines.push(`✍️ أنماط الأسلوب: ${totalStyle}`);
+  lines.push(`⚙️ قواعد النظام السببية: ${totalSys}`);
+  lines.push(`🛠️ فرص MCP: ${totalMcp}`);
+  lines.push(`🚫 أنماط مضادة: ${totalAnti}`);
+  lines.push(`━━━━━━━━━━━━━━━━━━━━`);
+
+  // أعلى 3 قواعد فقط
+  if (totalAlgo > 0) {
+    const { data: topRules } = await supabase
+      .from('x_algorithm_learning_rules')
+      .select('rule_type, rule, confidence_score')
+      .eq('status', 'active')
+      .order('confidence_score', { ascending: false })
+      .limit(3);
+
+    lines.push('\n🏆 <b>أعلى القواعد:</b>');
+    for (const r of (topRules || [])) {
+      const conf = Number(r.confidence_score || 0).toFixed(1);
+      lines.push(`  ${conf}⭐ ${htmlEscape(String(r.rule || '').slice(0, 80))}`);
     }
   }
 
-  // 5. ملخص التطبيق
-  lines.push('\n\n━━━━━━━━━━━━━━━━━━━━');
-  lines.push('🤖 <b>كيف يطبّق الذكاء الاصطناعي التعلم:</b>');
-  lines.push('');
-  lines.push('<b>عند إنشاء تغريدة:</b>');
-  lines.push('• يأخذ أعلى 5 قواعد خوارزمية');
-  lines.push('• يأخذ أعلى 3 أنماط أسلوبية');
-  lines.push('• يدمجها في برومبت التوليد');
-  lines.push('');
-  lines.push('<b>عند إنشاء ثريد:</b>');
-  lines.push('• يأخذ أعلى 5 قواعد + 5 أنماط');
-  lines.push('• يبني الثريد على الأساس المتعلم');
-  lines.push('');
-  lines.push('<b>عند إنشاء فرص تفاعل:</b>');
-  lines.push('• يأخذ أعلى 10 قواعد + 10 أنماط');
-  lines.push('• يصيغ اقتباسات/ردود حسب القواعد');
+  // أعلى 3 أنماط
+  if (totalStyle > 0) {
+    const { data: topPatterns } = await supabase
+      .from('viral_style_patterns')
+      .select('pattern_name, confidence_score')
+      .eq('status', 'active')
+      .order('confidence_score', { ascending: false })
+      .limit(3);
 
-  if (totalAlgo === 0 && styleList.length === 0) {
+    lines.push('\n✍️ <b>أعلى الأنماط:</b>');
+    for (const p of (topPatterns || [])) {
+      const conf = Number(p.confidence_score || 0).toFixed(1);
+      lines.push(`  ${conf}⭐ ${htmlEscape(String(p.pattern_name || '').slice(0, 60))}`);
+    }
+  }
+
+  if (totalAlgo === 0 && totalStyle === 0) {
     lines.push('');
     lines.push('⚠️ <b>العقل فارغ!</b>');
     lines.push('شغّل 🧠 تشغيل كامل أو أضف تغريدات لتعليم العقل.');
