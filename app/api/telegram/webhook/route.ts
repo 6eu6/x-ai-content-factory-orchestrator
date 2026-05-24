@@ -2,7 +2,7 @@ import { waitUntil } from '@vercel/functions';
 import { optionalEnv } from '../../../../lib/env';
 import { supabaseAdmin } from '../../../../lib/supabase';
 import { assertTelegramChat, extractHandle, extractHandles, extractTweetUrl, htmlEscape, MAIN_KEYBOARD, sendTelegramMessage, shortText } from '../../../../lib/telegram';
-import { scanXAccounts, scanSingleTweet } from '../../../../lib/content-engine-v3';
+import { scanXAccounts, scanSingleTweet, generateProactiveContent } from '../../../../lib/content-engine-v3';
 
 /**
  * Telegram Webhook Handler v3.1 — تحليل حقيقي بالذكاء الاصطناعي
@@ -202,6 +202,46 @@ async function handleMessage(chatId: string, userId: string, username: string, t
 
       // لا نرسل أي وسائط (صور/فيديو) لتلقرام — فقط التحليل
       await sendReply(chatId, msg);
+      return;
+    }
+
+    // ═══ اقتراح محتوى ═══
+    if (text === '✍️ اقتراح محتوى') {
+      await setFlow(supabase, chatId, 'awaiting_content_type');
+      await sendReply(chatId, 'اختر نوع المحتوى:\n\n1️⃣ تغريدة واحدة\n2️⃣ ثريد (3-5 تغريدات)\n3️⃣ مقال قصير\n\nأرسل الرقم أو الاسم.');
+      return;
+    }
+
+    if (state?.current_flow === 'awaiting_content_type') {
+      await clearFlow(supabase, chatId);
+      const typeMap: Record<string, 'tweet' | 'thread' | 'article'> = {
+        '1': 'tweet', '2': 'thread', '3': 'article',
+        'تغريدة': 'tweet', 'ثريد': 'thread', 'مقال': 'article',
+        'واحد': 'tweet', 'تغريدات': 'thread',
+      };
+      const contentType = typeMap[text.trim().toLowerCase()] || 'thread';
+
+      await sendReply(chatId, `⏳ جاري توليد ${contentType === 'tweet' ? 'تغريدة' : contentType === 'thread' ? 'ثريد' : 'مقال'} من العقل...`);
+
+      const result = await generateProactiveContent(contentType);
+      if (!result.ok) {
+        await sendReply(chatId, `❌ ${result.error}`);
+        return;
+      }
+
+      const lines: string[] = [];
+      const typeLabel = contentType === 'tweet' ? '📝 تغريدة' : contentType === 'thread' ? '🧵 ثريد' : '📄 مقال';
+      lines.push(`${typeLabel} <b>مقترح من العقل</b>`);
+      lines.push(`━━━━━━━━━━━━━━━━━━━━`);
+      lines.push(result.content!.split('---').map((t: string, i: number) => {
+        if (contentType === 'thread') return `${i + 1}/ ${t.trim()}`;
+        return t.trim();
+      }).join('\n\n'));
+      lines.push(`━━━━━━━━━━━━━━━━━━━━`);
+      lines.push(`🧠 مفاهيم مستخدمة: ${result.concepts_used} | أنماط: ${result.patterns_used}`);
+      lines.push(`<i>انسخ المحتوى وانشره يدوياً على X</i>`);
+
+      await sendReply(chatId, lines.join('\n'));
       return;
     }
 

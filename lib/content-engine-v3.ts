@@ -91,6 +91,7 @@ export type DeepAnalysis = {
 export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10): Promise<ScanResult> {
   const supabase = supabaseAdmin();
   const debugLog: string[] = [];
+  let brainUpdates = { algorithmRules: 0, stylePatterns: 0, mcpOpportunities: 0 };
 
   // 1. جلب الحسابات المحفوظة — جرب عدة طرق مع تسجيل الأخطاء
   let accounts: any[] = [];
@@ -215,37 +216,53 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10): Pro
         const score = scoreXTweet(tweet);
         const media = extractMediaFromTweet(tweet);
 
-        // خزّن في viral_tweet_analyses
-        if (score > 20 || analysis.engagement_per_1k_followers > 5) {
-          viralFound++;
+        // ═══ تحليل AI عميق لكل تغريدة فيروسية ═══
+        let deepAnalysis: any = null;
+        if (score > 15) {
           try {
-            await supabase.from('viral_tweet_analyses').upsert({
-              tweet_id: String(analysis.tweet_id || tweet.id || ''),
-              tweet_url: analysis.tweet_url || '',
-              creator_handle: handle,
-              tweet_text: (analysis.text || '').slice(0, 500),
-              engagement_score: score,
-              engagement_per_1k_followers: analysis.engagement_per_1k_followers,
-              tweet_type: media.length > 0 ? 'media' : (analysis.is_reply ? 'reply' : 'original'),
-              metrics: analysis.metrics
-            }, { onConflict: 'tweet_id' });
-          } catch (dbErr: any) {
-            debugLog.push(`[scan] upsert viral error: ${dbErr.message}`);
+            const m: any = tweet.public_metrics || {};
+            const aiResult = await callModel('learning_extraction' as TaskType, [
+              {
+                role: 'system',
+                content: `You are a viral content analyst. Analyze WHY this tweet performed well and extract transferable patterns. Be specific and actionable. Output valid JSON only.`
+              },
+              {
+                role: 'user',
+                content: `Analyze this tweet from @${handle}:
+Text: "${(analysis.text || '').slice(0, 400)}"
+Type: ${media.length > 0 ? 'media' : (analysis.is_reply ? 'reply' : 'original')}
+Metrics: likes=${m.like_count||0} replies=${m.reply_count||0} retweets=${m.retweet_count||0} quotes=${m.quote_count||0} bookmarks=${m.bookmark_count||0} views=${m.view_count||0}
+Score: ${score}
+
+Extract:
+1. "viral_reason": WHY this tweet went viral (specific mechanism, not generic)
+2. "style_pattern": The writing style technique used (hook, structure, voice)
+3. "media_impact": How media/visuals contributed (or "text_only" if no media)
+4. "timing_insight": What about the timing or context helped
+5. "tweet_type_insight": What about the tweet type (original/reply/quote) helped
+6. "engagement_quality": Quality of engagement (genuine discussion vs vanity metrics)
+7. "adaptation": How to apply this EXACT mechanism for @30piq (specific, not generic)
+8. "hook_formula": The exact hook formula used (if identifiable)
+9. "psychological_trigger": What psychological trigger made people engage
+10. "confidence": 1-10 how confident you are in this analysis
+
+JSON format: {"viral_reason":"...","style_pattern":"...","media_impact":"...","timing_insight":"...","tweet_type_insight":"...","engagement_quality":"...","adaptation":"...","hook_formula":"...","psychological_trigger":"...","confidence":N}`
+              }
+            ], { temperature: 0.1, max_tokens: 1500, response_format: { type: 'json_object' } });
+
+            deepAnalysis = parseModelJson(aiResult);
+            debugLog.push(`[scan] @${handle}: deep analysis OK (conf: ${deepAnalysis?.confidence})`);
+          } catch (aiErr: any) {
+            debugLog.push(`[scan] @${handle}: deep analysis failed: ${aiErr.message}`);
           }
-
-          allAnalyzed.push({
-            ...analysis,
-            score,
-            media,
-            handle
-          });
-
-          allMedia.push(...media);
         }
 
-        // خزّن كمان تغريدات بدون فيروسية عشان تحليل الأنماط
+        // خزّن في viral_tweet_analyses — كل التغريدات مو بس الفيروسية
+        const isViral = score > 20 || analysis.engagement_per_1k_followers > 5;
+        if (isViral) viralFound++;
+
         try {
-          await supabase.from('viral_tweet_analyses').upsert({
+          const upsertData: any = {
             tweet_id: String(analysis.tweet_id || tweet.id || ''),
             tweet_url: analysis.tweet_url || '',
             creator_handle: handle,
@@ -254,9 +271,106 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10): Pro
             engagement_per_1k_followers: analysis.engagement_per_1k_followers,
             tweet_type: media.length > 0 ? 'media' : (analysis.is_reply ? 'reply' : 'original'),
             metrics: analysis.metrics
-          }, { onConflict: 'tweet_id' });
+          };
+
+          // خزّن التحليل العميق في analysis_payload
+          if (deepAnalysis) {
+            upsertData.analysis_payload = deepAnalysis;
+            upsertData.hook_formula = deepAnalysis.hook_formula || null;
+            upsertData.why_bookmarks = deepAnalysis.engagement_quality || null;
+            upsertData.adaptation_for_30piq = deepAnalysis.adaptation || null;
+            upsertData.tone = deepAnalysis.style_pattern || null;
+            upsertData.format_pattern = deepAnalysis.tweet_type_insight || null;
+          }
+
+          await supabase.from('viral_tweet_analyses').upsert(upsertData, { onConflict: 'tweet_id' });
         } catch (dbErr: any) {
-          debugLog.push(`[scan] upsert non-viral error: ${dbErr.message}`);
+          debugLog.push(`[scan] upsert error: ${dbErr.message}`);
+        }
+
+        if (isViral) {
+          allAnalyzed.push({
+            ...analysis,
+            score,
+            media,
+            handle,
+            deepAnalysis
+          });
+        } else {
+          // حتى التغريدات العادية خذها للتحليل
+          allAnalyzed.push({
+            ...analysis,
+            score,
+            media,
+            handle,
+            deepAnalysis
+          });
+        }
+
+        allMedia.push(...media);
+
+        // ═══ تعلم مفاهيم من كل تغريدة فيروسية فوراً ═══
+        if (isViral && deepAnalysis) {
+          try {
+            // خزّن سبب الانتشار كقاعدة
+            await insertIfMissing(supabase, 'x_algorithm_learning_rules',
+              { rule_type: 'viral_pattern', rule: `@${handle}: ${deepAnalysis.viral_reason}` },
+              {
+                rule_type: 'viral_pattern',
+                rule: deepAnalysis.viral_reason,
+                evidence: `@${handle} tweet (score: ${score}): "${(analysis.text || '').slice(0, 80)}..."`,
+                source_type: 'real_time_crawl',
+                source_url: analysis.tweet_url,
+                applies_to: 'content_strategy,engagement_crafting',
+                confidence_score: Math.min(10, deepAnalysis.confidence || 5),
+                status: 'active',
+                test_run: false,
+                updated_at: new Date().toISOString()
+              }
+            );
+            brainUpdates.algorithmRules++;
+
+            // خزّن النمط النفسي
+            if (deepAnalysis.psychological_trigger) {
+              await insertIfMissing(supabase, 'x_algorithm_learning_rules',
+                { rule_type: 'psychological_trigger', rule: deepAnalysis.psychological_trigger },
+                {
+                  rule_type: 'psychological_trigger',
+                  rule: deepAnalysis.psychological_trigger,
+                  evidence: `Trigger in @${handle} viral tweet (score: ${score})`,
+                  source_type: 'real_time_crawl',
+                  applies_to: 'hook_crafting,engagement_crafting',
+                  confidence_score: Math.min(10, (deepAnalysis.confidence || 5) - 1),
+                  status: 'active',
+                  test_run: false,
+                  updated_at: new Date().toISOString()
+                }
+              );
+              brainUpdates.algorithmRules++;
+            }
+
+            // خزّن النمط الأسلوبي
+            if (deepAnalysis.style_pattern || deepAnalysis.adaptation) {
+              await insertIfMissing(supabase, 'viral_style_patterns',
+                { pattern_name: `@${handle}: ${deepAnalysis.hook_formula || deepAnalysis.style_pattern?.slice(0, 60)}` },
+                {
+                  pattern_name: deepAnalysis.hook_formula || deepAnalysis.style_pattern?.slice(0, 80) || `Pattern from @${handle}`,
+                  pattern_description: deepAnalysis.style_pattern || '',
+                  adaptation_for_30piq: deepAnalysis.adaptation || '',
+                  pattern_type: deepAnalysis.psychological_trigger ? 'hook' : 'structure',
+                  source_handles: [handle],
+                  source_tweet_urls: [analysis.tweet_url],
+                  confidence_score: Math.min(10, deepAnalysis.confidence || 5),
+                  status: 'active',
+                  test_run: false,
+                  updated_at: new Date().toISOString()
+                }
+              );
+              brainUpdates.stylePatterns++;
+            }
+          } catch (learnErr: any) {
+            debugLog.push(`[scan] learning error: ${learnErr.message}`);
+          }
         }
       }
 
@@ -280,7 +394,6 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10): Pro
   }
 
   // 3. علّم العقل من البيانات المزحوفة — باستخدام التحليل العميق المخزّن
-  let brainUpdates = { algorithmRules: 0, stylePatterns: 0, mcpOpportunities: 0 };
   try {
     // جلب قواعد الانتشار المخزّنة من التحليلات السابقة (من التغريدات اللي أُضيفت يدوياً)
     const { data: existingViralRules } = await supabase
@@ -483,6 +596,14 @@ ${tweetsForConcept.map((t, i) => `${i + 1}. @${t.handle} (engagement: ${t.score}
 
   // 4. اكتشف فرص المحتوى
   const opportunities = await discoverOpportunities(allAnalyzed, allMedia);
+
+  // 5. ═══ تحسين ذاتي: ارقب العقل وعلّق القواعد الضعيفة ═══
+  try {
+    const selfImprovement = await selfImproveBrain(supabase, debugLog);
+    debugLog.push(`[self-improve] strengthened: ${selfImprovement.strengthened}, weakened: ${selfImprovement.weakened}, pruned: ${selfImprovement.pruned}`);
+  } catch (e: any) {
+    debugLog.push(`[self-improve] failed: ${e.message}`);
+  }
 
   return {
     accounts_scanned: accounts.length + manualTweetsCount,
@@ -1004,7 +1125,8 @@ async function discoverOpportunities(
     const tweetMedia = tweet.media || [];
     const rulesUsed: string[] = [];
 
-    if (tweet.has_question || tweet.score > 30) {
+    // ═══ عتبات مخفّضة — حتى التغريدات المتوسطة تنتج فرص ═══
+    if (tweet.has_question || tweet.score > 10) {
       const crafted = await craftEngagement('quote', tweet, algoRules || [], stylePatterns || [], rulesUsed);
       if (crafted) {
         const shieldResult = quickShieldCheck(crafted);
@@ -1016,7 +1138,7 @@ async function discoverOpportunities(
           source_metrics: tweet.metrics || {},
           media_urls: tweetMedia,
           crafted_text: crafted,
-          why: tweet.has_question ? 'سؤال يثير نقاش' : `تفاعل عالي (${tweet.score})`,
+          why: tweet.has_question ? 'سؤال يثير نقاش' : `تفاعل (${tweet.score})`,
           brain_rules_used: rulesUsed,
           shield_passed: shieldResult.safe,
           shield_issues: shieldResult.reasons
@@ -1024,7 +1146,7 @@ async function discoverOpportunities(
       }
     }
 
-    if (tweet.score > 15 && !tweet.is_reply) {
+    if (tweet.score > 5 && !tweet.is_reply) {
       const crafted = await craftEngagement('reply', tweet, algoRules || [], stylePatterns || [], rulesUsed);
       if (crafted) {
         const shieldResult = quickShieldCheck(crafted);
@@ -1045,24 +1167,24 @@ async function discoverOpportunities(
     }
   }
 
-  if ((stylePatterns || []).length >= 3) {
-    const threadCrafted = await craftThreadFromBrain(algoRules || [], stylePatterns || []);
-    if (threadCrafted) {
-      const shieldResult = quickShieldCheck(threadCrafted.text);
-      opportunities.push({
-        type: threadCrafted.type,
-        source_tweet_url: '',
-        source_text: 'مبني على أنماط العقل',
-        source_author: 'brain',
-        source_metrics: {},
-        media_urls: [],
-        crafted_text: threadCrafted.text,
-        why: threadCrafted.why,
-        brain_rules_used: threadCrafted.rules,
-        shield_passed: shieldResult.safe,
-        shield_issues: shieldResult.reasons
-      });
-    }
+  // ═══ ثريد دائم من العقل — حتى لو مافيه تغريدات كافية ═══
+  // دايماً جرّب تصنع ثريد من أنماط العقل
+  const threadCrafted = await craftThreadFromBrain(algoRules || [], stylePatterns || []);
+  if (threadCrafted) {
+    const shieldResult = quickShieldCheck(threadCrafted.text);
+    opportunities.push({
+      type: threadCrafted.type,
+      source_tweet_url: '',
+      source_text: 'مبني على أنماط العقل',
+      source_author: 'brain',
+      source_metrics: {},
+      media_urls: [],
+      crafted_text: threadCrafted.text,
+      why: threadCrafted.why,
+      brain_rules_used: threadCrafted.rules,
+      shield_passed: shieldResult.safe,
+      shield_issues: shieldResult.reasons
+    });
   }
 
   return opportunities.filter(o => o.shield_passed || o.shield_issues.length <= 2);
@@ -1499,5 +1621,189 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
     };
   } catch (e: any) {
     return { ok: false, error: e.message || 'خطأ غير معروف' };
+  }
+}
+
+// ═══ تحسين ذاتي: العقل يراقب نفسه ويحسّن قواعده ═══
+
+/**
+ * يحلل قواعد العقل وأنماطه، يعزّز القوي ويضعّف الضعيف
+ * - القواعد اللي لها evidence من تغريدات حقيقية تزيد ثقتها
+ * - القواعد المكررة أو العامة تنخفض ثقتها
+ * - القواعد اللي ثقتها تحت 3 تنقل لأرشيف
+ */
+async function selfImproveBrain(supabase: any, debugLog: string[]): Promise<{
+  strengthened: number;
+  weakened: number;
+  pruned: number;
+}> {
+  let strengthened = 0;
+  let weakened = 0;
+  let pruned = 0;
+
+  // 1. عزّز القواعد اللي لها evidence حقيقي (من real_time_crawl أو تحليل تغريدات)
+  try {
+    const { data: realEvidence } = await supabase
+      .from('x_algorithm_learning_rules')
+      .select('id, confidence_score, evidence, source_type')
+      .eq('status', 'active')
+      .in('source_type', ['real_time_crawl', 'x_account_scan_v3', 'batch_concept_extraction']);
+
+    if (realEvidence?.length) {
+      for (const rule of realEvidence) {
+        const newScore = Math.min(10, (rule.confidence_score || 5) + 1);
+        if (newScore > rule.confidence_score) {
+          await supabase.from('x_algorithm_learning_rules')
+            .update({ confidence_score: newScore, updated_at: new Date().toISOString() })
+            .eq('id', rule.id);
+          strengthened++;
+        }
+      }
+    }
+  } catch {}
+
+  // 2. ابحث عن القواعد المكررة وضعّفها
+  try {
+    const { data: allRules } = await supabase
+      .from('x_algorithm_learning_rules')
+      .select('id, rule, rule_type, confidence_score')
+      .eq('status', 'active');
+
+    if (allRules?.length) {
+      const seen = new Map<string, string[]>();
+      for (const rule of allRules) {
+        // بص على أول 60 حرف كمفتاح تكرار
+        const key = `${rule.rule_type}:${(rule.rule || '').slice(0, 60).toLowerCase().trim()}`;
+        if (!seen.has(key)) seen.set(key, []);
+        seen.get(key)!.push(rule.id);
+      }
+
+      for (const [key, ids] of seen) {
+        if (ids.length > 1) {
+          // أبقي الأولى كاملة، والباقي خفض ثقتها
+          for (let i = 1; i < ids.length; i++) {
+            await supabase.from('x_algorithm_learning_rules')
+              .update({
+                confidence_score: Math.max(1, 3),
+                status: 'archived_duplicate',
+                updated_at: new Date().toISOString()
+              })
+              .eq('id', ids[i]);
+            weakened++;
+          }
+        }
+      }
+    }
+  } catch {}
+
+  // 3. أرشف القواعد الضعيفة جداً (ثقة أقل من 3 ومو من تحليل حقيقي)
+  try {
+    const { count: prunedCount } = await supabase
+      .from('x_algorithm_learning_rules')
+      .update({ status: 'needs_review_weak_memory', updated_at: new Date().toISOString() })
+      .eq('status', 'active')
+      .lt('confidence_score', 3)
+      .neq('source_type', 'real_time_crawl')
+      .neq('source_type', 'x_account_scan_v3');
+    pruned = prunedCount || 0;
+  } catch {}
+
+  // 4. عزّز أنماط الأسلوب اللي لها source_handles حقيقي
+  try {
+    const { data: sourcedPatterns } = await supabase
+      .from('viral_style_patterns')
+      .select('id, confidence_score, source_handles')
+      .eq('status', 'active')
+      .not('source_handles', 'is', null);
+
+    if (sourcedPatterns?.length) {
+      for (const pattern of sourcedPatterns) {
+        const handles = pattern.source_handles;
+        if (Array.isArray(handles) && handles.length > 0) {
+          const boost = Math.min(handles.length, 3); // كل مصدر يزيد 1 (حد 3)
+          const newScore = Math.min(10, (pattern.confidence_score || 5) + boost);
+          if (newScore > pattern.confidence_score) {
+            await supabase.from('viral_style_patterns')
+              .update({ confidence_score: newScore, updated_at: new Date().toISOString() })
+              .eq('id', pattern.id);
+            strengthened++;
+          }
+        }
+      }
+    }
+  } catch {}
+
+  return { strengthened, weakened, pruned };
+}
+
+/**
+ * توليد محتوى استباقي — مو رد على تغريدة، بل محتوى أصلي من العقل
+ * يستخدم كل ما تعلمه العقل لصنع ثريد أو مقال أو تغريدة
+ */
+export async function generateProactiveContent(type: 'tweet' | 'thread' | 'article' = 'thread'): Promise<{
+  ok: boolean;
+  content?: string;
+  type?: string;
+  concepts_used?: number;
+  patterns_used?: number;
+  error?: string;
+}> {
+  try {
+    const brainQuery = await queryBrainForContent(type === 'tweet' ? 'single_tweet' : type, 8, 6);
+    const hasLearning = brainQuery.concepts.length > 0 || brainQuery.patterns.length > 0;
+
+    if (!hasLearning) {
+      return { ok: false, error: 'العقل فارغ — شغّل 🧠 تشغيل كامل أولًا' };
+    }
+
+    const username = optionalEnv('X_USERNAME', '30piq');
+    const context = brainQuery.compiled_prompt_context;
+
+    const typeInstructions: Record<string, string> = {
+      tweet: `Write a single powerful tweet (under 240 chars). One idea, strong hook, natural voice.`,
+      thread: `Write a thread of 3-5 tweets. Each tweet must be standalone-strong. First tweet = strong hook (question, shocking fact, or bold opinion). Separate tweets with "---".`,
+      article: `Write a short article (400-600 words) with a compelling title, clear sections, and actionable takeaways.`
+    };
+
+    const response = await callModel('content_crafting' as TaskType, [
+      {
+        role: 'system',
+        content: `You are writing for X account @${username}.
+
+STRICT RULES:
+1. NO AI slop (delve, crucial, leverage, game-changer, unlock, etc.)
+2. NO hashtags
+3. NO numbers without source
+4. Natural voice — like a smart friend talking, not a content machine
+5. No repetition
+6. Add a personal element or specific reference
+7. Each piece must stand on its own merit
+
+${context}
+
+CRITICAL: You MUST follow the APPLICATION INSTRUCTION for each concept. Each concept tells you HOW to apply it — embody it in your writing, don't just reference it.
+
+${typeInstructions[type] || typeInstructions.thread}
+
+Write ONLY the content. No explanations or notes.`
+      },
+      {
+        role: 'user',
+        content: `Generate ${type} content based on the brain's learned concepts and patterns. Apply each concept's HOW TO APPLY instruction precisely.`
+      }
+    ]);
+
+    const content = String(response || '').trim();
+    if (content.length < 20) return { ok: false, error: 'المحتوى المولّد قصير جداً' };
+
+    return {
+      ok: true,
+      content,
+      type,
+      concepts_used: brainQuery.concepts.length,
+      patterns_used: brainQuery.patterns.length
+    };
+  } catch (e: any) {
+    return { ok: false, error: e.message || 'خطأ في التوليد' };
   }
 }

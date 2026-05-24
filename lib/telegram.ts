@@ -3,9 +3,9 @@ import { optionalEnv, requiredEnv } from './env';
 export const MAIN_KEYBOARD = {
   keyboard: [
     [{ text: '🧠 تشغيل كامل' }, { text: '📊 تقرير الأداء' }],
-    [{ text: '🧩 محتويات العقل' }, { text: '🔗 إضافة تغريدة' }],
-    [{ text: '➕ إضافة حساب' }, { text: '📋 قائمة الحسابات' }],
-    [{ text: '🔄 تصفير البيانات' }]
+    [{ text: '✍️ اقتراح محتوى' }, { text: '🧩 محتويات العقل' }],
+    [{ text: '🔗 إضافة تغريدة' }, { text: '➕ إضافة حساب' }],
+    [{ text: '📋 قائمة الحسابات' }, { text: '🔄 تصفير البيانات' }]
   ],
   resize_keyboard: true,
   one_time_keyboard: false
