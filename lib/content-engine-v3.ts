@@ -471,7 +471,7 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
 
     const tweetId = match[1];
     const base = twitterApiBase();
-    const json = await fetchTwitterApiJson(`${base}/twitter/tweet/${tweetId}`);
+    const json = await fetchTwitterApiJson(`${base}/twitter/tweets?tweet_ids=${tweetId}`);
     const tweets = extractTweets(json);
 
     if (!tweets.length) return { ok: false, error: 'لم يتم العثور على التغريدة' };
