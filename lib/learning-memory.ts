@@ -165,7 +165,7 @@ export async function learnFromCrawlerItems(supabase: any, input: { runType: str
             },
             why_it_works: 'It stores the reusable success mechanism extracted from real crawled evidence, so future content can be original and source-grounded instead of AI-generic.',
             risks: mechanism.risk,
-            adaptation_for_30piq: 'Adapt this mechanism to AI x productivity x career growth, MCP workflows, high-value knowledge-worker markets, or proof-asset content. Do not copy the source topic unless it fits the account strategy.',
+            adaptation_for_30piq: 'Adapt this mechanism to the account\'s strategy. Do not copy the source topic unless it fits the account\'s actual content focus.',
             source_handles: [],
             source_tweet_urls: url ? [url] : [],
             confidence_score: score(item.confidence_score || item.content_potential_score || item.relevance_score, 7),
@@ -184,7 +184,7 @@ export async function learnFromCrawlerItems(supabase: any, input: { runType: str
       const ok = await insertIfMissing(supabase, 'mcp_opportunity_map', { opportunity_area: opportunityArea, mcp_use_case: shortText(useCase, 240) }, {
         opportunity_area: opportunityArea,
         mcp_use_case: shortText(useCase, 240),
-        audience_segment: 'English-speaking high-value knowledge workers, operators, founders, consultants, and career-focused AI users',
+        audience_segment: 'English-speaking knowledge workers, operators, founders, consultants, and tech-focused users',
         pain_point: summary || 'Fragmented tools and manual workflows create leverage opportunities for AI-assisted systems.',
         content_angles: [mechanism?.mechanism, title, summary].filter(Boolean).slice(0, 3),
         repo_or_tool_ideas: [],

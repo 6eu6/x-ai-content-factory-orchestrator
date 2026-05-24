@@ -69,6 +69,9 @@ export type DeepAnalysis = {
   stylePattern: string;
   adaptation: string;
   mediaImpact: string;
+  timingInsight: string;
+  tweetTypeInsight: string;
+  engagementQuality: string;
 };
 
 // ═══ الزحف والتحليل ═══
@@ -306,17 +309,17 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10): Pro
 
       // بناء ملخص غني يشمل التحليل العميق
       const mediaDesc = a.media?.length > 0
-        ? `يحتوي ${a.media.map((m: MediaFromTweet) => m.type === 'photo' ? 'صورة' : m.type === 'video' ? 'فيديو' : 'GIF').join('+')}`
-        : 'نص فقط';
+        ? `Contains ${a.media.map((m: MediaFromTweet) => m.type).join('+')}`
+        : 'Text only';
       const deepInsight = relatedRule?.rule || '';
       const styleInsight = relatedStyle?.pattern_description || '';
 
-      let summary = `تفاعل: ${a.score}، لكل 1K متابع: ${a.engagement_per_1k_followers}، ${mediaDesc}`;
-      if (deepInsight) summary += ` | سبب الانتشار: ${deepInsight.slice(0, 150)}`;
-      if (styleInsight) summary += ` | الأسلوب: ${styleInsight.slice(0, 100)}`;
+      let summary = `Engagement: ${a.score}, per 1K followers: ${a.engagement_per_1k_followers}, ${mediaDesc}`;
+      if (deepInsight) summary += ` | Viral reason: ${deepInsight.slice(0, 150)}`;
+      if (styleInsight) summary += ` | Style: ${styleInsight.slice(0, 100)}`;
 
       return {
-        title: a.text?.slice(0, 200) || 'تحليل تغريدة',
+        title: a.text?.slice(0, 200) || 'Tweet analysis',
         url: a.tweet_url,
         summary,
         confidence_score: Math.min(10, Math.max(1, Math.round(a.score / 10))),
@@ -360,29 +363,29 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10): Pro
         const conceptResponse = await callModel('learning_extraction' as TaskType, [
           {
             role: 'system',
-            content: `أنت محلل أنماط فيروسية خبير. تُعطى مجموعة تغريدات ناجحة وتكتشف المفاهيم المشتركة بينها.
+            content: `You are an expert viral pattern analyst. You are given a set of successful tweets and must discover the shared concepts between them.
 
-المطلوب: اكتشف 1-3 مفاهيم/أنماط عامة مشتركة بين هذي التغريدات. كل مفهوم لازم يكون:
-1. محدد وقابل للتطبيق (مو عام مثل "محتوى جيد")
-2. يربط بين عدة تغريدات
-3. يعطي توصية عملية لحساب @30piq (AI × الإنتاجية × النمو المهني)
+Your task: Discover 1-3 general concepts/patterns shared across these tweets. Each concept must be:
+1. Specific and actionable (not generic like "good content")
+2. Connecting multiple tweets together
+3. Providing a transferable recommendation — how can this MECHANIC (not topic) be applied to any account
 
-أجب بصيغة JSON فقط:
+Respond in JSON only:
 {
   "concepts": [
     {
-      "name": "اسم المفهوم",
-      "description": "شرح المفهوم وعلاقته بالتغريدات",
-      "adaptation": "كيف يطبق @30piq هذا المفهوم"
+      "name": "Concept name",
+      "description": "Explanation of the concept and its connection to the tweets",
+      "adaptation": "How to apply this mechanic to any account"
     }
   ]
 }`
           },
           {
             role: 'user',
-            content: `حلّل هذي التغريدات واكتشف المفاهيم المشتركة:
+            content: `Analyze these tweets and discover shared concepts:
 
-${tweetsForConcept.map((t, i) => `${i + 1}. @${t.handle} (تفاعل: ${t.score}, وسائط: ${t.media}): "${t.text}"`).join('\n\n')}`
+${tweetsForConcept.map((t, i) => `${i + 1}. @${t.handle} (engagement: ${t.score}, media: ${t.media}): "${t.text}"`).join('\n\n')}`
           }
         ], { temperature: 0.15, max_tokens: 2000, response_format: { type: 'json_object' } });
 
@@ -396,7 +399,7 @@ ${tweetsForConcept.map((t, i) => `${i + 1}. @${t.handle} (تفاعل: ${t.score}
               {
                 rule_type: 'viral_concept',
                 rule: `${concept.name}: ${concept.description}`,
-                evidence: `مفهوم مشترك مستخرج من ${tweetsForConcept.length} تغريدات فيروسية`,
+                evidence: `Shared concept extracted from ${tweetsForConcept.length} viral tweets`,
                 source_type: 'batch_concept_extraction',
                 source_url: '',
                 applies_to: 'content_strategy,engagement_crafting',
@@ -416,7 +419,7 @@ ${tweetsForConcept.map((t, i) => `${i + 1}. @${t.handle} (تفاعل: ${t.score}
                   pattern_name: concept.name.slice(0, 100),
                   pattern_description: concept.description,
                   adaptation_for_30piq: concept.adaptation,
-                  evidence: `مفهوم مشترك من ${tweetsForConcept.length} تغريدات فيروسية`,
+                  evidence: `Shared concept from ${tweetsForConcept.length} viral tweets`,
                   source_type: 'batch_concept_extraction',
                   confidence_score: Math.min(10, 5 + Math.floor(tweetsForConcept.length / 3)),
                   status: 'active',
@@ -666,7 +669,12 @@ async function deepAnalyzeWithAI(
   metrics: Record<string, number>,
   followers: number,
   media: MediaFromTweet[],
-  username: string
+  username: string,
+  tweetType: 'original' | 'quote' | 'reply' | 'thread_starter' = 'original',
+  quotedTweetText: string = '',
+  quotedTweetAuthor: string = '',
+  createdAt: string | null = null,
+  timeLabel: string | null = null
 ): Promise<DeepAnalysis> {
   const score = (metrics.like_count || 0) + (metrics.reply_count || 0) * 2 +
     (metrics.retweet_count || 0) * 3 + (metrics.quote_count || 0) * 4 +
@@ -679,89 +687,116 @@ async function deepAnalyzeWithAI(
   const bookmarkRatio = (metrics.like_count || 0) > 0 ? ((metrics.bookmark_count || 0) / metrics.like_count!).toFixed(3) : '0';
 
   const mediaDesc = media.length > 0
-    ? `يحتوي على ${media.map(m => m.type === 'photo' ? 'صورة' : m.type === 'video' ? 'فيديو' : 'GIF').join(' + ')}`
-    : 'نص فقط بدون وسائط';
+    ? `Contains ${media.map(m => m.type).join(' + ')}`
+    : 'Text only, no media';
+
+  const quoteContext = tweetType === 'quote' && quotedTweetText
+    ? `\nQuoted Tweet by @${quotedTweetAuthor}: "${quotedTweetText.slice(0, 200)}"\nThis is a QUOTE TWEET — the author is commenting on the above tweet. Analyze how the commentary adds value or creates contrast with the original.`
+    : '';
+
+  const replyContext = tweetType === 'reply'
+    ? `\nThis is a REPLY tweet — it's part of a conversation. The virality likely comes from the reply adding significant value, humor, or a contrarian take to the original discussion.`
+    : '';
+
+  const timingContext = timeLabel
+    ? `\nPosted at: ${timeLabel}. Consider if this timing aligns with peak engagement hours for the audience.`
+    : '';
 
   try {
     const aiResponse = await callModel('deep_analysis' as TaskType, [
       {
         role: 'system',
-        content: `أنت محلل محتوى فيروسي خبير. تحلل تغريدات X وتكتشف بدقة ليش انتشرت فعلياً — ليس تحليل سطحي بل فهم عميق للنفسية والسياق ونمط الانتشار.
+        content: `You are an expert viral content analyst. You analyze X (Twitter) posts to understand exactly WHY they went viral — not surface-level observations, but deep understanding of psychology, context, and spread mechanics.
 
-أنت تحلل لحساب @30piq (AI × الإنتاجية × النمو المهني) عشان يتعلم من الأنماط الحقيقية.
+You analyze for a tech/growth account @30piq to learn from real patterns. Do NOT assume a specific niche — the account can cover diverse topics (tech, culture, ideas, commentary). Focus on extracting transferable mechanics.
 
-قواعد:
-1. كن محدداً ودقيقاً — لا تستخدم عبارات عامة مثل "محتوى جذاب" أو "تفاعل عالي"
-2. حلّل النص نفسه — شو فيه بالضبط اللي خلاه ينتشر؟ (فكاهة، مفاجأة، تأكيد، جدل، إحساس بالانتماء...)
-3. حلّل المقاييس — نسب الرد/ريتويت/اقتباس/بوكمارك تخبرك عن نوع الانتشار (نقاش؟ مشاركة؟ حفظ؟ رأي؟)
-4. حلّل الوسائط — هل الصورة/الفيديو هي سبب الانتشار الأساسي؟ شو فيها بالضبط؟
-5. أعط نمط أسلوب محدد — كيف كُتبت التغريدة (بناء، نبرة، تقنية) مو بس "تغريدة قصيرة"
-6. أعط توصية عملية لـ @30piq — كيف يطبق هذا النمط تحديداً في مجاله
+Rules:
+1. Be specific and precise — never use vague phrases like "engaging content" or "high interaction". Name the exact mechanism.
+2. Analyze the TEXT itself — what specifically made it spread? (humor, surprise, validation, controversy, identity signaling, novelty, emotional resonance...)
+3. Analyze the METRICS — engagement ratios reveal the TYPE of spread:
+   - High reply/like = sparked discussion/debate
+   - High retweet/like = shareable opinion or information
+   - High quote/like = strong reactions, people adding their own take
+   - High bookmark/like = reference-worthy, saved for later use
+4. Analyze MEDIA — is the image/video the primary driver? What specifically about it?
+5. Analyze TWEET TYPE — is it original, a quote tweet, a reply, a thread starter? How does the type contribute to virality?
+6. Analyze TIMING — does the posting time suggest strategic timing or alignment with trending topics?
+7. Give a specific style pattern — how was it written (structure, tone, technique), not just "short tweet"
+8. Give a transferable adaptation — how can this MECHANIC (not topic) be applied to any account
 
-أجب بصيغة JSON فقط بدون أي نص إضافي:
+Respond in JSON only, no additional text:
 {
-  "viralReason": "سبب الانتشار الفعلي — كن محدداً جداً واربط بين المحتوى والسياق",
-  "stylePattern": "نمط الأسلوب الكتابي — التقنيات المستخدمة والبناء السردي",
-  "adaptation": "كيف يطبق @30piq هذا النمط تحديداً في مجال AI × الإنتاجية",
-  "mediaImpact": "تأثير الوسائط على الانتشار — ليش هذي الصورة/الفيديو بالذات ساعدت"
+  "viralReason": "The exact reason it went viral — be very specific, connect content to context",
+  "stylePattern": "The writing style technique used — structure, narrative devices, tone",
+  "adaptation": "How to apply this viral MECHANIC (not the topic) to any account — focus on the transferable pattern",
+  "mediaImpact": "How media contributed to spread — why this specific image/video helped",
+  "timingInsight": "Analysis of posting timing — peak hours, day patterns, event alignment",
+  "tweetTypeInsight": "How the tweet type (original/quote/reply/thread) contributed to its spread",
+  "engagementQuality": "What the engagement ratios reveal about audience behavior and content reception"
 }`
       },
       {
         role: 'user',
-        content: `حلّل هذي التغريدة:
+        content: `Analyze this tweet:
 
-النص: "${tweetText}"
+Text: "${tweetText}"
 
-المؤلف: @${username}
-المتابعين: ${followers}
-التفاعل الكلي: ${score}
+Author: @${username}
+Followers: ${followers}
+Engagement Score: ${score}
+Tweet Type: ${tweetType}${quoteContext}${replyContext}${timingContext}
 
-المقاييس:
-- لايكات: ${metrics.like_count || 0}
-- ردود: ${metrics.reply_count || 0}
-- ريتويت: ${metrics.retweet_count || 0}
-- اقتباسات: ${metrics.quote_count || 0}
-- حفظ: ${metrics.bookmark_count || 0}
-- مشاهدات: ${metrics.view_count || 0}
+Metrics:
+- Likes: ${metrics.like_count || 0}
+- Replies: ${metrics.reply_count || 0}
+- Retweets: ${metrics.retweet_count || 0}
+- Quotes: ${metrics.quote_count || 0}
+- Bookmarks: ${metrics.bookmark_count || 0}
+- Views: ${metrics.view_count || 0}
 
-النسب:
-- لايك/متابع: ${likeToFollowerRatio}
-- ردود/لايك: ${replyRatio}
-- ريتويت/لايك: ${rtRatio}
-- اقتباس/لايك: ${quoteRatio}
-- حفظ/لايك: ${bookmarkRatio}
+Ratios:
+- Like/Follower: ${likeToFollowerRatio}
+- Reply/Like: ${replyRatio}
+- RT/Like: ${rtRatio}
+- Quote/Like: ${quoteRatio}
+- Bookmark/Like: ${bookmarkRatio}
 
-الوسائط: ${mediaDesc}
+Media: ${mediaDesc}
 
-أعط تحليل عميق حقيقي — ليس قوالب جاهزة.`
+Give a deep, precise analysis — not generic templates.`
       }
-    ], { temperature: 0.15, max_tokens: 2000, response_format: { type: 'json_object' } });
+    ], { temperature: 0.15, max_tokens: 3000, response_format: { type: 'json_object' } });
 
     const parsed = parseModelJson(aiResponse);
     return {
-      viralReason: parsed.viralReason || 'تحليل غير متاح',
-      stylePattern: parsed.stylePattern || 'نمط غير محدد',
-      adaptation: parsed.adaptation || 'لا توجد توصية',
-      mediaImpact: parsed.mediaImpact || mediaDesc
+      viralReason: parsed.viralReason || 'Analysis unavailable',
+      stylePattern: parsed.stylePattern || 'Pattern unidentified',
+      adaptation: parsed.adaptation || 'No adaptation suggestion',
+      mediaImpact: parsed.mediaImpact || mediaDesc,
+      timingInsight: parsed.timingInsight || 'No timing data available',
+      tweetTypeInsight: parsed.tweetTypeInsight || `${tweetType} tweet`,
+      engagementQuality: parsed.engagementQuality || 'Standard engagement pattern'
     };
   } catch (e: any) {
     console.error('[deepAnalyzeWithAI] AI analysis failed, using fallback:', e.message);
 
-    // Fallback: تحليل بسيط بدون AI (مو hardcoded مثل القديم، بس أرقام حقيقية)
     const likeToFoll = followers > 0 ? (metrics.like_count || 0) / followers : 0;
     const reasons: string[] = [];
-    if (likeToFoll > 0.1) reasons.push(`نسبة لايك/متابع عالية جداً (${(likeToFoll * 100).toFixed(1)}%) — المحتوى وصل لجمهور أبعد من متابعيه`);
-    if (parseFloat(replyRatio) > 0.3) reasons.push(`نسبة ردود عالية (${replyRatio}) — أثار نقاش`);
-    if (parseFloat(rtRatio) > 0.3) reasons.push(`نسبة ريتويت عالية (${rtRatio}) — محتوى قابل للمشاركة`);
-    if (parseFloat(quoteRatio) > 0.2) reasons.push(`نسبة اقتباس عالية (${quoteRatio}) — أثار ردود أفعال`);
-    if (media.length > 0) reasons.push(`يحتوي وسائط (${media.map(m => m.type).join(', ')})`);
-    if (!reasons.length) reasons.push(`تفاعل كلي عالي (${score})`);
+    if (likeToFoll > 0.1) reasons.push(`Very high like/follower ratio (${(likeToFoll * 100).toFixed(1)}%) — content reached far beyond the author's audience`);
+    if (parseFloat(replyRatio) > 0.3) reasons.push(`High reply ratio (${replyRatio}) — sparked discussion`);
+    if (parseFloat(rtRatio) > 0.3) reasons.push(`High RT ratio (${rtRatio}) — highly shareable content`);
+    if (parseFloat(quoteRatio) > 0.2) reasons.push(`High quote ratio (${quoteRatio}) — triggered strong reactions`);
+    if (media.length > 0) reasons.push(`Contains media (${media.map(m => m.type).join(', ')})`);
+    if (!reasons.length) reasons.push(`High total engagement (${score})`);
 
     return {
       viralReason: reasons.slice(0, 3).join(' | '),
-      stylePattern: `تغريدة ${tweetText.length < 100 ? 'قصيرة ومختصرة' : tweetText.length < 280 ? 'متوسطة الطول' : 'طويلة'} من @${username}`,
-      adaptation: `طبّق نمط الانتشار هذا في محتوى @30piq في مجال AI والإنتاجية`,
-      mediaImpact: mediaDesc
+      stylePattern: `${tweetText.length < 100 ? 'Short and concise' : tweetText.length < 280 ? 'Medium length' : 'Long-form'} ${tweetType} tweet by @${username}`,
+      adaptation: 'Apply this spread pattern mechanic to content strategy',
+      mediaImpact: mediaDesc,
+      timingInsight: timeLabel ? `Posted at ${timeLabel}` : 'No timing data',
+      tweetTypeInsight: `${tweetType} tweet`,
+      engagementQuality: `Reply/Like: ${replyRatio}, RT/Like: ${rtRatio}, Quote/Like: ${quoteRatio}, Bookmark/Like: ${bookmarkRatio}`
     };
   }
 }
@@ -1015,6 +1050,37 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
     const username = author.userName || author.username || 'unknown';
     const user = { username, followers_count: Number(author.followers || 0) };
 
+    // ═══ Detect tweet type and extract metadata ═══
+    const isQuoteTweet = Boolean(raw.isQuote || raw.quotedStatusId || raw.quoted_status_id);
+    const isReply = Boolean(raw.isReply || raw.in_reply_to_status_id);
+    const conversationId = raw.conversationId || raw.conversation_id || null;
+    const isThreadStarter = Boolean(conversationId && String(conversationId) === String(raw.id || raw.tweetId || raw.rest_id));
+
+    let tweetType: 'original' | 'quote' | 'reply' | 'thread_starter' = 'original';
+    if (isQuoteTweet) tweetType = 'quote';
+    else if (isReply) tweetType = 'reply';
+    else if (isThreadStarter) tweetType = 'thread_starter';
+
+    // Extract quoted tweet data
+    let quotedTweetText = raw.quotedStatus?.text || raw.quoted_status?.text || raw.quotedTweet?.text || '';
+    let quotedTweetAuthor = raw.quotedStatus?.author?.userName || raw.quoted_status?.author?.userName || raw.quotedTweet?.author?.userName || '';
+    const quotedTweetId = raw.quotedStatusId || raw.quoted_status_id || raw.quotedTweet?.id || null;
+
+    // If it's a quote tweet but we don't have the quoted text, try fetching it
+    if (isQuoteTweet && !quotedTweetText && quotedTweetId) {
+      try {
+        const quotedJson = await fetchTwitterApiJson(`${base}/twitter/tweets?tweet_ids=${quotedTweetId}`);
+        const quotedTweets = extractTweets(quotedJson);
+        if (quotedTweets.length) {
+          const qt = quotedTweets[0];
+          quotedTweetText = qt.text || qt.full_text || qt.content || '';
+          quotedTweetAuthor = qt.author?.userName || qt.user?.userName || '';
+        }
+      } catch (e: any) {
+        console.log(`[scanSingleTweet] Failed to fetch quoted tweet ${quotedTweetId}: ${e.message}`);
+      }
+    }
+
     const normalized = {
       id: String(raw.id || raw.tweetId || raw.rest_id || tweetId),
       text: raw.text || raw.full_text || raw.content || '',
@@ -1029,7 +1095,14 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
       },
       entities: raw.entities || raw.extendedEntities || {},
       extended_entities: raw.extendedEntities || raw.extended_entities || raw.entities || {},
-      is_reply: Boolean(raw.isReply || raw.in_reply_to_status_id),
+      is_reply: isReply,
+      is_quote_tweet: isQuoteTweet,
+      quoted_tweet_id: quotedTweetId,
+      quoted_tweet_text: quotedTweetText,
+      quoted_tweet_author: quotedTweetAuthor,
+      conversation_id: conversationId,
+      is_thread_starter: isThreadStarter,
+      language: raw.lang || raw.language || null,
       author,
       raw
     };
@@ -1038,13 +1111,18 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
     const score = scoreXTweet(normalized);
     const media = extractMediaFromTweet(normalized, json);
 
-    // ═══ تحليل عميق حقيقي بالذكاء الاصطناعي ═══
+    // ═══ Deep analysis with AI — English, no hardcoded niche, full metadata ═══
     const deepAnalysis = await deepAnalyzeWithAI(
       analysis.text,
       analysis.metrics,
       user.followers_count,
       media,
-      username
+      username,
+      tweetType,
+      quotedTweetText,
+      quotedTweetAuthor,
+      analysis.created_at,
+      analysis.time_label
     );
 
     // خزّن التحليل
@@ -1057,7 +1135,7 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
         text: analysis.text.slice(0, 500),
         engagement_score: score,
         engagement_per_1k_followers: analysis.engagement_per_1k_followers,
-        tweet_type: media.length > 0 ? 'media' : (analysis.is_reply ? 'reply' : 'original'),
+        tweet_type: tweetType,
         metrics: analysis.metrics,
         has_media: media.length > 0,
         media_type: media.map(m => m.type).join(','),
@@ -1137,6 +1215,44 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
             source_url: tweetUrl,
             applies_to: 'content_strategy,engagement_crafting',
             confidence_score: Math.min(10, Math.max(3, Math.round(score / 40))),
+            status: 'active',
+            test_run: false,
+            updated_at: new Date().toISOString()
+          }
+        );
+      }
+
+      // 5. Timing insight as a learning rule
+      if (deepAnalysis.timingInsight && deepAnalysis.timingInsight !== 'No timing data available') {
+        await insertIfMissing(supabase, 'x_algorithm_learning_rules',
+          { rule_type: 'timing_pattern', rule: deepAnalysis.timingInsight },
+          {
+            rule_type: 'timing_pattern',
+            rule: deepAnalysis.timingInsight,
+            evidence: `@${username} posted at ${analysis.time_label || 'unknown'} → ${score} engagement`,
+            source_type: 'manual_tweet_analysis',
+            source_url: tweetUrl,
+            applies_to: 'content_timing,scheduling',
+            confidence_score: Math.min(10, Math.max(3, Math.round(score / 60))),
+            status: 'active',
+            test_run: false,
+            updated_at: new Date().toISOString()
+          }
+        );
+      }
+
+      // 6. Tweet type insight
+      if (deepAnalysis.tweetTypeInsight && tweetType !== 'original') {
+        await insertIfMissing(supabase, 'x_algorithm_learning_rules',
+          { rule_type: 'tweet_type_pattern', rule: deepAnalysis.tweetTypeInsight },
+          {
+            rule_type: 'tweet_type_pattern',
+            rule: deepAnalysis.tweetTypeInsight,
+            evidence: `@${username} ${tweetType} tweet → ${score} engagement. ${deepAnalysis.engagementQuality}`,
+            source_type: 'manual_tweet_analysis',
+            source_url: tweetUrl,
+            applies_to: 'content_format,engagement_crafting',
+            confidence_score: Math.min(10, Math.max(3, Math.round(score / 50))),
             status: 'active',
             test_run: false,
             updated_at: new Date().toISOString()

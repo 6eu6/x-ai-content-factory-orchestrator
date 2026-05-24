@@ -112,6 +112,14 @@ function normalizeTwitterApiTweet(t: any) {
     entities: t.entities || t.extendedEntities || {},
     extended_entities: t.extendedEntities || t.extended_entities || t.entities || {},
     is_reply: Boolean(t.isReply || t.in_reply_to_status_id),
+    in_reply_to_tweet_id: t.inReplyToStatusId || t.in_reply_to_status_id || null,
+    is_quote_tweet: Boolean(t.isQuote || t.quotedStatusId || t.quoted_status_id),
+    quoted_tweet_id: t.quotedStatusId || t.quoted_status_id || null,
+    quoted_tweet_text: t.quotedStatus?.text || t.quoted_status?.text || t.quotedTweet?.text || '',
+    quoted_tweet_author: t.quotedStatus?.author?.userName || t.quoted_status?.author?.userName || t.quotedTweet?.author?.userName || '',
+    conversation_id: t.conversationId || t.conversation_id || null,
+    is_thread_starter: Boolean(t.conversationId && String(t.conversationId) === String(t.id || t.tweetId || t.rest_id)),
+    language: t.lang || t.language || null,
     author: t.author || t.user,
     raw: t
   };
@@ -161,6 +169,15 @@ export function analyzeXTweet(tweet: any, user: any) {
   const created = tweet.created_at ? new Date(tweet.created_at) : null;
   const followers = user?.followers_count || user?.public_metrics?.followers_count || 0;
   const score = scoreXTweet(tweet);
+
+  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+  // Determine tweet type
+  let tweetType: 'original' | 'quote' | 'reply' | 'thread_starter' = 'original';
+  if (tweet.is_quote_tweet) tweetType = 'quote';
+  else if (tweet.is_reply) tweetType = 'reply';
+  else if (tweet.is_thread_starter) tweetType = 'thread_starter';
+
   return {
     tweet_id: tweet.id,
     tweet_url: `https://x.com/${user.username}/status/${tweet.id}`,
@@ -169,6 +186,8 @@ export function analyzeXTweet(tweet: any, user: any) {
     created_at: tweet.created_at,
     hour_utc: created ? created.getUTCHours() : null,
     weekday_utc: created ? created.getUTCDay() : null,
+    weekday_name: created ? dayNames[created.getUTCDay()] : null,
+    time_label: created ? `${created.getUTCHours()}:00 UTC, ${dayNames[created.getUTCDay()]}` : null,
     metrics: tweet.public_metrics || {},
     followers_count: followers,
     engagement_score: score,
@@ -178,6 +197,15 @@ export function analyzeXTweet(tweet: any, user: any) {
     has_question: text.includes('?'),
     has_link: Boolean(tweet.entities?.urls?.length),
     has_list: /(^|\n)\s*(\d+\.|-|•)/.test(text),
-    is_reply: Boolean(tweet.is_reply)
+    is_reply: Boolean(tweet.is_reply),
+    is_quote_tweet: Boolean(tweet.is_quote_tweet),
+    tweet_type: tweetType,
+    quoted_tweet_id: tweet.quoted_tweet_id || null,
+    quoted_tweet_text: tweet.quoted_tweet_text || '',
+    quoted_tweet_author: tweet.quoted_tweet_author || '',
+    in_reply_to_tweet_id: tweet.in_reply_to_tweet_id || null,
+    conversation_id: tweet.conversation_id || null,
+    is_thread_starter: Boolean(tweet.is_thread_starter),
+    language: tweet.language || null,
   };
 }

@@ -132,20 +132,25 @@ async function handleMessage(chatId: string, userId: string, username: string, t
       msg += `المؤلف: @${htmlEscape(a.username || '')}\n`;
       msg += `التفاعل: ${a.engagement_score ?? 0}\n`;
       msg += `لكل 1K متابع: ${a.engagement_per_1k_followers ?? 0}\n`;
+      msg += `النوع: ${a.tweet_type || 'original'}\n`;
       msg += `الوسائط: ${m.length > 0 ? m.map(x => x.type === 'photo' ? '📷' : x.type === 'video' ? '🎬' : '🎞️').join(' ') : 'لا يوجد'}\n`;
+      if (a.time_label) msg += `الوقت: ${htmlEscape(a.time_label)}\n`;
       msg += `━━━━━━━━━━━━━━━━━━━━\n`;
       msg += `<i>${htmlEscape(shortText(a.text || '', 200))}</i>\n`;
       msg += `━━━━━━━━━━━━━━━━━━━━\n`;
 
-      // التحليل العميق الحقيقي من AI
+      // التحليل العميق الحقيقي من AI — بالانجليزي لأن المحتوى انجليزي
       if (deep) {
-        msg += `\n🔥 <b>ليش انتشرت:</b>\n${htmlEscape(deep.viralReason.slice(0, 300))}\n`;
-        msg += `\n✍️ <b>نمط الأسلوب:</b>\n${htmlEscape(deep.stylePattern.slice(0, 200))}\n`;
-        msg += `\n🎬 <b>تأثير الوسائط:</b>\n${htmlEscape(deep.mediaImpact.slice(0, 200))}\n`;
-        msg += `\n🎯 <b>تطبيق @30piq:</b>\n${htmlEscape(deep.adaptation.slice(0, 200))}\n`;
+        msg += `\n🔥 <b>Why it went viral:</b>\n${htmlEscape(deep.viralReason.slice(0, 400))}\n`;
+        msg += `\n✍️ <b>Style pattern:</b>\n${htmlEscape(deep.stylePattern.slice(0, 250))}\n`;
+        msg += `\n🎬 <b>Media impact:</b>\n${htmlEscape(deep.mediaImpact.slice(0, 200))}\n`;
+        msg += `\n⏰ <b>Timing insight:</b>\n${htmlEscape(deep.timingInsight.slice(0, 200))}\n`;
+        msg += `\n📝 <b>Tweet type insight:</b>\n${htmlEscape(deep.tweetTypeInsight.slice(0, 200))}\n`;
+        msg += `\n📊 <b>Engagement quality:</b>\n${htmlEscape(deep.engagementQuality.slice(0, 200))}\n`;
+        msg += `\n🎯 <b>Transferable adaptation:</b>\n${htmlEscape(deep.adaptation.slice(0, 250))}\n`;
       }
 
-      msg += `\n<i>✅ تم تخزين التحليل + أنماط الانتشار + الأسلوب في العقل.</i>`;
+      msg += `\n<i>✅ تم تخزين التحليل + أنماط الانتشار + الأسلوب + التوقيت + النوع في العقل.</i>`;
 
       // لا نرسل أي وسائط (صور/فيديو) لتلقرام — فقط التحليل
       await sendReply(chatId, msg);
