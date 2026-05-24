@@ -1,5 +1,5 @@
 import { optionalEnv, requiredEnv } from '../../../../lib/env';
-import { setTelegramWebhook } from '../../../../lib/telegram';
+import { setTelegramWebhook, sendTelegramMessage, MAIN_KEYBOARD } from '../../../../lib/telegram';
 
 /**
  * GET /api/telegram/diagnose
@@ -9,6 +9,7 @@ import { setTelegramWebhook } from '../../../../lib/telegram';
  * ?action=check       — فحص حالة الـ webhook فقط
  * ?action=fix         — إعادة ضبط الـ webhook للرابط الصحيح
  * ?action=stop_flood  — حذف الـ webhook مؤقتاً لإيقاف الرسائل المعلقة، ثم إعادته
+ * ?action=refresh_kb  — إرسال الكيبورد الجديد للمستخدم (يحل مشكلة الأزرار القديمة)
  */
 export async function GET(req: Request) {
   try {
@@ -18,6 +19,19 @@ export async function GET(req: Request) {
     const baseUrl = optionalEnv('PUBLIC_BASE_URL') || `${url.protocol}//${url.host}`;
     const expectedWebhookUrl = `${baseUrl.replace(/\/$/, '')}/api/telegram/webhook`;
     const webhookSecret = optionalEnv('TELEGRAM_WEBHOOK_SECRET');
+
+    // ═══ إرسال الكيبورد الجديد ═══
+    if (action === 'refresh_kb') {
+      const chatId = optionalEnv('TELEGRAM_ALLOWED_CHAT_ID');
+      if (!chatId) return Response.json({ ok: false, error: 'TELEGRAM_ALLOWED_CHAT_ID not set' }, { status: 500 });
+      
+      try {
+        await sendTelegramMessage(chatId, '✅ تم تحديث لوحة التحكم:', MAIN_KEYBOARD);
+        return Response.json({ ok: true, message: 'Keyboard refreshed successfully', chat_id: chatId });
+      } catch (e: any) {
+        return Response.json({ ok: false, error: e.message }, { status: 500 });
+      }
+    }
 
     // 1. جلب معلومات الـ webhook الحالية من Telegram
     const infoRes = await fetch(`https://api.telegram.org/bot${token}/getWebhookInfo`);
