@@ -173,6 +173,18 @@ export async function POST(req: Request) {
     if (text === '📅 مراجعة أسبوعية') return triggerEndpoint(req, chatId, '/api/weekly-review');
     if (text === '🧹 صيانة الذاكرة') return triggerEndpoint(req, chatId, '/api/memory-maintenance-run');
     if (text === '📈 تعلم النمو') return triggerEndpoint(req, chatId, '/api/growth-learning-run');
+    if (text === '🔄 تصفير البيانات') return startFlow(supabase, chatId, 'awaiting_reset_confirmation', '⚠️ <b>تأكيد تصفير البيانات</b>\n\nسيتم حذف جميع البيانات التشغيلية:\n• المهام والمحتوى المولّد\n• سجلات التسليم والجلسات\n• الفرضيات والفرص والبطاقات\n• نتائج البحث والاتجاهات\n\n<b>ما يُحافظ عليه (العقل):</b>\n✅ قواعد خوارزمية X (238 قاعدة)\n✅ أنماط الأسلوب الفيروسي (174 نمط)\n✅ أنماط الحسابات\n✅ الذاكرة العاملة\n✅ قواعد التعلم السببية\n✅ الحسابات المُضافة\n✅ قواعد توجيه النماذج\n\nأرسل <b>نعم</b> للتأكيد أو أي شيء آخر للإلغاء.');
+
+    // تأكيد التصفير
+    if (state?.current_flow === 'awaiting_reset_confirmation') {
+      await clearFlow(supabase, chatId);
+      const confirmText = text.trim();
+      if (confirmText === 'نعم' || confirmText === 'اي' || confirmText === 'أي' || confirmText === 'اه' || confirmText === 'آه' || confirmText.toLowerCase() === 'yes' || confirmText === '١') {
+        return await resetOperationalData(supabase, chatId);
+      } else {
+        return reply(chatId, 'تم إلغاء التصفير. لم يتم حذف أي شيء.');
+      }
+    }
 
     await reply(chatId, 'لم أفهم الأمر. استخدم الأزرار في لوحة التحكم.');
     return Response.json({ ok: true });
@@ -336,6 +348,99 @@ async function shieldTest(supabase: any, chatId: string) {
       lines.push(`❓ <b>${htmlEscape(item.content_type)}</b>: فشل الفحص`);
     }
   }
+
+  return reply(chatId, lines.join('\n'));
+}
+
+async function resetOperationalData(supabase: any, chatId: string) {
+  await sendTelegramMessage(chatId, '🔄 بدأت عملية التصفير... جاري الحذف.', MAIN_KEYBOARD);
+
+  // ═══ الجداول التشغيلية اللي نمسحها ═══
+  const tablesToDelete = [
+    'action_queue',
+    'content_log',
+    'content_deliveries',
+    'session_logs',
+    'daily_checkins',
+    'content_opportunities',
+    'original_content_hypotheses',
+    'content_format_decisions',
+    'content_production_cards',
+    'learning_tweet_queue',
+    'learning_cycles',
+    'performance_scans',
+    'telegram_bot_state',
+    'account_state',
+    'viral_scan_runs',
+    'viral_tweet_analyses',
+    'raw_research_items',
+    'trends',
+    'creator_intel',
+    'discovered_items',
+    'repo_source_files',
+    'growth_learning_runs',
+    'requirement_status',
+    'target_plans',
+  ];
+
+  const results: { table: string; deleted: number | string }[] = [];
+
+  for (const table of tablesToDelete) {
+    try {
+      const { count, error } = await supabase.from(table).delete({ count: 'exact' }).neq('id', '00000000-0000-0000-0000-000000000000');
+      if (error) {
+        results.push({ table, deleted: `خطأ: ${error.message?.slice(0, 50)}` });
+      } else {
+        results.push({ table, deleted: count ?? 0 });
+      }
+    } catch (e: any) {
+      results.push({ table, deleted: `خطأ: ${String(e.message || '').slice(0, 50)}` });
+    }
+  }
+
+  // ═══ الجداول اللي حافظين عليها (العقل) ═══
+  const keptTables = [
+    'x_algorithm_learning_rules',
+    'viral_style_patterns',
+    'viral_account_patterns',
+    'working_memory',
+    'system_learning_rules',
+    'model_routing_rules',
+    'accounts',
+    'repo_extracted_rules',
+  ];
+
+  const keptCounts: { table: string; rows: number }[] = [];
+  for (const table of keptTables) {
+    try {
+      const { count } = await supabase.from(table).select('*', { count: 'exact', head: true });
+      keptCounts.push({ table, rows: count ?? 0 });
+    } catch {
+      keptCounts.push({ table, rows: -1 });
+    }
+  }
+
+  const deletedTotal = results.reduce((sum, r) => typeof r.deleted === 'number' ? sum + r.deleted : sum, 0);
+  const keptTotal = keptCounts.reduce((sum, r) => sum + Math.max(r.rows, 0), 0);
+
+  const lines = [
+    `✅ <b>تم تصفير البيانات بنجاح</b>`,
+    `━━━━━━━━━━━━━━━━━━━━`,
+    `<b>تم حذف:</b> ${deletedTotal} صف من ${tablesToDelete.length} جدول`,
+    ``,
+    `<b>🧠 العقل محفوظ:</b> ${keptTotal} صف`,
+  ];
+
+  // أضف تفاصيل العقل المحفوظ
+  for (const k of keptCounts) {
+    if (k.rows > 0) {
+      lines.push(`  ✅ ${k.table}: ${k.rows}`);
+    }
+  }
+
+  lines.push('');
+  lines.push('━━━━━━━━━━━━━━━━━━━━');
+  lines.push('<i>شغّل 🧪 تشغيل خطة اليوم لبدء تجربة جديدة بالعقل المحفوظ</i>');
 
   return reply(chatId, lines.join('\n'));
 }
