@@ -121,7 +121,7 @@ export async function GET() {
 
   return Response.json({
     ok: checks.supabase?.ok && allTablesExist && allColumnsOk,
-    version: 'v3-db-migration-fix',
+    version: 'v3-simplified-pipeline',
     checks,
     tables: tableStatus,
     total_tables_checked: keyTables.length,
