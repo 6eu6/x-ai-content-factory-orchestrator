@@ -187,14 +187,71 @@ async function handleMessage(chatId: string, userId: string, username: string, t
 
     // ═══ تقرير الأداء ═══
     if (text === '📊 تقرير الأداء') {
-      await sendReply(chatId, '⏳ جاري فحص الحساب...');
+      await sendReply(chatId, '⏳ جاري فحص الحساب وتحليل الأداء...');
 
       try {
         const { scanAccountPerformance } = await import('../../../../lib/performance-feedback');
         const username = optionalEnv('X_USERNAME', '30piq');
-        await scanAccountPerformance(10, username);
+        const result = await scanAccountPerformance(10, username);
+
+        // ═══ عرض النتائج مباشرة — مو يعتمد على allowedChatId ═══
+        if (!result.ok) {
+          await sendReply(chatId, `❌ فشل الفحص: ${htmlEscape(result.brain_summary || 'خطأ غير معروف')}`);
+        } else if (result.scanned_tweets === 0) {
+          await sendReply(chatId, 'ℹ️ لم يتم العثور على تغريدات في حسابك. انشر محتوى أول ثم أعد الفحص.');
+        } else {
+          const lines: string[] = [];
+          lines.push(`📊 <b>تقرير الأداء</b> — @${username}`);
+          lines.push('━━━━━━━━━━━━━━━━━━━━');
+          lines.push(`📝 تغريدات مُفحوصة: ${result.scanned_tweets}`);
+
+          const winners = result.performance_analysis.filter((a: any) => a.verdict === 'high_performer');
+          const losers = result.performance_analysis.filter((a: any) => a.verdict === 'underperformer');
+          const avg = result.performance_analysis.length > 0
+            ? (result.performance_analysis.reduce((s: number, a: any) => s + a.performance_score, 0) / result.performance_analysis.length).toFixed(2)
+            : '0';
+
+          lines.push(`✅ ناجحة: ${winners.length} | ⚠️ عادية: ${result.scanned_tweets - winners.length - losers.length} | ❌ ضعيفة: ${losers.length}`);
+          lines.push(`📈 متوسط الأداء: ${avg}`);
+          lines.push('━━━━━━━━━━━━━━━━━━━━');
+
+          if (winners.length > 0) {
+            lines.push('\n🏆 <b>التغريدات الناجحة:</b>');
+            for (const w of winners.slice(0, 3)) {
+              lines.push(`  📌 ${htmlEscape(shortText(w.text_preview, 80))}`);
+              if (w.success_factors?.length) lines.push(`     ✦ ${htmlEscape(w.success_factors[0].slice(0, 80))}`);
+              lines.push(`     نقاط: ${w.performance_score} | ❤️ ${w.metrics.likes} 🔁 ${w.metrics.retweets} 🔖 ${w.metrics.bookmarks}`);
+            }
+          }
+
+          if (losers.length > 0) {
+            lines.push('\n📉 <b>التغريدات الضعيفة:</b>');
+            for (const l of losers.slice(0, 3)) {
+              lines.push(`  📌 ${htmlEscape(shortText(l.text_preview, 80))}`);
+              if (l.failure_factors?.length) lines.push(`     ✦ ${htmlEscape(l.failure_factors[0].slice(0, 80))}`);
+              lines.push(`     نقاط: ${l.performance_score} | ❤️ ${l.metrics.likes} 🔁 ${l.metrics.retweets} 🔖 ${l.metrics.bookmarks}`);
+            }
+          }
+
+          if (result.learning_updates?.length > 0) {
+            lines.push(`\n🧠 <b>تحديثات التعلم:</b> ${result.learning_updates.length}`);
+            const boosts = result.learning_updates.filter((u: any) => u.type === 'rule_boost').length;
+            const decays = result.learning_updates.filter((u: any) => u.type === 'rule_decay').length;
+            const antiPatterns = result.learning_updates.filter((u: any) => u.type === 'anti_pattern').length;
+            const newPatterns = result.learning_updates.filter((u: any) => u.type === 'new_pattern').length;
+            if (boosts) lines.push(`  ⬆️ تعزيز قواعد: ${boosts}`);
+            if (decays) lines.push(`  ⬇️ تضعيف قواعد: ${decays}`);
+            if (newPatterns) lines.push(`  ✨ أنماط جديدة: ${newPatterns}`);
+            if (antiPatterns) lines.push(`  🚫 أنماط مضادة: ${antiPatterns}`);
+          }
+
+          lines.push('\n━━━━━━━━━━━━━━━━━━━━');
+          lines.push(`<i>تم تحديث العقل بناءً على الأداء الفعلي.</i>`);
+
+          await sendReply(chatId, lines.join('\n'));
+        }
       } catch (e: any) {
-        await sendReply(chatId, `❌ فشل الفحص: ${htmlEscape(e.message || '')}`);
+        await sendReply(chatId, `❌ فشل الفحص: ${htmlEscape(e.message || 'خطأ غير معروف')}`);
       }
       return;
     }
