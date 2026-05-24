@@ -1,11 +1,11 @@
 import { waitUntil } from '@vercel/functions';
 import { optionalEnv } from '../../../../lib/env';
 import { supabaseAdmin } from '../../../../lib/supabase';
-import { assertTelegramChat, extractHandle, extractTweetUrl, htmlEscape, MAIN_KEYBOARD, sendTelegramMessage, sendTelegramPhoto, sendTelegramVideo, sendTelegramAnimation, shortText } from '../../../../lib/telegram';
+import { assertTelegramChat, extractHandle, extractTweetUrl, htmlEscape, MAIN_KEYBOARD, sendTelegramMessage, shortText } from '../../../../lib/telegram';
 import { scanXAccounts, scanSingleTweet } from '../../../../lib/content-engine-v3';
 
 /**
- * Telegram Webhook Handler v3 — مبسط
+ * Telegram Webhook Handler v3.1 — تحليل حقيقي بالذكاء الاصطناعي
  *
  * 3 أزرار فقط:
  * 🧠 تشغيل كامل — زحف + عقل + محتوى + تسليم
@@ -14,7 +14,10 @@ import { scanXAccounts, scanSingleTweet } from '../../../../lib/content-engine-v
  *
  * + إضافة حساب / إضافة تغريدة
  *
- * يرد على Telegram فوراً (waitUntil للخلفية)
+ * القواعد:
+ * - لا يرسل وسائط (صور/فيديو) لتلقرام — فقط يحللها ويتعلم منها
+ * - التحليل العميق يستخدم AI حقيقي (مو hardcoded)
+ * - التشخيص في server logs فقط (ما يعرض للمستخدم)
  */
 export async function POST(req: Request) {
   try {
@@ -41,7 +44,7 @@ export async function POST(req: Request) {
   }
 }
 
-export async function GET() { return Response.json({ ok: true, endpoint: 'telegram-webhook-v3' }); }
+export async function GET() { return Response.json({ ok: true, endpoint: 'telegram-webhook-v3.1' }); }
 
 // ═══ معالجة الرسائل ═══
 
@@ -114,17 +117,17 @@ async function handleMessage(chatId: string, userId: string, username: string, t
       const tweetUrl = extractTweetUrl(text);
       if (!tweetUrl) { await sendReply(chatId, 'أرسل رابط تغريدة X صحيح'); return; }
 
-      await sendReply(chatId, `⏳ جاري تحليل التغريدة...`);
+      await sendReply(chatId, `⏳ جاري التحليل العميق بالذكاء الاصطناعي...`);
 
       const result = await scanSingleTweet(tweetUrl);
       if (!result.ok) { await sendReply(chatId, `❌ فشل التحليل: ${htmlEscape(result.error || '')}`); return; }
 
       const a = result.analysis;
       const m = result.media || [];
-      const diag = (result as any).diagInfo || '';
-      const deep = (result as any).deepAnalysis as { viralReason: string; stylePattern: string; adaptation: string; mediaImpact: string } | undefined;
+      const deep = result.deepAnalysis;
 
-      let msg = `✅ <b>تم تحليل التغريدة</b>\n`;
+      // ═══ عرض التحليل — بدون إرسال وسائط، بدون تشخيص ═══
+      let msg = `✅ <b>تم التحليل العميق</b>\n`;
       msg += `━━━━━━━━━━━━━━━━━━━━\n`;
       msg += `المؤلف: @${htmlEscape(a.username || '')}\n`;
       msg += `التفاعل: ${a.engagement_score ?? 0}\n`;
@@ -133,25 +136,32 @@ async function handleMessage(chatId: string, userId: string, username: string, t
       msg += `━━━━━━━━━━━━━━━━━━━━\n`;
       msg += `<i>${htmlEscape(shortText(a.text || '', 200))}</i>\n`;
       msg += `━━━━━━━━━━━━━━━━━━━━\n`;
-      // تحليل عميق
-      if (deep) {
-        msg += `🔥 <b>ليش انتشرت:</b> ${htmlEscape(deep.viralReason.slice(0, 200))}\n`;
-        msg += `✍️ <b>نمط الأسلوب:</b> ${htmlEscape(deep.stylePattern.slice(0, 150))}\n`;
-        msg += `🎬 <b>تأثير الوسائط:</b> ${htmlEscape(deep.mediaImpact.slice(0, 150))}\n`;
-      }
-      // عرض معلومات تشخيصية للوسائط
-      if (diag) msg += `${diag}\n`;
-      msg += `\n<i>✅ تم تخزين التحليل + قواعد الانتشار + أنماط الأسلوب في العقل.</i>`;
 
+      // التحليل العميق الحقيقي من AI
+      if (deep) {
+        msg += `\n🔥 <b>ليش انتشرت:</b>\n${htmlEscape(deep.viralReason.slice(0, 300))}\n`;
+        msg += `\n✍️ <b>نمط الأسلوب:</b>\n${htmlEscape(deep.stylePattern.slice(0, 200))}\n`;
+        msg += `\n🎬 <b>تأثير الوسائط:</b>\n${htmlEscape(deep.mediaImpact.slice(0, 200))}\n`;
+        msg += `\n🎯 <b>تطبيق @30piq:</b>\n${htmlEscape(deep.adaptation.slice(0, 200))}\n`;
+      }
+
+      msg += `\n<i>✅ تم تخزين التحليل + أنماط الانتشار + الأسلوب في العقل.</i>`;
+
+      // لا نرسل أي وسائط (صور/فيديو) لتلقرام — فقط التحليل
       await sendReply(chatId, msg);
       return;
     }
 
     // ═══ تشغيل كامل ═══
     if (text === '🧠 تشغيل كامل') {
-      await sendReply(chatId, '⏳ جاري الزحف والتحليل... سأرسل النتائج عند الانتهاء.');
+      await sendReply(chatId, '⏳ جاري الزحف والتحليل العميق... سأرسل النتائج عند الانتهاء.');
 
       const scanResult = await scanXAccounts(5, 10);
+
+      // سجّل التشخيص في server logs
+      if (scanResult.debug_log?.length) {
+        console.log('[scanXAccounts] Debug log:', scanResult.debug_log.join('\n'));
+      }
 
       // تسليم النتائج لتلقرام
       await deliverScanResults(chatId, scanResult);
@@ -166,7 +176,6 @@ async function handleMessage(chatId: string, userId: string, username: string, t
         const { scanAccountPerformance } = await import('../../../../lib/performance-feedback');
         const username = optionalEnv('X_USERNAME', '30piq');
         await scanAccountPerformance(10, username);
-        // الأداء يرسل تلقائياً لتلقرام
       } catch (e: any) {
         await sendReply(chatId, `❌ فشل الفحص: ${htmlEscape(e.message || '')}`);
       }
@@ -212,9 +221,32 @@ async function deliverScanResults(chatId: string, result: any) {
   lines.push(`🧠 تحديثات العقل: ${result.brain_updates.algorithm_rules} قاعدة + ${result.brain_updates.style_patterns} نمط`);
   lines.push(`━━━━━━━━━━━━━━━━━━━━`);
 
+  // لو كل شيء صفر — اعرض نصائح للتصحيح
+  if (result.tweets_analyzed === 0 && result.accounts_scanned === 0) {
+    lines.push('');
+    lines.push('⚠️ <b>لم يتم العثور على بيانات</b>');
+    lines.push('تأكد من:');
+    lines.push('1. إضافة حسابات عبر زر ➕ إضافة حساب');
+    lines.push('2. إضافة تغريدات عبر زر 🔗 إضافة تغريدة');
+    lines.push('3. التحقق من اتصال Supabase');
+
+    // أضف معلومات تشخيصية مختصرة لو متوفرة
+    const debugLog = result.debug_log || [];
+    if (debugLog.length > 0) {
+      const relevantErrors = debugLog.filter(l => l.includes('error') || l.includes('exception') || l.includes('FAILED'));
+      if (relevantErrors.length > 0) {
+        lines.push('');
+        lines.push('<b>🔧 أخطاء:</b>');
+        for (const err of relevantErrors.slice(0, 3)) {
+          lines.push(`• ${htmlEscape(err.slice(0, 100))}`);
+        }
+      }
+    }
+  }
+
   const opps = result.opportunities || [];
 
-  if (!opps.length) {
+  if (!opps.length && result.tweets_analyzed > 0) {
     lines.push('');
     lines.push('ℹ️ لم تُكتشف فرص تفاعل حالياً.');
     lines.push('أضف المزيد من الحسابات عبر زر "➕ إضافة حساب".');
@@ -223,25 +255,27 @@ async function deliverScanResults(chatId: string, result: any) {
   }
 
   // 2. فرص التفاعل
-  lines.push('');
-  lines.push(`<b>📋 فرص التفاعل (${opps.length})</b>`);
-  lines.push('━━━━━━━━━━━━━━━━━━━━');
+  if (opps.length) {
+    lines.push('');
+    lines.push(`<b>📋 فرص التفاعل (${opps.length})</b>`);
+    lines.push('━━━━━━━━━━━━━━━━━━━━');
 
-  for (let i = 0; i < Math.min(opps.length, 5); i++) {
-    const opp = opps[i];
-    const typeLabel = opp.type === 'quote' ? '📌 اقتباس' : opp.type === 'reply' ? '↩️ رد' : opp.type === 'thread' ? '🧵 ثريد' : '📰 مقال';
-    const shieldIcon = opp.shield_passed ? '✅' : '⚠️';
+    for (let i = 0; i < Math.min(opps.length, 5); i++) {
+      const opp = opps[i];
+      const typeLabel = opp.type === 'quote' ? '📌 اقتباس' : opp.type === 'reply' ? '↩️ رد' : opp.type === 'thread' ? '🧵 ثريد' : '📰 مقال';
+      const shieldIcon = opp.shield_passed ? '✅' : '⚠️';
 
-    lines.push(`\n${i + 1}. ${typeLabel} ${shieldIcon}`);
-    if (opp.source_tweet_url) lines.push(`🔗 ${opp.source_tweet_url}`);
-    lines.push(`<i>${htmlEscape(shortText(opp.crafted_text, 280))}</i>`);
-    if (opp.why) lines.push(`💡 ${opp.why}`);
-    if (opp.shield_issues?.length) lines.push(`⚠️ ${opp.shield_issues.join(', ')}`);
+      lines.push(`\n${i + 1}. ${typeLabel} ${shieldIcon}`);
+      if (opp.source_tweet_url) lines.push(`🔗 ${opp.source_tweet_url}`);
+      lines.push(`<i>${htmlEscape(shortText(opp.crafted_text, 280))}</i>`);
+      if (opp.why) lines.push(`💡 ${opp.why}`);
+      if (opp.shield_issues?.length) lines.push(`⚠️ ${opp.shield_issues.join(', ')}`);
+    }
+
+    lines.push('');
+    lines.push('━━━━━━━━━━━━━━━━━━━━');
+    lines.push('<i>انسخ المحتوى وانشره يدوياً على X</i>');
   }
-
-  lines.push('');
-  lines.push('━━━━━━━━━━━━━━━━━━━━');
-  lines.push('<i>انسخ المحتوى وانشره يدوياً على X</i>');
 
   await sendReply(chatId, lines.join('\n'));
 }
