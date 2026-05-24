@@ -32,10 +32,11 @@ function uniqueSmartActions(actions: SmartAction[]): SmartAction[] {
 /**
  * qualityAwareSmartActions — يولد مهام ذكية حسب نتيجة الجودة
  *
- * بدل ما يرمي تحذيرات عامة لما الجودة تفشل، يولد:
- * 1. مهام إصلاح محددة (أي تغريدة فيها مشكلة وليش)
- * 2. خطوات عملية للإصلاح
- * 3. مهام النشر لو فيه شيء جاهز
+ * التحسينات:
+ * 1. لا يكرر مهام النشر اللي buildSmartActions يولدها
+ * 2. التعليمات بالعربي للمستخدم
+ * 3. مشاكل الجودة مترجمة ومفهومة
+ * 4. لا يعرض أكواد داخلية
  */
 function qualityAwareSmartActions(
   rawActions: any[],
@@ -48,67 +49,94 @@ function qualityAwareSmartActions(
   const needsReviewCount = qualityResults.filter((q) => q?.status === 'needs_review').length;
   const actions: SmartAction[] = [];
 
-  // ═══ لو فيه محتوى جاهز، أضف مهام النشر ═══
-  if (readyCount > 0) {
-    const readyTweets = singleTweets.filter((_: any, i: number) => qualityResults[i]?.status === 'ready');
-    const times = readyTweets.map((t: any, i: number) => t.best_time_utc || ['13:00','15:00','17:00'][i]).join(', ');
-    actions.push({
-      action_type: 'publish',
-      instruction: `Publish ${readyCount} ready tweet${readyCount > 1 ? 's' : ''} at UTC: ${times}. Text delivered to Telegram.`,
-      priority: 1
-    });
-  }
-
-  // ═══ لو فيه محتوى يحتاج مراجعة، أضف مهام إصلاح محددة ═══
-  if (needsReviewCount > 0) {
-    for (let i = 0; i < singleTweets.length; i++) {
-      const q = qualityResults[i];
-      if (q?.status !== 'needs_review') continue;
-      const reasons = (q.reasons || []).join(', ');
-      const tweetPreview = (singleTweets[i]?.text || '').slice(0, 60);
-      actions.push({
-        action_type: 'review',
-        instruction: `Review tweet "${tweetPreview}..." — issues: ${reasons}. Fix and publish manually.`,
-        priority: 2
-      });
-    }
-  }
-
   // ═══ لو كل شيء فشل — أضف خطوات عملية ═══
   if (readyCount === 0 && needsReviewCount > 0) {
     const allReasons = Array.from(new Set(qualityResults.flatMap((q: any) => q?.reasons || [])));
+    const translatedReasons = allReasons.map((r: string) => translateQualityReason(r));
     actions.push({
       action_type: 'research',
-      instruction: `No tweets passed quality gate. Common issues: ${allReasons.join(', ')}. Run 🔎 اكتشاف تلقائي to gather source-backed research, then re-run 🧪 تشغيل خطة اليوم.`,
+      instruction: `لم تجتز أي تغريدة فحص الجودة. المشاكل: ${translatedReasons.join('، ')}. شغّل 🔎 اكتشاف تلقائي لجمع أبحاث موثقة، ثم أعد 🧪 تشغيل خطة اليوم.`,
       priority: 1
     });
   }
 
-  // ═══ أضف مهام من content pack (اللي فيها أنواع ذكية) ═══
+  // ═══ لو فيه محتوى يحتاج مراجعة، أضف مهمة مراجعة واحدة فقط ═══
+  if (needsReviewCount > 0 && readyCount > 0) {
+    const allReasons = Array.from(new Set(qualityResults.filter((q: any) => q?.status === 'needs_review').flatMap((q: any) => q?.reasons || [])));
+    const translatedReasons = allReasons.map((r: string) => translateQualityReason(r));
+    actions.push({
+      action_type: 'review',
+      instruction: `راجع ${needsReviewCount} تغريدة تحتاج تعديل. المشاكل: ${translatedReasons.join('، ')}. عدّلها وانشر يدوياً.`,
+      priority: 2
+    });
+  }
+
+  // ═══ أضف مهام من content pack — فقط الأنواع اللي ما أضفناها ═══
+  const existingTypes = new Set(actions.map(a => a.action_type));
   if (Array.isArray(rawActions)) {
     for (const raw of rawActions) {
       // الشكل الجديد: كائن فيه action_type + instruction
       if (typeof raw === 'object' && raw.instruction) {
+        const rawType = String(raw.action_type || 'engage').toLowerCase();
+        // لا نكرر أنواع المهام اللي أضفناها بالفعل
+        const normalizedType = rawType === 'human_publish_or_engage' ? 'publish' : rawType === 'quality_review_or_research' ? 'review' : rawType;
+        if (existingTypes.has(normalizedType)) continue;
+        // تنظيف التعليمة من الأكواد الداخلية
+        const cleanInstr = cleanInstructionText(String(raw.instruction));
         actions.push({
-          action_type: raw.action_type || 'engage',
-          instruction: raw.instruction,
+          action_type: normalizedType,
+          instruction: cleanInstr,
           priority: raw.priority || actions.length + 3
         });
+        existingTypes.add(normalizedType);
       }
       // الشكل القديم: نص فقط
       else if (typeof raw === 'string' && raw.trim()) {
         // لا نضيف مهام نشر عامة لو أضفناها بالفعل
-        if (/publish the \d+ (approved|safe|ready) tweets/i.test(raw) && readyCount > 0) continue;
+        if (/publish the \d+ (approved|safe|ready) tweets/i.test(raw) && existingTypes.has('publish')) continue;
+        const cleanInstr = cleanInstructionText(raw);
+        const type = existingTypes.has('engage') ? 'research' : 'engage';
         actions.push({
-          action_type: readyCount > 0 ? 'engage' : 'research',
-          instruction: raw,
+          action_type: type,
+          instruction: cleanInstr,
           priority: actions.length + 3
         });
+        existingTypes.add(type);
       }
     }
   }
 
-  return uniqueSmartActions(actions).slice(0, 8);
+  return uniqueSmartActions(actions).slice(0, 6);
+}
+
+/**
+ * ترجمة أسباب فشل الجودة للعربي
+ */
+function translateQualityReason(reason: string): string {
+  const map: Record<string, string> = {
+    'claim_needs_source': 'يحتاج مصدر موثق',
+    'generic_or_engagement_bait': 'محتوى عام',
+    'first_person_claim': 'ادعاء شخصي غير موثق',
+    'unsourced_claim': 'بدون مصدر',
+    'hashtag_violation': 'يحتوي هاشتاقات',
+    'too_short': 'قصير جداً',
+    'instruction_instead_of_content': 'تعليمات بدل محتوى',
+    'empty_content': 'محتوى فارغ',
+    'missing_mechanics': 'بدون آلية واضحة',
+  };
+  return map[String(reason || '').toLowerCase().trim()] || String(reason || '');
+}
+
+/**
+ * تنظيف نص التعليمة من الأكواد الداخلية
+ */
+function cleanInstructionText(raw: string): string {
+  let text = raw.trim();
+  // إزالة الأكواد بين أقواس مربعة
+  text = text.replace(/\[(\w+)\]\s*/g, '');
+  // إزالة بادئات الأكواد التقنية
+  text = text.replace(/^(human_publish_or_engage|quality_review_or_research|publish|engage|review|research|create_asset|log_results)\s*[:\-—]?\s*/i, '');
+  return text.trim();
 }
 
 export async function POST(req: Request) { return run(req); }
@@ -350,11 +378,19 @@ async function run(req: Request) {
       try {
         await supabase.from('action_queue').delete().eq('status', 'pending');
       } catch {}
-      // إدراج المهام الجديدة — كل مهمة بنوعها الصحيح
+      // إدراج المهام الجديدة — كل مهمة بنوعها الصحيح + عنوان بالعربي
+      const actionTypeLabels: Record<string, string> = {
+        publish: 'نشر المحتوى',
+        engage: 'التفاعل والردود',
+        review: 'مراجعة الجودة',
+        research: 'بحث وإكتشاف',
+        create_asset: 'إنشاء أصل (GitHub/مقال)',
+        log_results: 'تسجيل النتائج',
+      };
       await supabase.from('action_queue').insert(actions.map((action: SmartAction, index: number) => ({
         priority: action.priority || index + 1,
         action_type: action.action_type,
-        title: `Daily: ${action.action_type}`,
+        title: actionTypeLabels[action.action_type] || `مهمة: ${action.action_type}`,
         instruction: action.instruction,
         prepared_content: JSON.stringify({ ready_count: readyCount, quality_issues: combinedResults.filter(q => q.status === 'needs_review').flatMap((q: any) => q.reasons || []) }),
         status: 'pending',

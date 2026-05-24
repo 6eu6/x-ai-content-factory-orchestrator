@@ -353,29 +353,48 @@ export async function prepareAndDeliverDailyPack(
       const reviewCount = items.filter(i => i.status === 'needs_review').length;
 
       await sendTelegramMessage(chatId,
-        `📦 <b>Daily Content Pack — ${packDate}</b>\n` +
-        `Account: @${username}\n` +
+        `📦 <b>حزمة المحتوى اليومية — ${packDate}</b>\n` +
+        `الحساب: @${username}\n` +
         `━━━━━━━━━━━━━━━━━━━━\n` +
-        `✅ Ready: ${readyCount} | ⚠️ Review: ${reviewCount} | 🚫 Blocked: ${blockedCount}\n` +
-        `Types: ${[...new Set(items.map(i => i.content_type))].join(', ')}\n` +
+        `✅ جاهز: ${readyCount} | ⚠️ مراجعة: ${reviewCount} | 🚫 محظور: ${blockedCount}\n` +
+        `الأنواع: ${[...new Set(items.map(i => i.content_type))].join(', ')}\n` +
         `━━━━━━━━━━━━━━━━━━━━\n` +
-        `<i>Content below — copy and publish manually</i>`
+        `<i>المحتوى بالأسفل — انسخه وانشر يدوياً</i>`
       );
 
-      // أرسل كل عنصر بروسالة منفصلة
+      // أرسل كل عنصر بروسالة منفصلة — لكن اجمع العناصر القصيرة
+      let combinedMessage = '';
       for (const item of items) {
         if (item.status === 'blocked') continue;
         const formatted = formatContentForTelegram(item);
-        try {
-          await sendTelegramMessage(chatId, formatted);
-        } catch {}
+        // لو الرسالة طويلة، أرسلها لحالها. لو قصيرة، اجمعها
+        if (formatted.length > 800) {
+          // أرسل أي رسالة مجمعة قبلها
+          if (combinedMessage) {
+            try { await sendTelegramMessage(chatId, combinedMessage); } catch {}
+            combinedMessage = '';
+          }
+          try { await sendTelegramMessage(chatId, formatted); } catch {}
+        } else {
+          if (combinedMessage.length + formatted.length + 2 > 3500) {
+            // وصلنا للحد — أرسل اللي جمعناه
+            try { await sendTelegramMessage(chatId, combinedMessage); } catch {}
+            combinedMessage = formatted;
+          } else {
+            combinedMessage = combinedMessage ? `${combinedMessage}\n\n${formatted}` : formatted;
+          }
+        }
+      }
+      // أرسل أي رسالة متبقية
+      if (combinedMessage) {
+        try { await sendTelegramMessage(chatId, combinedMessage); } catch {}
       }
 
       // رسالة الختام
       await sendTelegramMessage(chatId,
         `━━━━━━━━━━━━━━━━━━━━\n` +
-        `🛡 <b>Shield Summary:</b> ${readyCount} passed, ${reviewCount} need review, ${blockedCount} blocked\n` +
-        `📋 <b>Next:</b> After publishing, send "📊 مسح الأداء" to measure results and learn\n` +
+        `🛡 <b>ملخص الحماية:</b> ${readyCount} اجتاز، ${reviewCount} يحتاج مراجعة، ${blockedCount} محظور\n` +
+        `📋 <b>التالي:</b> بعد النشر، أرسل "📊 مسح الأداء" لقياس النتائج والتعلم\n` +
         `━━━━━━━━━━━━━━━━━━━━`,
         MAIN_KEYBOARD
       );
@@ -418,10 +437,10 @@ export async function prepareAndDeliverDailyPack(
   const reviewCount = items.filter(i => i.status === 'needs_review').length;
 
   const recommendations: string[] = [];
-  if (readyCount > 0) recommendations.push(`${readyCount} items ready to publish. Copy from Telegram and post manually.`);
-  if (reviewCount > 0) recommendations.push(`${reviewCount} items need review. Check shield suggestions and edit before publishing.`);
-  if (blockedCount > 0) recommendations.push(`${blockedCount} items blocked by shield. Do not publish these without major edits.`);
-  recommendations.push('After publishing, run account-performance-scan to measure results and update learning.');
+  if (readyCount > 0) recommendations.push(`${readyCount} عناصر جاهزة للنشر. انسخ من تلجرام وانشر يدوياً.`);
+  if (reviewCount > 0) recommendations.push(`${reviewCount} عناصر تحتاج مراجعة. راجع اقتراحات الحماية وعدّل قبل النشر.`);
+  if (blockedCount > 0) recommendations.push(`${blockedCount} عناصر محظورة. لا تنشرها بدون تعديل كبير.`);
+  recommendations.push('بعد النشر، شغّل مسح الأداء لقياس النتائج وتحديث التعلم.');
 
   return {
     pack_date: packDate,

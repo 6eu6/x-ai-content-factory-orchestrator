@@ -232,32 +232,63 @@ async function learningStatus(supabase: any, chatId: string) {
 }
 
 async function dailyTasks(supabase: any, chatId: string) {
-  const { data } = await supabase.from('action_queue').select('priority,action_type,instruction,status,created_at').eq('status', 'pending').order('priority', { ascending: true }).limit(10);
+  const { data } = await supabase.from('action_queue').select('priority,action_type,instruction,status,created_at').eq('status', 'pending').order('priority', { ascending: true }).limit(20);
   if (!data?.length) return reply(chatId, 'لا توجد مهام معلقة.\n\nشغّل 🧪 تشغيل خطة اليوم أولاً لتوليد المهام.');
-  // إزالة التكرار حسب النص
-  const seen = new Set<string>();
-  const unique = data.filter((x: any) => {
-    const key = String(x.instruction || '').trim().toLowerCase();
-    if (!key || seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  }).slice(0, 8);
 
-  // أيقونات حسب نوع المهمة
-  const typeEmoji: Record<string, string> = {
-    publish: '✍️',
-    engage: '💬',
-    review: '🔍',
-    research: '🔎',
-    create_asset: '🏗️',
-    log_results: '📊',
-    human_publish_or_engage: '✍️',
-    quality_review_or_research: '🔍'
+  // تنظيف التعليمات من الأكواد الداخلية
+  const cleanInstruction = (raw: string): string => {
+    let text = String(raw || '').trim();
+    // إزالة الأكواد الداخلية مثل [human_publish_or_engage]
+    text = text.replace(/\[(\w+)\]\s*/g, '');
+    // إزالة أسماء الأكواد التقنية الإنجليزية المكررة
+    text = text.replace(/^(human_publish_or_engage|quality_review_or_research|publish|engage|review|research|create_asset|log_results)\s*[:\-—]?\s*/i, '');
+    // ترجمة مشاكل الجودة
+    text = text.replace(/claim_needs_source/g, 'يحتاج مصدر موثق');
+    text = text.replace(/generic_or_engagement_bait/g, 'محتوى عام أو بيت تفاعل');
+    text = text.replace(/first_person_claim/g, 'ادعاء شخصي غير موثق');
+    text = text.replace(/unsourced_claim/g, 'ادعاء بدون مصدر');
+    text = text.replace(/hashtag_violation/g, 'يحتوي هاشتاقات');
+    text = text.replace(/too_short/g, 'قصير جداً');
+    text = text.replace(/instruction_instead_of_content/g, 'تعليمات بدل محتوى');
+    return text.trim();
+  };
+
+  // إزالة التكرار حسب النوع والمعنى (ليس فقط النص)
+  const seenTypes = new Set<string>();
+  const seenInstructions = new Set<string>();
+  const unique = data.filter((x: any) => {
+    const cleanText = cleanInstruction(x.instruction || '');
+    if (!cleanText) return false;
+    // إزالة التكرار حسب النوع — نوع واحد = مهمة واحدة
+    const typeKey = String(x.action_type || '').toLowerCase();
+    if (['publish', 'human_publish_or_engage'].includes(typeKey) && seenTypes.has('publish')) return false;
+    if (['engage'].includes(typeKey) && seenTypes.has('engage')) return false;
+    if (['review', 'quality_review_or_research'].includes(typeKey) && seenTypes.has('review')) return false;
+    if (['research'].includes(typeKey) && seenTypes.has('research')) return false;
+    // إزالة التكرار حسب النص
+    const normalKey = cleanText.toLowerCase().replace(/\s+/g, ' ').slice(0, 80);
+    if (seenInstructions.has(normalKey)) return false;
+    seenTypes.add(typeKey === 'human_publish_or_engage' ? 'publish' : typeKey === 'quality_review_or_research' ? 'review' : typeKey);
+    seenInstructions.add(normalKey);
+    return true;
+  }).slice(0, 6);
+
+  // أيقونات حسب نوع المهمة — بالعربي
+  const typeLabels: Record<string, { emoji: string; label: string }> = {
+    publish: { emoji: '✍️', label: 'نشر' },
+    engage: { emoji: '💬', label: 'تفاعل' },
+    review: { emoji: '🔍', label: 'مراجعة' },
+    research: { emoji: '🔎', label: 'بحث' },
+    create_asset: { emoji: '🏗️', label: 'إنشاء أصل' },
+    log_results: { emoji: '📊', label: 'تسجيل' },
+    human_publish_or_engage: { emoji: '✍️', label: 'نشر/تفاعل' },
+    quality_review_or_research: { emoji: '🔍', label: 'مراجعة جودة' }
   };
 
   const lines = unique.map((x: any, i: number) => {
-    const emoji = typeEmoji[x.action_type] || '📋';
-    return `${i + 1}. ${emoji} ${htmlEscape(shortText(x.instruction, 200))}`;
+    const typeInfo = typeLabels[x.action_type] || { emoji: '📋', label: x.action_type || 'مهمة' };
+    const cleanText = cleanInstruction(x.instruction || '');
+    return `${i + 1}. ${typeInfo.emoji} <b>${typeInfo.label}:</b> ${htmlEscape(shortText(cleanText, 180))}`;
   });
   return reply(chatId, `<b>📋 المهام اليومية</b>\n━━━━━━━━━━━━━━━━━━━━\n${lines.join('\n')}\n━━━━━━━━━━━━━━━━━━━━\n<i>شغّل 🧪 تشغيل خطة اليوم لتحديث المهام</i>`);
 }
@@ -310,7 +341,11 @@ async function shieldTest(supabase: any, chatId: string) {
 }
 
 async function triggerEndpoint(req: Request, chatId: string, path: string) {
-  await sendTelegramMessage(chatId, 'بدأت التشغيل. سأرسل النتيجة المختصرة بعد انتهاء الطلب.', MAIN_KEYBOARD);
+  // لا نرسل رسالة "بدأت التشغيل" لو المسار يرسل رسائل تلقائياً (daily-run يرسل عبر publishing-pipeline)
+  const autoDelivers = path.includes('daily-run');
+  if (!autoDelivers) {
+    await sendTelegramMessage(chatId, 'بدأت التشغيل. سأرسل النتيجة المختصرة بعد انتهاء الطلب.', MAIN_KEYBOARD);
+  }
   const origin = new URL(req.url).origin;
   const secret = optionalEnv('ORCHESTRATOR_SECRET');
   const separator = path.includes('?') ? '&' : '?';
@@ -325,6 +360,14 @@ async function triggerEndpoint(req: Request, chatId: string, path: string) {
   if (path.includes('memory-maintenance')) return reply(chatId, `تمت صيانة الذاكرة.\n${htmlEscape(json.summary || json.version || 'تم بنجاح')}`);
   if (path.includes('growth-learning')) return reply(chatId, `تم تعلم النمو.\nقواعد الخوارزمية: ${json.inserted?.algorithm_rules ?? 0}\nأنماط الأسلوب: ${json.inserted?.style_patterns ?? 0}\nفرص MCP: ${json.inserted?.mcp_opportunities ?? 0}`);
   if (path.includes('research-intel')) return reply(chatId, `تم الاكتشاف التلقائي.\n${htmlEscape(json.intel?.market_read || json.version || 'تم بنجاح')}`);
+  // daily-run يرسل المحتوى تلقائياً عبر publishing-pipeline — نرسل ملخص فقط
+  if (autoDelivers) {
+    const ready = json.contentPack?.ready_count ?? 0;
+    const needsReview = (json.contentPack?.quality_gate || []).filter((q: any) => q.status === 'needs_review').length;
+    const blocked = (json.contentPack?.shield_results || []).filter((s: any) => !s.passed).length;
+    const types = [...new Set((json.diverse_content || []).map((d: any) => d.content_type))].join(', ') || 'تغريدات';
+    return reply(chatId, `✅ تم تشغيل خطة اليوم.\nجاهز للنشر: ${ready} | يحتاج مراجعة: ${needsReview} | محظور: ${blocked}\nالأنواع: ${types}\n\n📋 شغّل المهام اليومية لمشاهدة الخطوات التالية.`);
+  }
   const ready = json.contentPack?.ready_count ?? 0;
   const safe = json.contentPack?.safe_to_publish ? 'نعم' : 'لا';
   return reply(chatId, `تم التشغيل.\nجاهز للنشر: ${ready}\nآمن للنشر: ${safe}\nالنسخة: ${htmlEscape(json.orchestrator_version || json.version || '-')}`);
