@@ -68,6 +68,44 @@ export function extractHandle(text: string) {
   return String(text || '').replace(/^@/, '').replace(/^https?:\/\/(x|twitter)\.com\//i, '').split(/[\s/?]/)[0].trim();
 }
 
+/**
+ * استخراج عدة يوزرات من رسالة واحدة
+ * يدعم مسافات، فواصل، @، روابط
+ * مثال: "@naval emollick, paulg https://x.com/sama"
+ * ← ["naval", "emollick", "paulg", "sama"]
+ */
+export function extractHandles(text: string): string[] {
+  const raw = String(text || '').trim();
+  if (!raw) return [];
+
+  // استبدال الفواصل بمسافات
+  const normalized = raw
+    .replace(/[,،;؛\n\r]+/g, ' ')
+    .replace(/https?:\/\/(x|twitter)\.com\//gi, '@');
+
+  // تقسيم بمسافات
+  const tokens = normalized.split(/\s+/).filter(Boolean);
+
+  const handles: string[] = [];
+  const seen = new Set<string>();
+
+  for (const token of tokens) {
+    // إزالة @ من البداية
+    let handle = token.replace(/^@+/, '').trim();
+    // إزالة أي / أو ؟ متبقية
+    handle = handle.split(/[/?]/)[0].trim();
+    // تجاهل الفارغ والقصير جداً
+    if (!handle || handle.length < 2) continue;
+    // تجاهل التكرار
+    const lower = handle.toLowerCase();
+    if (seen.has(lower)) continue;
+    seen.add(lower);
+    handles.push(handle);
+  }
+
+  return handles;
+}
+
 export function extractTweetUrl(text: string) {
   const match = String(text || '').match(/https?:\/\/(?:x|twitter)\.com\/[^\s]+\/status\/\d+/i);
   return match ? match[0] : '';

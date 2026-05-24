@@ -1,7 +1,7 @@
 import { waitUntil } from '@vercel/functions';
 import { optionalEnv } from '../../../../lib/env';
 import { supabaseAdmin } from '../../../../lib/supabase';
-import { assertTelegramChat, extractHandle, extractTweetUrl, htmlEscape, MAIN_KEYBOARD, sendTelegramMessage, shortText } from '../../../../lib/telegram';
+import { assertTelegramChat, extractHandle, extractHandles, extractTweetUrl, htmlEscape, MAIN_KEYBOARD, sendTelegramMessage, shortText } from '../../../../lib/telegram';
 import { scanXAccounts, scanSingleTweet } from '../../../../lib/content-engine-v3';
 
 /**
@@ -70,37 +70,49 @@ async function handleMessage(chatId: string, userId: string, username: string, t
     // ═══ إضافة حساب ═══
     if (text === '➕ إضافة حساب') {
       await setFlow(supabase, chatId, 'awaiting_account');
-      await sendReply(chatId, 'أرسل حساب X للتعلم منه. مثال: emollick أو @emollick أو رابط الحساب');
+      await sendReply(chatId, 'أرسل يوزر X أو أكثر مفصولة بمسافة أو فاصلة.\nمثال: emollick @naval paulg\nأو: @emollick, @sama, elonmusk');
       return;
     }
 
     if (state?.current_flow === 'awaiting_account') {
       await clearFlow(supabase, chatId);
-      const handle = extractHandle(text);
-      if (!handle) { await sendReply(chatId, 'أرسل يوزر صحيح مثل: emollick أو @emollick'); return; }
+      const handles = extractHandles(text);
+      if (!handles.length) { await sendReply(chatId, 'أرسل يوزر صحيح مثل: emollick أو @emollick\nتقدر ترسل عدة يوزرات: naval emollick paulg'); return; }
 
-      try {
-        await supabase.from('accounts').upsert({ handle, tier: 2, active: true, notes: 'Added from Telegram' }, { onConflict: 'handle' });
-      } catch {
-        try { await supabase.from('accounts').upsert({ handle }, { onConflict: 'handle' }); } catch {}
+      const results: string[] = [];
+      const maxHandles = 10; // حد أقصى للحماية
+
+      for (const handle of handles.slice(0, maxHandles)) {
+        // حفظ في قاعدة البيانات
+        try {
+          await supabase.from('accounts').upsert({ handle, tier: 2, active: true, notes: 'Added from Telegram' }, { onConflict: 'handle' });
+        } catch {
+          try { await supabase.from('accounts').upsert({ handle }, { onConflict: 'handle' }); } catch {}
+        }
+
+        // جلب معلومات الحساب
+        let info = '';
+        try {
+          const { getXUserByUsername } = await import('../../../../lib/x');
+          const snapshot = await getXUserByUsername(handle);
+          if (snapshot) {
+            info = ` ✅ (${snapshot.followers_count ?? '?'} متابع, ${snapshot.tweet_count ?? '?'} تغريدة)`;
+            try {
+              await supabase.from('accounts').update({
+                notes: `Followers: ${snapshot.followers_count}, Added: ${new Date().toISOString()}`
+              }).eq('handle', handle);
+            } catch {}
+          }
+        } catch { info = ` ⚠️ (لم أجلب المعلومات)`; }
+
+        results.push(`• @${htmlEscape(handle)}${info}`);
       }
 
-      // جلب معلومات الحساب
-      let info = '';
-      try {
-        const { getXUserByUsername } = await import('../../../../lib/x');
-        const snapshot = await getXUserByUsername(handle);
-        if (snapshot) {
-          info = `\n\n✅ @${htmlEscape(handle)}\nالمتابعين: ${snapshot.followers_count ?? '?'}\nالتغريدات: ${snapshot.tweet_count ?? '?'}`;
-          try {
-            await supabase.from('accounts').update({
-              notes: `Followers: ${snapshot.followers_count}, Added: ${new Date().toISOString()}`
-            }).eq('handle', handle);
-          } catch {}
-        }
-      } catch { info = `\n\n⚠️ لم أتمكن من جلب معلومات @${htmlEscape(handle)} الآن.`; }
-
-      await sendReply(chatId, `تمت إضافة حساب التعلم: @${htmlEscape(handle)}${info}\n\nشغّل 🧠 تشغيل كامل لبدء التحليل.`);
+      const skippedCount = handles.length > maxHandles ? handles.length - maxHandles : 0;
+      let msg = `<b>تمت إضافة ${results.length} حساب تعلم:</b>\n━━━━━━━━━━━━━━━━━━━━\n${results.join('\n')}`;
+      if (skippedCount > 0) msg += `\n\n⚠️ تم تجاهل ${skippedCount} يوزر (الحد الأقصى ${maxHandles})`;
+      msg += `\n\nشغّل 🧠 تشغيل كامل لبدء التحليل.`;
+      await sendReply(chatId, msg);
       return;
     }
 
