@@ -159,12 +159,12 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10): Pro
       manualTweetsCount = manualTweets.length;
       for (const t of manualTweets) {
         totalAnalyzed++;
-        const mediaTypes = (t.media_type || '').split(',').filter(Boolean);
-        const tweetMedia: MediaFromTweet[] = mediaTypes.map((mt: string) => ({
-          type: mt as 'photo' | 'video' | 'animated_gif',
-          url: '',
-          alt_text: ''
-        }));
+        // media_type مو موجود في الجدول — نستخرج الوسائط من analysis_payload أو metrics
+        const tweetMedia: MediaFromTweet[] = [];
+        const payload = t.analysis_payload || {};
+        if (payload.media_impact && payload.media_impact !== 'text_only') {
+          tweetMedia.push({ type: 'photo', url: '', alt_text: '' });  // تقديري
+        }
 
         if (t.engagement_score > 20 || t.engagement_per_1k_followers > 5) {
           viralFound++;
@@ -178,7 +178,7 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10): Pro
           score: t.engagement_score,
           engagement_per_1k_followers: t.engagement_per_1k_followers,
           metrics: t.metrics || {},
-          has_media: (t.media_type || '').length > 0,
+          has_media: t.tweet_type === 'media' || (t.analysis_payload?.media_impact && t.analysis_payload.media_impact !== 'text_only'),
           media: tweetMedia,
           has_question: (t.tweet_text || '').includes('?'),
           is_reply: t.tweet_type === 'reply',
@@ -351,22 +351,27 @@ JSON format: {"viral_reason":"...","style_pattern":"...","media_impact":"...","t
 
             // خزّن النمط الأسلوبي
             if (deepAnalysis.style_pattern || deepAnalysis.adaptation) {
-              await insertIfMissing(supabase, 'viral_style_patterns',
-                { pattern_name: `@${handle}: ${deepAnalysis.hook_formula || deepAnalysis.style_pattern?.slice(0, 60)}` },
-                {
-                  pattern_name: deepAnalysis.hook_formula || deepAnalysis.style_pattern?.slice(0, 80) || `Pattern from @${handle}`,
-                  pattern_description: deepAnalysis.style_pattern || '',
-                  adaptation_for_30piq: deepAnalysis.adaptation || '',
-                  pattern_type: deepAnalysis.psychological_trigger ? 'hook' : 'structure',
-                  source_handles: [handle],
-                  source_tweet_urls: [analysis.tweet_url],
-                  confidence_score: Math.min(10, deepAnalysis.confidence || 5),
-                  status: 'active',
-                  test_run: false,
-                  updated_at: new Date().toISOString()
-                }
-              );
-              brainUpdates.stylePatterns++;
+              try {
+                await insertIfMissing(supabase, 'viral_style_patterns',
+                  { pattern_name: deepAnalysis.hook_formula || deepAnalysis.style_pattern?.slice(0, 80) || `Pattern from @${handle}` },
+                  {
+                    pattern_name: deepAnalysis.hook_formula || deepAnalysis.style_pattern?.slice(0, 80) || `Pattern from @${handle}`,
+                    pattern_description: deepAnalysis.style_pattern || '',
+                    adaptation_for_30piq: deepAnalysis.adaptation || '',
+                    pattern_type: deepAnalysis.psychological_trigger ? 'hook' : 'structure',
+                    why_it_works: deepAnalysis.viral_reason || '',
+                    source_handles: [handle],
+                    source_tweet_urls: [analysis.tweet_url],
+                    confidence_score: Math.min(10, deepAnalysis.confidence || 5),
+                    status: 'active',
+                    test_run: false,
+                    updated_at: new Date().toISOString()
+                  }
+                );
+                brainUpdates.stylePatterns++;
+              } catch (spErr: any) {
+                debugLog.push(`[scan] style pattern insert error: ${spErr.message}`);
+              }
             }
           } catch (learnErr: any) {
             debugLog.push(`[scan] learning error: ${learnErr.message}`);
@@ -374,13 +379,15 @@ JSON format: {"viral_reason":"...","style_pattern":"...","media_impact":"...","t
         }
       }
 
-      // حدّث حالة الحساب — فقط الأعمدة الموجودة فعلاً
+      // حدّث حالة الحساب — فقط الأعمدة الموجودة فعلاً في الجدول
+      // الجدول فيه: handle, tier, category, followers, avg_engagement, our_reply_count, last_reply_date, last_checked, notes, created_at
+      // مافيه: last_scanned_at, updated_at, active, username — لا ترسلها!
       try {
         const snapshot = await getXUserByUsername(handle);
         await supabase.from('accounts').update({
           notes: `Followers: ${snapshot.followers_count}, Scanned: ${new Date().toISOString()}`,
-          followers: snapshot.followers_count,
-          last_checked: new Date().toISOString().split('T')[0]
+          last_checked: new Date().toISOString(),  // ← العمود الصحيح في DB
+          followers: snapshot.followers_count || null
         }).eq('handle', handle);
       } catch (updErr: any) {
         debugLog.push(`[scan] update account error: ${updErr.message}`);
@@ -448,11 +455,11 @@ JSON format: {"viral_reason":"...","style_pattern":"...","media_impact":"...","t
         items: crawlerItems,
         mode: 'production'
       });
-      brainUpdates = {
-        algorithmRules: learned.algorithmRules,
-        stylePatterns: learned.stylePatterns,
-        mcpOpportunities: learned.mcpOpportunities
-      };
+      // ═══ أضف للعداد الموجود بدل ما تمسحه ═══
+      // قبل كان brainUpdates = { ...learned } وده يمسح الأنماط اللي أضيفت مباشرة
+      brainUpdates.algorithmRules += learned.algorithmRules;
+      brainUpdates.stylePatterns += learned.stylePatterns;
+      brainUpdates.mcpOpportunities += learned.mcpOpportunities;
     }
   } catch (e: any) {
     debugLog.push(`[brain] learning failed: ${e.message}`);
@@ -528,20 +535,27 @@ ${tweetsForConcept.map((t, i) => `${i + 1}. @${t.handle} (engagement: ${t.score}
 
             // خزّن كمان كنمط أسلوبي
             if (concept.adaptation) {
-              await insertIfMissing(supabase, 'viral_style_patterns',
-                { pattern_name: concept.name.slice(0, 100) },
-                {
-                  pattern_name: concept.name.slice(0, 100),
-                  pattern_description: concept.description,
-                  adaptation_for_30piq: concept.adaptation,
-                  evidence: `Shared concept from ${tweetsForConcept.length} viral tweets`,
-                  source_type: 'batch_concept_extraction',
-                  confidence_score: Math.min(10, 5 + Math.floor(tweetsForConcept.length / 3)),
-                  status: 'active',
-                  updated_at: new Date().toISOString()
-                }
-              );
-              brainUpdates.stylePatterns++;
+              try {
+                await insertIfMissing(supabase, 'viral_style_patterns',
+                  { pattern_name: concept.name.slice(0, 100) },
+                  {
+                    pattern_name: concept.name.slice(0, 100),
+                    pattern_description: concept.description,
+                    adaptation_for_30piq: concept.adaptation,
+                    pattern_type: 'structure',  // ← مطلوب NOT NULL!
+                    why_it_works: `Shared concept from ${tweetsForConcept.length} viral tweets`,
+                    source_handles: [],
+                    source_tweet_urls: [],
+                    confidence_score: Math.min(10, 5 + Math.floor(tweetsForConcept.length / 3)),
+                    status: 'active',
+                    test_run: false,
+                    updated_at: new Date().toISOString()
+                  }
+                );
+                brainUpdates.stylePatterns++;
+              } catch (spErr: any) {
+                debugLog.push(`[brain-concepts] style pattern insert error: ${spErr.message}`);
+              }
             }
           }
         }
@@ -1068,24 +1082,49 @@ async function upsertBrainConcept(
     // زِد الثقة (لكن مو أكثر من 10)
     const newConfidence = Math.min(10, currentConfidence + 0.5);
 
-    // أضف الدليل الجديد للأدلة الموجودة
-    const existingEvidence = existingData.evidence || '';
-    const updatedEvidence = existingEvidence.length > 800
-      ? `${existingEvidence.slice(0, 400)} | +${newEvidence.slice(0, 300)}`
-      : `${existingEvidence} | +${newEvidence}`;
+    // حدّث حسب نوع الجدول — كل جدول له أعمدة مختلفة
+    if (table === 'viral_style_patterns') {
+      // viral_style_patterns مافيه evidence أو source_type
+      // حدّث الثقة + source_handles لو موجودة
+      const existingHandles: string[] = Array.isArray(existingData.source_handles) ? existingData.source_handles : [];
+      // حاول تستخلص handle من الدليل الجديد
+      const handleMatch = newEvidence.match(/@(\w+)/);
+      const newHandle = handleMatch ? handleMatch[1] : null;
+      const updatedHandles = newHandle && !existingHandles.includes(newHandle)
+        ? [...existingHandles, newHandle].slice(0, 10)
+        : existingHandles;
 
-    // حدّث الثقة والأدلة
-    const updateResult = await supabase
-      .from(table)
-      .update({
-        confidence_score: newConfidence,
-        evidence: updatedEvidence.slice(0, 1000),
-        updated_at: new Date().toISOString(),
-        test_run: false
-      })
-      .eq('id', existingData.id);
+      const updateResult = await supabase
+        .from(table)
+        .update({
+          confidence_score: newConfidence,
+          source_handles: updatedHandles,
+          updated_at: new Date().toISOString(),
+          test_run: false
+        })
+        .eq('id', existingData.id);
 
-    if (updateResult.error) throw updateResult.error;
+      if (updateResult.error) throw updateResult.error;
+    } else {
+      // x_algorithm_learning_rules فيه evidence
+      const existingEvidence = existingData.evidence || '';
+      const updatedEvidence = existingEvidence.length > 800
+        ? `${existingEvidence.slice(0, 400)} | +${newEvidence.slice(0, 300)}`
+        : `${existingEvidence} | +${newEvidence}`;
+
+      const updateResult = await supabase
+        .from(table)
+        .update({
+          confidence_score: newConfidence,
+          evidence: updatedEvidence.slice(0, 1000),
+          updated_at: new Date().toISOString(),
+          test_run: false
+        })
+        .eq('id', existingData.id);
+
+      if (updateResult.error) throw updateResult.error;
+    }
+
     console.log(`[brain-learn] REINFORCED concept (${currentConfidence.toFixed(1)}→${newConfidence.toFixed(1)}): ${String(matchKey[Object.keys(matchKey)[0]]).slice(0, 60)}`);
     return 'reinforced';
   } catch (e: any) {
@@ -1474,8 +1513,8 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
       await supabase.from('viral_tweet_analyses').upsert({
         tweet_id: analysis.tweet_id,
         tweet_url: analysis.tweet_url,
-        username,
-        text: analysis.text.slice(0, 500),
+        creator_handle: username,       // ← الاسم الصحيح (مو username)
+        tweet_text: analysis.text.slice(0, 500),  // ← الاسم الصحيح (مو text)
         engagement_score: score,
         engagement_per_1k_followers: analysis.engagement_per_1k_followers,
         tweet_type: tweetType,
@@ -1557,12 +1596,15 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
           { pattern_name: deepAnalysis.stylePattern.slice(0, 100) },
           {
             pattern_name: deepAnalysis.stylePattern.slice(0, 100),
+            pattern_type: deepAnalysis.psychologicalTrigger ? 'hook' : 'structure',  // ← مطلوب NOT NULL!
             pattern_description: `${deepAnalysis.stylePattern}. Trigger: ${deepAnalysis.psychologicalTrigger}`,
             adaptation_for_30piq: deepAnalysis.adaptation || '',
-            evidence: `@${username}: "${analysis.text.slice(0, 60)}" → ${score} eng. ${deepAnalysis.conceptEvidence}`,
-            source_type: 'multi_angle_analysis',
+            why_it_works: deepAnalysis.viralReason || '',
+            source_handles: [username],
+            source_tweet_urls: [tweetUrl],
             confidence_score: baseConfidence,
             status: 'active',
+            test_run: false,
             updated_at: new Date().toISOString()
           },
           `@${username} (${score} eng): ${deepAnalysis.stylePattern.slice(0, 80)}`

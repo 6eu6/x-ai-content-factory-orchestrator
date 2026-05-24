@@ -162,6 +162,13 @@ function buildClient(): OpenAI {
   });
 }
 
+// أسماء نماذج غير صالحة — تسبب خطأ 400 من OpenRouter
+const INVALID_MODELS = new Set([
+  'openai/gpt-4.1-mini',       // ← غير موجود! الصحيح: openai/gpt-4o-mini
+  'openai/gpt-4.1',            // ← غير موجود!
+  'anthropic/claude-sonnet-4',  // ← غير موجود! الصحيح: anthropic/claude-sonnet-4-20250514
+]);
+
 async function loadRoutingRules(): Promise<Record<string, ModelConfig>> {
   const now = Date.now();
   if (routingCache && now < cacheExpiry) return routingCache;
@@ -181,6 +188,11 @@ async function loadRoutingRules(): Promise<Record<string, ModelConfig>> {
 
     const rules: Record<string, ModelConfig> = {};
     for (const row of data) {
+      // ═══ تجاهل القواعد اللي فيها أسماء نماذج غير صالحة ═══
+      if (INVALID_MODELS.has(row.model_id)) {
+        console.warn(`[model-router] Skipping DB rule '${row.task_type}' with invalid model '${row.model_id}' — using code defaults instead`);
+        continue;
+      }
       rules[row.task_type] = {
         model: row.model_id,
         temperature: row.temperature ?? 0.18,

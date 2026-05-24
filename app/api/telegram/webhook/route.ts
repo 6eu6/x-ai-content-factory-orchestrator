@@ -121,7 +121,7 @@ async function handleMessage(chatId: string, userId: string, username: string, t
       try {
         const { data: accounts, error } = await supabase
           .from('accounts')
-          .select('handle, tier, category, followers, notes, last_checked')
+          .select('handle, tier, notes, last_checked, followers, category')  // ← فقط الأعمدة الموجودة!
           .order('tier', { ascending: true });
 
         if (error || !accounts?.length) {
@@ -136,10 +136,11 @@ async function handleMessage(chatId: string, userId: string, username: string, t
 
         for (const a of accounts) {
           const icon = tierLabels[a.tier] || '📌';
-          const followerInfo = a.followers ? ` | ${a.followers.toLocaleString()} متابع` : '';
-          const categoryInfo = a.category ? ` | ${a.category}` : '';
-          const lastCheck = a.last_checked ? ` | فحص: ${a.last_checked}` : '';
-          lines.push(`${icon} @${htmlEscape(a.handle)}${followerInfo}${categoryInfo}${lastCheck}`);
+          const notesInfo = a.notes ? ` | ${htmlEscape(a.notes.slice(0, 40))}` : '';
+          const lastScan = a.last_checked ? ` | فحص: ${a.last_checked.slice(0, 10)}` : '';
+          const followerInfo = a.followers ? ` | ${a.followers} متابع` : '';
+          const catInfo = a.category ? ` | ${htmlEscape(a.category.slice(0, 25))}` : '';
+          lines.push(`${icon} @${htmlEscape(a.handle)}${followerInfo}${catInfo}${notesInfo}${lastScan}`);
         }
 
         lines.push('━━━━━━━━━━━━━━━━━━━━');

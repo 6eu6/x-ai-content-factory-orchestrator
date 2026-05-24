@@ -18,21 +18,22 @@ CREATE TABLE IF NOT EXISTS model_routing_rules (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
--- Seed default routing rules
+-- Seed default routing rules — نماذج صالحة على OpenRouter
 INSERT INTO model_routing_rules (task_type, model_id, temperature, max_tokens, top_p, response_format, description) VALUES
-  ('content_generation', 'openai/gpt-4.1-mini', 0.18, 2000, NULL, 'json_object', 'توليد محتوى يومي — دقة + اتباع قواعد صارمة'),
-  ('deep_analysis', 'anthropic/claude-sonnet-4', 0.12, 4000, NULL, 'json_object', 'تحليل عميق — نموذج قوي للتعقيدات'),
-  ('research_synthesis', 'openai/gpt-4.1-mini', 0.20, 3000, NULL, 'json_object', 'تركيب بحثي — جمع معلومات من مصادر متعددة'),
-  ('quality_evaluation', 'openai/gpt-4.1-mini', 0.05, 1000, NULL, 'json_object', 'تقييم جودة — دقة عالية بدون إبداع'),
-  ('media_description', 'openai/gpt-4o', 0.40, 1500, NULL, NULL, 'وصف وسائط — إبداع بصري + دقة تقنية'),
-  ('learning_extraction', 'anthropic/claude-sonnet-4', 0.15, 3000, NULL, 'json_object', 'استخراج تعليمي — فهم عميق + استنتاج'),
-  ('format_decision', 'openai/gpt-4.1-mini', 0.10, 800, NULL, 'json_object', 'قرار صيغة — منطق + تقييم أبعاد'),
-  ('article_writing', 'anthropic/claude-sonnet-4', 0.25, 6000, NULL, NULL, 'كتابة مقالات — محتوى طويل بعمق'),
-  ('thread_writing', 'openai/gpt-4.1-mini', 0.20, 4000, NULL, 'json_object', 'كتابة ثريد — تنوع + ارتباط منطقي'),
-  ('performance_analysis', 'anthropic/claude-sonnet-4', 0.10, 2000, NULL, 'json_object', 'تحليل أداء — استنتاج + تعلم'),
-  ('shield_check', 'openai/gpt-4.1-mini', 0.00, 800, NULL, 'json_object', 'فحص حماية — دقة صارمة'),
-  ('repo_artifact', 'anthropic/claude-sonnet-4', 0.15, 4000, NULL, NULL, 'كتابة ملفات مستودع — دقة تقنية'),
-  ('casual_generation', 'openai/gpt-4.1-mini', 0.35, 500, NULL, NULL, 'توليد سريع — ردود قصيرة')
+  ('content_generation', 'deepseek/deepseek-chat-v3-0324', 0.18, 2000, NULL, 'json_object', 'توليد محتوى يومي — دقة + اتباع قواعد صارمة'),
+  ('content_crafting', 'deepseek/deepseek-chat-v3-0324', 0.20, 2500, NULL, NULL, 'تصنيع محتوى مخصص — اقتباسات، ردود، ثريدات'),
+  ('deep_analysis', 'meta-llama/llama-4-maverick', 0.12, 4000, NULL, 'json_object', 'تحليل عميق — نموذج قوي للتعقيدات'),
+  ('research_synthesis', 'deepseek/deepseek-chat-v3-0324', 0.20, 3000, NULL, 'json_object', 'تركيب بحثي — جمع معلومات من مصادر متعددة'),
+  ('quality_evaluation', 'mistralai/mistral-small-3.1-24b-instruct', 0.05, 1000, NULL, 'json_object', 'تقييم جودة — دقة عالية بدون إبداع'),
+  ('media_description', 'deepseek/deepseek-chat-v3-0324', 0.40, 1500, NULL, NULL, 'وصف وسائط — إبداع بصري + دقة تقنية'),
+  ('learning_extraction', 'meta-llama/llama-4-maverick', 0.15, 3000, NULL, 'json_object', 'استخراج تعليمي — فهم عميق + استنتاج'),
+  ('format_decision', 'mistralai/mistral-small-3.1-24b-instruct', 0.10, 800, NULL, 'json_object', 'قرار صيغة — منطق + تقييم أبعاد'),
+  ('article_writing', 'meta-llama/llama-4-maverick', 0.25, 6000, NULL, NULL, 'كتابة مقالات — محتوى طويل بعمق'),
+  ('thread_writing', 'deepseek/deepseek-chat-v3-0324', 0.20, 4000, NULL, NULL, 'كتابة ثريد — تنوع + ارتباط منطقي'),
+  ('performance_analysis', 'meta-llama/llama-4-maverick', 0.10, 2000, NULL, 'json_object', 'تحليل أداء — استنتاج + تعلم'),
+  ('shield_check', 'mistralai/mistral-small-3.1-24b-instruct', 0.00, 800, NULL, 'json_object', 'فحص حماية — دقة صارمة'),
+  ('repo_artifact', 'meta-llama/llama-4-maverick', 0.15, 4000, NULL, NULL, 'كتابة ملفات مستودع — دقة تقنية'),
+  ('casual_generation', 'mistralai/mistral-small-3.1-24b-instruct', 0.35, 500, NULL, NULL, 'توليد سريع — ردود قصيرة')
 ON CONFLICT (task_type) DO UPDATE SET
   model_id = EXCLUDED.model_id,
   temperature = EXCLUDED.temperature,
@@ -831,6 +832,21 @@ DO $$ BEGIN
   ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_scanned_at TIMESTAMPTZ;
 EXCEPTION WHEN OTHERS THEN NULL;
 END $$;
+
+-- ═══════════════════════════════════════════════════════════════
+-- MIGRATION v4: Fix invalid model names in model_routing_rules
+-- الأسماء القديمة كانت تسبب خطأ 400 من OpenRouter
+-- ═══════════════════════════════════════════════════════════════
+
+-- تحديث أسماء النماذج غير الصالحة
+UPDATE model_routing_rules SET model_id = 'deepseek/deepseek-chat-v3-0324', updated_at = now() WHERE model_id IN ('openai/gpt-4.1-mini', 'openai/gpt-4.1');
+UPDATE model_routing_rules SET model_id = 'meta-llama/llama-4-maverick', updated_at = now() WHERE model_id = 'anthropic/claude-sonnet-4';
+UPDATE model_routing_rules SET model_id = 'deepseek/deepseek-chat-v3-0324', updated_at = now() WHERE model_id = 'openai/gpt-4o';
+
+-- إضافة content_crafting لو ما موجود
+INSERT INTO model_routing_rules (task_type, model_id, temperature, max_tokens, response_format, description, active)
+VALUES ('content_crafting', 'deepseek/deepseek-chat-v3-0324', 0.20, 2500, NULL, 'تصنيع محتوى مخصص', true)
+ON CONFLICT (task_type) DO UPDATE SET model_id = EXCLUDED.model_id, temperature = EXCLUDED.temperature, max_tokens = EXCLUDED.max_tokens, updated_at = now();
 
 -- ═══════════════════════════════════════════════════════════════
 -- MIGRATION v3: Add missing columns for production-cycle & format-decision
