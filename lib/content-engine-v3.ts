@@ -640,7 +640,9 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
         bookmark_count: Number(raw.bookmarkCount || raw.bookmarks || 0),
         view_count: Number(raw.viewCount || raw.views || 0)
       },
-      entities: raw.entities || {},
+      // دمج entities + extendedEntities (TwitterAPI.io يرسل الوسائط في extendedEntities)
+      entities: raw.entities || raw.extendedEntities || {},
+      extended_entities: raw.extendedEntities || raw.extended_entities || raw.entities || {},
       is_reply: Boolean(raw.isReply || raw.in_reply_to_status_id),
       author,
       raw

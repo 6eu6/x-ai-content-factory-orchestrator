@@ -108,7 +108,9 @@ function normalizeTwitterApiTweet(t: any) {
       bookmark_count: Number(t.bookmarkCount || t.bookmarks || 0),
       view_count: Number(t.viewCount || t.views || 0)
     },
-    entities: t.entities || {},
+    // دمج entities + extendedEntities (TwitterAPI.io يرسل الوسائط في extendedEntities)
+    entities: t.entities || t.extendedEntities || {},
+    extended_entities: t.extendedEntities || t.extended_entities || t.entities || {},
     is_reply: Boolean(t.isReply || t.in_reply_to_status_id),
     author: t.author || t.user,
     raw: t
