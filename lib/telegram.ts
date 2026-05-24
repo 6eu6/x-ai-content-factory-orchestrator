@@ -2,15 +2,8 @@ import { optionalEnv, requiredEnv } from './env';
 
 export const MAIN_KEYBOARD = {
   keyboard: [
-    [{ text: '🧪 تشغيل خطة اليوم' }, { text: '📊 حالة الحساب' }],
-    [{ text: '📊 مسح الأداء' }, { text: '🧠 حالة التعلم' }],
-    [{ text: '🏭 إنتاج المحتوى' }, { text: '✅ محتوى جاهز للنشر' }],
-    [{ text: '🔍 دورة تعلم ذكية' }, { text: '🚀 تشغيل فحص تعلم' }],
-    [{ text: '🧭 محرك القرار' }, { text: '📦 زحف مستودع' }],
-    [{ text: '➕ إضافة حساب للتعلم' }, { text: '🔗 إضافة تغريدة للتعلم' }],
-    [{ text: '📋 المهام اليومية' }, { text: '🛡 فحص الحماية' }],
-    [{ text: '🔎 اكتشاف تلقائي' }, { text: '📅 مراجعة أسبوعية' }],
-    [{ text: '🧹 صيانة الذاكرة' }, { text: '📈 تعلم النمو' }],
+    [{ text: '🧠 تشغيل كامل' }, { text: '📊 تقرير الأداء' }],
+    [{ text: '➕ إضافة حساب' }, { text: '🔗 إضافة تغريدة' }],
     [{ text: '🔄 تصفير البيانات' }]
   ],
   resize_keyboard: true,
@@ -86,4 +79,65 @@ export function extractGitHubRepo(text: string) {
   if (urlMatch) return urlMatch[0];
   const shortMatch = value.match(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/);
   return shortMatch ? value : '';
+}
+
+/**
+ * إرسال صورة لتليجرام عبر URL
+ */
+export async function sendTelegramPhoto(chatId: string, photoUrl: string, caption: string = '', replyMarkup: any = MAIN_KEYBOARD) {
+  const token = telegramToken();
+  const res = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: chatId,
+      photo: photoUrl,
+      caption: caption.slice(0, 1024),
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+      reply_markup: replyMarkup
+    })
+  });
+  if (!res.ok) throw new Error(`Telegram sendPhoto failed: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * إرسال فيديو لتليجرام عبر URL
+ */
+export async function sendTelegramVideo(chatId: string, videoUrl: string, caption: string = '', replyMarkup: any = MAIN_KEYBOARD) {
+  const token = telegramToken();
+  const res = await fetch(`https://api.telegram.org/bot${token}/sendVideo`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: chatId,
+      video: videoUrl,
+      caption: caption.slice(0, 1024),
+      parse_mode: 'HTML',
+      reply_markup: replyMarkup
+    })
+  });
+  if (!res.ok) throw new Error(`Telegram sendVideo failed: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * إرسال GIF/رسوم متحركة لتليجرام عبر URL
+ */
+export async function sendTelegramAnimation(chatId: string, animationUrl: string, caption: string = '', replyMarkup: any = MAIN_KEYBOARD) {
+  const token = telegramToken();
+  const res = await fetch(`https://api.telegram.org/bot${token}/sendAnimation`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: chatId,
+      animation: animationUrl,
+      caption: caption.slice(0, 1024),
+      parse_mode: 'HTML',
+      reply_markup: replyMarkup
+    })
+  });
+  if (!res.ok) throw new Error(`Telegram sendAnimation failed: ${res.status}`);
+  return res.json();
 }
