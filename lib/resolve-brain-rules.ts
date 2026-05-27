@@ -5,6 +5,9 @@
  * This module resolves those text references to actual rule IDs from
  * x_algorithm_learning_rules and viral_style_patterns tables.
  *
+ * IMPORTANT: Both tables use UUID primary keys, not SERIAL integers.
+ * All ID handling must support UUID strings.
+ *
  * Strategy:
  * 1. Exact match on `rule` column first
  * 2. ILIKE match on first 80 chars of the rule
@@ -16,17 +19,27 @@
 import { supabaseAdmin } from './supabase';
 
 export type ResolvedBrainRuleRef = {
-  id: number;
+  id: string;  // UUID string, not number
   table: 'x_algorithm_learning_rules' | 'viral_style_patterns';
   rule_preview: string;
 };
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Check if a value looks like a UUID
+ */
+function isUuid(value: string): boolean {
+  return UUID_RE.test(value.trim());
+}
 
 /**
  * Resolve an array of brain_rules_used (strings or objects) into
  * concrete { id, table, rule_preview } references.
  *
  * If a reference is already an object with `id` and `table`, use directly.
- * If it's a numeric string, treat it as an x_algorithm_learning_rules ID.
+ * If it's a UUID string, treat it as a direct ID reference.
+ * If it's a numeric string, also treat as direct ID (for backward compat).
  * If it's a text string, try to match against rules in the DB.
  */
 export async function resolveBrainRuleRefs(
@@ -62,7 +75,7 @@ export async function resolveBrainRuleRefs(
         const table: ResolvedBrainRuleRef['table'] =
           ref.table === 'viral_style_patterns' ? 'viral_style_patterns' : 'x_algorithm_learning_rules';
         resolved.push({
-          id: Number(id),
+          id: String(id),
           table,
           rule_preview: String(ref.rule_preview || ref.rule || ref.pattern_name || `ID ${id}`).slice(0, 120)
         });
@@ -70,30 +83,63 @@ export async function resolveBrainRuleRefs(
       }
     }
 
-    // ── Numeric string → direct ID lookup ──
-    if (typeof ref === 'string' && /^\d+$/.test(ref.trim())) {
-      const numId = Number(ref.trim());
+    // ── UUID string → direct ID lookup ──
+    if (typeof ref === 'string' && isUuid(ref.trim())) {
+      const strId = ref.trim();
       // Try algorithm rules first
-      const algoMatch = (algoRules || []).find((r: any) => r.id === numId);
+      const algoMatch = (algoRules || []).find((r: any) => String(r.id) === strId);
       if (algoMatch) {
         resolved.push({
-          id: numId,
+          id: strId,
           table: 'x_algorithm_learning_rules',
           rule_preview: String(algoMatch.rule || '').slice(0, 120)
         });
         continue;
       }
       // Try style patterns
-      const styleMatch = (stylePatterns || []).find((p: any) => p.id === numId);
+      const styleMatch = (stylePatterns || []).find((p: any) => String(p.id) === strId);
       if (styleMatch) {
         resolved.push({
-          id: numId,
+          id: strId,
           table: 'viral_style_patterns',
           rule_preview: String(styleMatch.pattern_name || '').slice(0, 120)
         });
         continue;
       }
-      // ID not found — skip (don't error)
+      // ID not found in pre-fetched batch — still include it as a reference
+      // (might exist in DB but beyond the 200 limit)
+      resolved.push({
+        id: strId,
+        table: 'x_algorithm_learning_rules', // default assumption
+        rule_preview: `UUID ${strId.slice(0, 8)}...`
+      });
+      continue;
+    }
+
+    // ── Numeric string → direct ID lookup (backward compat) ──
+    if (typeof ref === 'string' && /^\d+$/.test(ref.trim())) {
+      const strId = ref.trim();
+      // Try algorithm rules
+      const algoMatch = (algoRules || []).find((r: any) => String(r.id) === strId);
+      if (algoMatch) {
+        resolved.push({
+          id: strId,
+          table: 'x_algorithm_learning_rules',
+          rule_preview: String(algoMatch.rule || '').slice(0, 120)
+        });
+        continue;
+      }
+      // Try style patterns
+      const styleMatch = (stylePatterns || []).find((p: any) => String(p.id) === strId);
+      if (styleMatch) {
+        resolved.push({
+          id: strId,
+          table: 'viral_style_patterns',
+          rule_preview: String(styleMatch.pattern_name || '').slice(0, 120)
+        });
+        continue;
+      }
+      // ID not found — skip
       continue;
     }
 
@@ -107,7 +153,7 @@ export async function resolveBrainRuleRefs(
       );
       if (exactAlgo) {
         resolved.push({
-          id: exactAlgo.id,
+          id: String(exactAlgo.id),
           table: 'x_algorithm_learning_rules',
           rule_preview: String(exactAlgo.rule).slice(0, 120)
         });
@@ -121,7 +167,7 @@ export async function resolveBrainRuleRefs(
       );
       if (prefixAlgo) {
         resolved.push({
-          id: prefixAlgo.id,
+          id: String(prefixAlgo.id),
           table: 'x_algorithm_learning_rules',
           rule_preview: String(prefixAlgo.rule).slice(0, 120)
         });
@@ -134,7 +180,7 @@ export async function resolveBrainRuleRefs(
       );
       if (substrAlgo) {
         resolved.push({
-          id: substrAlgo.id,
+          id: String(substrAlgo.id),
           table: 'x_algorithm_learning_rules',
           rule_preview: String(substrAlgo.rule).slice(0, 120)
         });
@@ -147,7 +193,7 @@ export async function resolveBrainRuleRefs(
       );
       if (exactStyle) {
         resolved.push({
-          id: exactStyle.id,
+          id: String(exactStyle.id),
           table: 'viral_style_patterns',
           rule_preview: String(exactStyle.pattern_name).slice(0, 120)
         });
@@ -160,7 +206,7 @@ export async function resolveBrainRuleRefs(
       );
       if (substrStyle) {
         resolved.push({
-          id: substrStyle.id,
+          id: String(substrStyle.id),
           table: 'viral_style_patterns',
           rule_preview: String(substrStyle.pattern_name).slice(0, 120)
         });
@@ -187,14 +233,19 @@ export async function resolveBrainRuleRefs(
 /**
  * Pure function: extract resolvable IDs from brain_rules_used without DB access.
  * Used for quick checks where we don't need full resolution.
+ * Supports both UUID and numeric string IDs, plus objects with id/rule_id/pattern_id.
  */
 export function extractKnownRuleIds(brainRulesUsed: any[]): string[] {
   if (!Array.isArray(brainRulesUsed)) return [];
 
   const ids: string[] = [];
   for (const ref of brainRulesUsed) {
-    if (typeof ref === 'string' && /^\d+$/.test(ref.trim())) {
-      ids.push(ref.trim());
+    if (typeof ref === 'string') {
+      const trimmed = ref.trim();
+      // Accept UUID strings and numeric strings as IDs
+      if (isUuid(trimmed) || /^\d+$/.test(trimmed)) {
+        ids.push(trimmed);
+      }
     } else if (typeof ref === 'object' && ref !== null) {
       const id = (ref as any).id || (ref as any).rule_id || (ref as any).pattern_id;
       if (id) ids.push(String(id));

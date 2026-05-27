@@ -141,20 +141,18 @@ export async function GET(req: Request) {
                 break;
               }
 
-              if (!/^\d+$/.test(ruleId)) continue;
-              const numId = Number(ruleId);
-
+              // ruleId can be UUID or numeric — use as string directly
               // Determine which table(s) this ID belongs to
               // Check resolved refs first (most accurate)
-              const algoRef = resolvedByTable.get(`x_algorithm_learning_rules:${numId}`);
-              const styleRef = resolvedByTable.get(`viral_style_patterns:${numId}`);
+              const algoRef = resolvedByTable.get(`x_algorithm_learning_rules:${ruleId}`);
+              const styleRef = resolvedByTable.get(`viral_style_patterns:${ruleId}`);
 
               // Try x_algorithm_learning_rules
               if (algoRef || !styleRef) {
                 const { data: rule } = await supabase
                   .from('x_algorithm_learning_rules')
                   .select('id, confidence_score, success_count, failure_count, status')
-                  .eq('id', numId)
+                  .eq('id', ruleId)
                   .maybeSingle();
 
                 if (rule) {
@@ -206,7 +204,7 @@ export async function GET(req: Request) {
                 const { data: pattern } = await supabase
                   .from('viral_style_patterns')
                   .select('id, confidence_score, success_count, failure_count, status')
-                  .eq('id', numId)
+                  .eq('id', ruleId)
                   .maybeSingle();
 
                 if (pattern) {

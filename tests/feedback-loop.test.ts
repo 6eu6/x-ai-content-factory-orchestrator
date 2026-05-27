@@ -620,14 +620,20 @@ describe('Phase 5.1 — extractKnownRuleIds', () => {
     expect(ids).toEqual(['42', '17', '99']);
   });
 
+  it('extracts UUID string IDs from brain_rules_used', () => {
+    const brainRulesUsed: any[] = ['a3c548cd-2163-4859-aeaf-5b35c7697a43', '94df25ae-065c-4260-a1e5-c2e818288ef3'];
+    const ids = extractKnownRuleIds(brainRulesUsed);
+    expect(ids).toEqual(['a3c548cd-2163-4859-aeaf-5b35c7697a43', '94df25ae-065c-4260-a1e5-c2e818288ef3']);
+  });
+
   it('extracts IDs from objects with id/rule_id/pattern_id', () => {
     const brainRulesUsed: any[] = [
-      { id: 5, table: 'x_algorithm_learning_rules' },
-      { pattern_id: 12, table: 'viral_style_patterns' },
+      { id: 'a3c548cd-2163-4859-aeaf-5b35c7697a43', table: 'x_algorithm_learning_rules' },
+      { pattern_id: '94df25ae-065c-4260-a1e5-c2e818288ef3', table: 'viral_style_patterns' },
       { rule_id: 3 }
     ];
     const ids = extractKnownRuleIds(brainRulesUsed);
-    expect(ids).toEqual(['5', '12', '3']);
+    expect(ids).toEqual(['a3c548cd-2163-4859-aeaf-5b35c7697a43', '94df25ae-065c-4260-a1e5-c2e818288ef3', '3']);
   });
 
   it('mixed brain_rules_used → extracts only IDs', () => {
@@ -664,11 +670,11 @@ describe('Phase 5.1 — extractKnownRuleIds', () => {
 
   it('resolves object refs with table field', () => {
     const brainRulesUsed: any[] = [
-      { id: 42, table: 'x_algorithm_learning_rules', rule_preview: 'Test rule' },
-      { id: 7, table: 'viral_style_patterns', rule_preview: 'Test pattern' }
+      { id: 'a3c548cd-2163-4859-aeaf-5b35c7697a43', table: 'x_algorithm_learning_rules', rule_preview: 'Test rule' },
+      { id: '94df25ae-065c-4260-a1e5-c2e818288ef3', table: 'viral_style_patterns', rule_preview: 'Test pattern' }
     ];
     const ids = extractKnownRuleIds(brainRulesUsed);
-    expect(ids).toEqual(['42', '7']);
+    expect(ids).toEqual(['a3c548cd-2163-4859-aeaf-5b35c7697a43', '94df25ae-065c-4260-a1e5-c2e818288ef3']);
   });
 });
 
@@ -715,24 +721,24 @@ describe('Phase 5.1 — attribution flow: text rules → resolved IDs', () => {
     const inputRules = ['Open with a contrarian claim', 'Use setup→punchline structure'];
     // In a real scenario, resolveBrainRuleRefs would query the DB and return:
     const resolvedResult = [
-      { id: 42, table: 'x_algorithm_learning_rules' as const, rule_preview: 'Open with a contrarian claim' },
-      { id: 7, table: 'viral_style_patterns' as const, rule_preview: 'Use setup→punchline structure' }
+      { id: 'a3c548cd-2163-4859-aeaf-5b35c7697a43', table: 'x_algorithm_learning_rules' as const, rule_preview: 'Open with a contrarian claim' },
+      { id: '94df25ae-065c-4260-a1e5-c2e818288ef3', table: 'viral_style_patterns' as const, rule_preview: 'Use setup→punchline structure' }
     ];
 
     // The resolved result can be used for attribution
     expect(resolvedResult.length).toBe(2);
-    expect(resolvedResult[0].id).toBe(42);
+    expect(resolvedResult[0].id).toBe('a3c548cd-2163-4859-aeaf-5b35c7697a43');
     expect(resolvedResult[0].table).toBe('x_algorithm_learning_rules');
-    expect(resolvedResult[1].id).toBe(7);
+    expect(resolvedResult[1].id).toBe('94df25ae-065c-4260-a1e5-c2e818288ef3');
     expect(resolvedResult[1].table).toBe('viral_style_patterns');
   });
 
   it('already-resolved brain_rules_used are used directly without re-resolution', () => {
     const brainRulesUsed = [
-      { id: 42, table: 'x_algorithm_learning_rules', rule_preview: 'Test rule' }
+      { id: 'a3c548cd-2163-4859-aeaf-5b35c7697a43', table: 'x_algorithm_learning_rules', rule_preview: 'Test rule' }
     ];
     const ids = extractKnownRuleIds(brainRulesUsed);
-    expect(ids).toEqual(['42']);
+    expect(ids).toEqual(['a3c548cd-2163-4859-aeaf-5b35c7697a43']);
     // These IDs go directly to attribution without needing resolveBrainRuleRefs
   });
 

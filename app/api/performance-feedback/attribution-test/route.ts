@@ -54,7 +54,7 @@ export async function POST(req: Request) {
     }
 
     // ═══ Step 1: Find or create a test brain rule ═══
-    let testRuleId: number;
+    let testRuleId: string;  // UUID
     let testRuleBefore: any;
 
     // Try to find an existing active rule
@@ -66,7 +66,7 @@ export async function POST(req: Request) {
       .maybeSingle();
 
     if (existingRule) {
-      testRuleId = existingRule.id;
+      testRuleId = String(existingRule.id);
       testRuleBefore = existingRule;
     } else {
       // Create a minimal test rule
@@ -90,7 +90,7 @@ export async function POST(req: Request) {
       if (ruleError || !newRule) {
         return Response.json({ ok: false, error: `Failed to create test rule: ${ruleError?.message}`, version: VERSION }, { status: 500 });
       }
-      testRuleId = newRule.id;
+      testRuleId = String(newRule.id);
       testRuleBefore = newRule;
     }
 
@@ -110,7 +110,7 @@ export async function POST(req: Request) {
           source_tweet_url: 'https://x.com/test/status/0000000000',
           source_author: 'test_account',
           crafted_text: 'Test crafted text for attribution validation',
-          brain_rules_used: [String(testRuleId)],  // Pass as numeric string ID
+          brain_rules_used: [testRuleId],  // Pass as UUID string
           shield_passed: true,
           reasons: ['Test attribution']
         }],
@@ -138,7 +138,6 @@ export async function POST(req: Request) {
         content_type: 'quote',
         decision_score: 8.5,
         brain_rules_used: [{ id: testRuleId, table: 'x_algorithm_learning_rules', rule_preview: String(testRuleBefore.rule || '').slice(0, 120) }],
-        status: 'attribution_test',
         performance_checked_at: new Date().toISOString(),
         performance_payload: {
           views: 50000,
