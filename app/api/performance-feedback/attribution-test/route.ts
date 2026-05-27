@@ -209,28 +209,38 @@ export async function POST(req: Request) {
         const newConfidence = Math.min(10, currentConfidence + 0.2);
         const newSuccessCount = (ruleNow.success_count || 0) + 1;
 
-        // Try with updated_at first, fallback without
+        // Build update data - try NUMERIC value first, fallback to INTEGER
         const updateData: Record<string, any> = {
-          confidence_score: Math.round(newConfidence * 10) / 10, // Round to 1 decimal
+          confidence_score: newConfidence, // Will try NUMERIC first
           success_count: newSuccessCount,
           last_success_at: now,
           last_used_at: now
         };
 
-        // Try update with updated_at
+        // Try update with NUMERIC confidence_score + updated_at
         const { error: err1 } = await supabase
           .from('x_algorithm_learning_rules')
           .update({ ...updateData, updated_at: now })
           .eq('id', ruleNow.id);
 
         if (err1) {
-          // Retry without updated_at (column might not exist)
+          // Column might be INTEGER - try with rounded integer value
+          updateData.confidence_score = Math.round(newConfidence);
           const { error: err2 } = await supabase
             .from('x_algorithm_learning_rules')
             .update(updateData)
             .eq('id', ruleNow.id);
           if (err2) {
-            updateError = err2.message;
+            // Last resort: only update success_count (which is always INTEGER)
+            const { error: err3 } = await supabase
+              .from('x_algorithm_learning_rules')
+              .update({ success_count: newSuccessCount, last_success_at: now, last_used_at: now })
+              .eq('id', ruleNow.id);
+            if (err3) {
+              updateError = err3.message;
+            } else {
+              updateError = 'confidence_score is INTEGER, only success_count updated (need migration: ALTER COLUMN confidence_score TYPE NUMERIC(4,1))';
+            }
           }
         }
       } else {

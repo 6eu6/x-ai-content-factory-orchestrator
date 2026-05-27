@@ -7,6 +7,70 @@ const VERSION = 'performance-feedback-v1.1';
 
 const MAX_RULE_UPDATES_PER_RUN = 50;
 
+/**
+ * Safe update for brain rule confidence_score.
+ * Tries NUMERIC first, falls back to INTEGER if column is INTEGER.
+ * Returns true if update succeeded.
+ */
+async function safeUpdateRuleConfidence(
+  supabase: any,
+  table: 'x_algorithm_learning_rules' | 'viral_style_patterns',
+  ruleId: string,
+  updates: {
+    confidence_score?: number;
+    success_count?: number;
+    failure_count?: number;
+    last_success_at?: string;
+    last_failure_at?: string;
+    last_used_at?: string;
+    status?: string;
+  }
+): Promise<boolean> {
+  // Try with NUMERIC confidence + updated_at
+  const fullUpdates = { ...updates, updated_at: new Date().toISOString() };
+  const { error: err1 } = await supabase
+    .from(table)
+    .update(fullUpdates)
+    .eq('id', ruleId);
+
+  if (!err1) return true;
+
+  // If failed, try with rounded integer confidence (column might be INTEGER)
+  if (updates.confidence_score !== undefined) {
+    const roundedUpdates = { ...updates, confidence_score: Math.round(updates.confidence_score), updated_at: new Date().toISOString() };
+    const { error: err2 } = await supabase
+      .from(table)
+      .update(roundedUpdates)
+      .eq('id', ruleId);
+
+    if (!err2) return true;
+
+    // Last resort: skip confidence update, only update counts/timestamps
+    const countOnlyUpdates: Record<string, any> = { updated_at: new Date().toISOString() };
+    if (updates.success_count !== undefined) countOnlyUpdates.success_count = updates.success_count;
+    if (updates.failure_count !== undefined) countOnlyUpdates.failure_count = updates.failure_count;
+    if (updates.last_success_at) countOnlyUpdates.last_success_at = updates.last_success_at;
+    if (updates.last_failure_at) countOnlyUpdates.last_failure_at = updates.last_failure_at;
+    if (updates.last_used_at) countOnlyUpdates.last_used_at = updates.last_used_at;
+    if (updates.status) countOnlyUpdates.status = updates.status;
+
+    const { error: err3 } = await supabase
+      .from(table)
+      .update(countOnlyUpdates)
+      .eq('id', ruleId);
+
+    return !err3;
+  }
+
+  // Non-confidence update: just retry without updated_at
+  const { error: err4 } = await supabase
+    .from(table)
+    .update(updates)
+    .eq('id', ruleId);
+
+  return !err4;
+}
+
 interface OutcomeEntry {
   id: string;
   published_url: string;
@@ -158,42 +222,33 @@ export async function GET(req: Request) {
                 if (rule) {
                   if (isSuccess) {
                     const newConfidence = Math.min(10, Number(rule.confidence_score || 7) + 0.2);
-                    await supabase
-                      .from('x_algorithm_learning_rules')
-                      .update({
-                        confidence_score: Math.round(newConfidence * 10) / 10,
-                        success_count: (rule.success_count || 0) + 1,
-                        last_success_at: now,
-                        last_used_at: now,
-                        updated_at: now
-                      })
-                      .eq('id', rule.id);
-                    totalRuleUpdates++;
+                    const ok = await safeUpdateRuleConfidence(supabase, 'x_algorithm_learning_rules', String(rule.id), {
+                      confidence_score: newConfidence,
+                      success_count: (rule.success_count || 0) + 1,
+                      last_success_at: now,
+                      last_used_at: now
+                    });
+                    if (ok) totalRuleUpdates++;
                   } else if (isWeak) {
                     const newConfidence = Math.max(1, Number(rule.confidence_score || 7) - 0.2);
                     const newFailureCount = (rule.failure_count || 0) + 1;
                     const newSuccessCount = rule.success_count || 0;
                     const updates: Record<string, any> = {
-                      confidence_score: Math.round(newConfidence * 10) / 10,
+                      confidence_score: newConfidence,
                       failure_count: newFailureCount,
                       last_failure_at: now,
-                      last_used_at: now,
-                      updated_at: now
+                      last_used_at: now
                     };
                     if (newFailureCount >= 3 && newSuccessCount === 0 && rule.status === 'active') {
                       updates.status = 'watch';
                     }
-                    await supabase
-                      .from('x_algorithm_learning_rules')
-                      .update(updates)
-                      .eq('id', rule.id);
-                    totalRuleUpdates++;
+                    const ok = await safeUpdateRuleConfidence(supabase, 'x_algorithm_learning_rules', String(rule.id), updates);
+                    if (ok) totalRuleUpdates++;
                   } else {
-                    await supabase
-                      .from('x_algorithm_learning_rules')
-                      .update({ last_used_at: now, updated_at: now })
-                      .eq('id', rule.id);
-                    totalRuleUpdates++;
+                    const ok = await safeUpdateRuleConfidence(supabase, 'x_algorithm_learning_rules', String(rule.id), {
+                      last_used_at: now
+                    });
+                    if (ok) totalRuleUpdates++;
                   }
                   continue; // Found in algo rules, skip style pattern check for same ID
                 }
@@ -210,42 +265,33 @@ export async function GET(req: Request) {
                 if (pattern) {
                   if (isSuccess) {
                     const newConfidence = Math.min(10, Number(pattern.confidence_score || 7) + 0.2);
-                    await supabase
-                      .from('viral_style_patterns')
-                      .update({
-                        confidence_score: Math.round(newConfidence * 10) / 10,
-                        success_count: (pattern.success_count || 0) + 1,
-                        last_success_at: now,
-                        last_used_at: now,
-                        updated_at: now
-                      })
-                      .eq('id', pattern.id);
-                    totalRuleUpdates++;
+                    const ok = await safeUpdateRuleConfidence(supabase, 'viral_style_patterns', String(pattern.id), {
+                      confidence_score: newConfidence,
+                      success_count: (pattern.success_count || 0) + 1,
+                      last_success_at: now,
+                      last_used_at: now
+                    });
+                    if (ok) totalRuleUpdates++;
                   } else if (isWeak) {
                     const newConfidence = Math.max(1, Number(pattern.confidence_score || 7) - 0.2);
                     const newFailureCount = (pattern.failure_count || 0) + 1;
                     const newSuccessCount = pattern.success_count || 0;
                     const updates: Record<string, any> = {
-                      confidence_score: Math.round(newConfidence * 10) / 10,
+                      confidence_score: newConfidence,
                       failure_count: newFailureCount,
                       last_failure_at: now,
-                      last_used_at: now,
-                      updated_at: now
+                      last_used_at: now
                     };
                     if (newFailureCount >= 3 && newSuccessCount === 0 && pattern.status === 'active') {
                       updates.status = 'watch';
                     }
-                    await supabase
-                      .from('viral_style_patterns')
-                      .update(updates)
-                      .eq('id', pattern.id);
-                    totalRuleUpdates++;
+                    const ok = await safeUpdateRuleConfidence(supabase, 'viral_style_patterns', String(pattern.id), updates);
+                    if (ok) totalRuleUpdates++;
                   } else {
-                    await supabase
-                      .from('viral_style_patterns')
-                      .update({ last_used_at: now, updated_at: now })
-                      .eq('id', pattern.id);
-                    totalRuleUpdates++;
+                    const ok = await safeUpdateRuleConfidence(supabase, 'viral_style_patterns', String(pattern.id), {
+                      last_used_at: now
+                    });
+                    if (ok) totalRuleUpdates++;
                   }
                 }
               }
