@@ -196,6 +196,7 @@ export async function POST(req: Request) {
       .eq('id', testPub.id);
 
     // Update the brain rule
+    let updateError: string | null = null;
     if (isSuccess && ruleIdsFound.length > 0) {
       const { data: ruleNow } = await supabase
         .from('x_algorithm_learning_rules')
@@ -205,16 +206,34 @@ export async function POST(req: Request) {
 
       if (ruleNow) {
         const newConfidence = Math.min(10, Number(ruleNow.confidence_score || 7) + 0.2);
-        await supabase
+        const newSuccessCount = (ruleNow.success_count || 0) + 1;
+
+        // Try with updated_at first, fallback without
+        const updateData: Record<string, any> = {
+          confidence_score: Math.round(newConfidence * 100) / 100,
+          success_count: newSuccessCount,
+          last_success_at: now,
+          last_used_at: now
+        };
+
+        // Try update with updated_at
+        const { error: err1 } = await supabase
           .from('x_algorithm_learning_rules')
-          .update({
-            confidence_score: Math.round(newConfidence * 100) / 100,
-            success_count: (ruleNow.success_count || 0) + 1,
-            last_success_at: now,
-            last_used_at: now,
-            updated_at: now
-          })
+          .update({ ...updateData, updated_at: now })
           .eq('id', ruleNow.id);
+
+        if (err1) {
+          // Retry without updated_at (column might not exist)
+          const { error: err2 } = await supabase
+            .from('x_algorithm_learning_rules')
+            .update(updateData)
+            .eq('id', ruleNow.id);
+          if (err2) {
+            updateError = err2.message;
+          }
+        }
+      } else {
+        updateError = `Rule ${testRuleId} not found for update`;
       }
     }
 
@@ -254,6 +273,7 @@ export async function POST(req: Request) {
         confidence_increased: Number(testRuleAfter?.confidence_score || 0) > Number(testRuleBefore?.confidence_score || 0),
         success_count_increased: (testRuleAfter?.success_count || 0) > (testRuleBefore?.success_count || 0)
       },
+      update_error: updateError || undefined,
       note: 'Test records are marked with status=attribution_test and run_source=attribution_test. Use cleanup=true to remove them.'
     });
 
