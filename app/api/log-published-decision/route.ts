@@ -3,9 +3,31 @@ import { supabaseAdmin } from '../../../lib/supabase';
 import { extractTweetUrl } from '../../../lib/telegram';
 import { resolveBrainRuleRefs } from '../../../lib/resolve-brain-rules';
 
-const VERSION = 'log-published-decision-v2.1';
+const VERSION = 'log-published-decision-v2.2';
 
 const VALID_CONTENT_TYPES = ['reply', 'quote', 'thread', 'single_tweet', 'article'];
+
+function normalizeContentType(value: any): string | null {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  if (raw === 'tweet') return 'single_tweet';
+  if (raw === 'repo_tweet') return 'single_tweet';
+  return raw;
+}
+
+function numericScoreFromRecommendation(rec: any): number | null {
+  const candidates = [
+    rec?.decision_score?.final_score,
+    rec?.decision_score,
+    rec?.score,
+    rec?.final_score
+  ];
+  for (const value of candidates) {
+    const n = Number(value);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
 
 export async function POST(req: Request) {
   try {
@@ -14,9 +36,9 @@ export async function POST(req: Request) {
     const body = await req.json();
     const publishedUrl = String(body.published_url || '').trim();
     const decisionRunId = body.decision_run_id || null;
-    const sourceTweetUrl = body.source_tweet_url || null;
-    const contentType = body.content_type || null;
-    const publishedText = body.published_text || null;
+    let resolvedSourceTweetUrl: string | null = body.source_tweet_url || null;
+    let resolvedContentType: string | null = normalizeContentType(body.content_type);
+    let resolvedPublishedText: string | null = body.published_text || null;
     const recommendationIndex = body.recommendation_index ? Number(body.recommendation_index) : null;
 
     // ── Validate published_url ──
@@ -29,8 +51,8 @@ export async function POST(req: Request) {
       return Response.json({ ok: false, error: 'published_url must be a valid X/Twitter tweet URL (https://x.com/.../status/...)' }, { status: 400 });
     }
 
-    // ── Validate content_type ──
-    if (contentType && !VALID_CONTENT_TYPES.includes(contentType)) {
+    // ── Validate explicit content_type ──
+    if (resolvedContentType && !VALID_CONTENT_TYPES.includes(resolvedContentType)) {
       return Response.json({ ok: false, error: `content_type must be one of: ${VALID_CONTENT_TYPES.join(', ')}` }, { status: 400 });
     }
 
@@ -74,6 +96,7 @@ export async function POST(req: Request) {
     let decisionScore: number | null = null;
     let brainRulesUsed: any[] = [];
     let brainRulesResolved = false;
+    let recommendationLinked = false;
 
     if (linkedDecisionRunId) {
       try {
@@ -84,23 +107,32 @@ export async function POST(req: Request) {
           .maybeSingle();
 
         if (runData) {
-          decisionScore = runData.decision_score || null;
+          const runScore = Number(runData.decision_score);
+          decisionScore = Number.isFinite(runScore) ? runScore : null;
           brainRulesUsed = Array.isArray(runData.brain_rules_used) ? runData.brain_rules_used : [];
 
-          // ── If recommendation_index provided, extract specific recommendation ──
+          // ── If recommendation_index provided, extract that exact recommendation ──
           if (recommendationIndex && recommendationIndex >= 1) {
             const selectedPayload = Array.isArray(runData.selected_payload) ? runData.selected_payload : [];
             const rec = selectedPayload[recommendationIndex - 1];
             if (rec) {
-              // Override content_type, source_tweet_url from recommendation if not already provided
-              if (!contentType && rec.content_type) {
-                // Use recommendation content_type
+              recommendationLinked = true;
+
+              if (!resolvedContentType) {
+                resolvedContentType = normalizeContentType(rec.content_type || rec.type);
               }
-              if (!sourceTweetUrl && rec.source_tweet_url) {
-                // Will use rec.source_tweet_url
+
+              if (!resolvedSourceTweetUrl && rec.source_tweet_url) {
+                resolvedSourceTweetUrl = String(rec.source_tweet_url);
               }
-              if (rec.decision_score) decisionScore = rec.decision_score;
-              if (rec.score) decisionScore = rec.score;  // also check 'score' field in payload
+
+              if (!resolvedPublishedText && rec.crafted_text) {
+                resolvedPublishedText = String(rec.crafted_text);
+              }
+
+              const recScore = numericScoreFromRecommendation(rec);
+              if (recScore !== null) decisionScore = recScore;
+
               if (Array.isArray(rec.brain_rules_used) && rec.brain_rules_used.length > 0) {
                 brainRulesUsed = rec.brain_rules_used;
               }
@@ -110,6 +142,12 @@ export async function POST(req: Request) {
           }
         }
       } catch {}
+    }
+
+    // Validate inferred content_type after recommendation extraction
+    if (resolvedContentType && !VALID_CONTENT_TYPES.includes(resolvedContentType)) {
+      warnings.push(`Inferred content_type '${resolvedContentType}' is not valid; storing null instead`);
+      resolvedContentType = null;
     }
 
     // ── Resolve text-based brain_rules_used to IDs ──
@@ -134,9 +172,9 @@ export async function POST(req: Request) {
         decision_run_id: linkedDecisionRunId,
         account_handle: accountHandle,
         published_url: extractedUrl,
-        published_text: publishedText,
-        source_tweet_url: sourceTweetUrl,
-        content_type: contentType,
+        published_text: resolvedPublishedText,
+        source_tweet_url: resolvedSourceTweetUrl,
+        content_type: resolvedContentType,
         decision_score: decisionScore,
         brain_rules_used: brainRulesUsed,
         status: 'published',
@@ -159,8 +197,12 @@ export async function POST(req: Request) {
       ok: true,
       version: VERSION,
       linked,
+      recommendation_linked: recommendationLinked || undefined,
       published_decision_id: inserted?.id || null,
       recommendation_index: recommendationIndex || undefined,
+      content_type: resolvedContentType || undefined,
+      source_tweet_url: resolvedSourceTweetUrl || undefined,
+      decision_score: decisionScore ?? undefined,
       brain_rules_count: brainRulesUsed.length,
       brain_rules_resolved: brainRulesResolved || undefined,
       warning: warnings.length > 0 ? warnings.join('; ') : undefined
