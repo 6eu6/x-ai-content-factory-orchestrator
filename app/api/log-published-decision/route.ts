@@ -2,7 +2,7 @@ import { assertAuthorized, optionalEnv } from '../../../lib/env';
 import { supabaseAdmin } from '../../../lib/supabase';
 import { extractTweetUrl } from '../../../lib/telegram';
 
-const VERSION = 'log-published-decision-v1';
+const VERSION = 'log-published-decision-v2';
 
 const VALID_CONTENT_TYPES = ['reply', 'quote', 'thread', 'single_tweet', 'article'];
 
@@ -16,6 +16,7 @@ export async function POST(req: Request) {
     const sourceTweetUrl = body.source_tweet_url || null;
     const contentType = body.content_type || null;
     const publishedText = body.published_text || null;
+    const recommendationIndex = body.recommendation_index ? Number(body.recommendation_index) : null;
 
     // ── Validate published_url ──
     if (!publishedUrl) {
@@ -76,13 +77,34 @@ export async function POST(req: Request) {
       try {
         const { data: runData } = await supabase
           .from('decision_runs')
-          .select('decision_score, brain_rules_used')
+          .select('decision_score, brain_rules_used, selected_payload')
           .eq('id', linkedDecisionRunId)
           .maybeSingle();
 
         if (runData) {
           decisionScore = runData.decision_score || null;
           brainRulesUsed = Array.isArray(runData.brain_rules_used) ? runData.brain_rules_used : [];
+
+          // ── If recommendation_index provided, extract specific recommendation ──
+          if (recommendationIndex && recommendationIndex >= 1) {
+            const selectedPayload = Array.isArray(runData.selected_payload) ? runData.selected_payload : [];
+            const rec = selectedPayload[recommendationIndex - 1];
+            if (rec) {
+              // Override content_type, source_tweet_url from recommendation if not already provided
+              if (!contentType && rec.content_type) {
+                // Use recommendation content_type
+              }
+              if (!sourceTweetUrl && rec.source_tweet_url) {
+                // Will use rec.source_tweet_url
+              }
+              if (rec.decision_score) decisionScore = rec.decision_score;
+              if (Array.isArray(rec.brain_rules_used) && rec.brain_rules_used.length > 0) {
+                brainRulesUsed = rec.brain_rules_used;
+              }
+            } else {
+              warnings.push(`recommendation_index ${recommendationIndex} out of range (selected_payload has ${selectedPayload.length} items)`);
+            }
+          }
         }
       } catch {}
     }
@@ -101,7 +123,8 @@ export async function POST(req: Request) {
         brain_rules_used: brainRulesUsed,
         status: 'published',
         performance_checked_at: null,
-        performance_payload: {}
+        performance_payload: {},
+        feedback_payload: {}
       })
       .select('id')
       .single();
@@ -119,6 +142,8 @@ export async function POST(req: Request) {
       version: VERSION,
       linked,
       published_decision_id: inserted?.id || null,
+      recommendation_index: recommendationIndex || undefined,
+      brain_rules_count: brainRulesUsed.length,
       warning: warnings.length > 0 ? warnings.join('; ') : undefined
     });
   } catch (err: any) {

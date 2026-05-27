@@ -149,8 +149,8 @@ export async function POST(req: Request) {
   try {
     assertAuthorized(req);
     const body = await req.json();
-    if (body?.action !== 'run_alignment' && body?.action !== 'run_feedback_loop') {
-      return Response.json({ ok: false, error: 'Unknown action. Use action: "run_alignment" or "run_feedback_loop"' }, { status: 400 });
+    if (body?.action !== 'run_alignment' && body?.action !== 'run_feedback_loop' && body?.action !== 'run_performance_feedback') {
+      return Response.json({ ok: false, error: 'Unknown action. Use action: "run_alignment", "run_feedback_loop", or "run_performance_feedback"' }, { status: 400 });
     }
 
     // Accept database_url from request body, or construct from env vars
@@ -173,7 +173,28 @@ export async function POST(req: Request) {
     const results: string[] = [];
 
     try {
-      if (body.action === 'run_feedback_loop') {
+      if (body.action === 'run_performance_feedback') {
+        // Phase 5: Add outcome and success/failure tracking columns
+        await pool.query(`ALTER TABLE published_decisions ADD COLUMN IF NOT EXISTS outcome_label TEXT`);
+        await pool.query(`ALTER TABLE published_decisions ADD COLUMN IF NOT EXISTS outcome_score NUMERIC`);
+        await pool.query(`ALTER TABLE published_decisions ADD COLUMN IF NOT EXISTS feedback_applied_at TIMESTAMPTZ`);
+        await pool.query(`ALTER TABLE published_decisions ADD COLUMN IF NOT EXISTS feedback_payload JSONB DEFAULT '{}'`);
+        results.push('published_decisions: outcome columns added');
+
+        await pool.query(`ALTER TABLE x_algorithm_learning_rules ADD COLUMN IF NOT EXISTS success_count INTEGER DEFAULT 0`);
+        await pool.query(`ALTER TABLE x_algorithm_learning_rules ADD COLUMN IF NOT EXISTS failure_count INTEGER DEFAULT 0`);
+        await pool.query(`ALTER TABLE x_algorithm_learning_rules ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMPTZ`);
+        await pool.query(`ALTER TABLE x_algorithm_learning_rules ADD COLUMN IF NOT EXISTS last_success_at TIMESTAMPTZ`);
+        await pool.query(`ALTER TABLE x_algorithm_learning_rules ADD COLUMN IF NOT EXISTS last_failure_at TIMESTAMPTZ`);
+        results.push('x_algorithm_learning_rules: success/failure columns added');
+
+        await pool.query(`ALTER TABLE viral_style_patterns ADD COLUMN IF NOT EXISTS success_count INTEGER DEFAULT 0`);
+        await pool.query(`ALTER TABLE viral_style_patterns ADD COLUMN IF NOT EXISTS failure_count INTEGER DEFAULT 0`);
+        await pool.query(`ALTER TABLE viral_style_patterns ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMPTZ`);
+        await pool.query(`ALTER TABLE viral_style_patterns ADD COLUMN IF NOT EXISTS last_success_at TIMESTAMPTZ`);
+        await pool.query(`ALTER TABLE viral_style_patterns ADD COLUMN IF NOT EXISTS last_failure_at TIMESTAMPTZ`);
+        results.push('viral_style_patterns: success/failure columns added');
+      } else if (body.action === 'run_feedback_loop') {
         // Phase 4: Create published_decisions table
         await pool.query(`CREATE TABLE IF NOT EXISTS published_decisions (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
