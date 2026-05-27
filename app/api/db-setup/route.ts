@@ -149,8 +149,8 @@ export async function POST(req: Request) {
   try {
     assertAuthorized(req);
     const body = await req.json();
-    if (body?.action !== 'run_alignment') {
-      return Response.json({ ok: false, error: 'Unknown action. Use action: "run_alignment"' }, { status: 400 });
+    if (body?.action !== 'run_alignment' && body?.action !== 'run_feedback_loop') {
+      return Response.json({ ok: false, error: 'Unknown action. Use action: "run_alignment" or "run_feedback_loop"' }, { status: 400 });
     }
 
     // Accept database_url from request body, or construct from env vars
@@ -173,6 +173,42 @@ export async function POST(req: Request) {
     const results: string[] = [];
 
     try {
+      if (body.action === 'run_feedback_loop') {
+        // Phase 4: Create published_decisions table
+        await pool.query(`CREATE TABLE IF NOT EXISTS published_decisions (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          decision_run_id UUID REFERENCES decision_runs(id),
+          account_handle TEXT NOT NULL,
+          published_url TEXT NOT NULL UNIQUE,
+          published_text TEXT,
+          source_tweet_url TEXT,
+          content_type TEXT,
+          decision_score NUMERIC,
+          brain_rules_used JSONB DEFAULT '[]',
+          status TEXT DEFAULT 'published',
+          performance_checked_at TIMESTAMPTZ,
+          performance_payload JSONB DEFAULT '{}',
+          created_at TIMESTAMPTZ DEFAULT now(),
+          updated_at TIMESTAMPTZ DEFAULT now()
+        )`);
+        await pool.query(`ALTER TABLE published_decisions ENABLE ROW LEVEL SECURITY`);
+        try {
+          await pool.query(`CREATE POLICY "Service role full access" ON published_decisions FOR ALL USING (true) WITH CHECK (true)`);
+        } catch {}
+        results.push('published_decisions table created with RLS');
+
+        // Add missing columns to decision_runs
+        try {
+          await pool.query(`ALTER TABLE decision_runs ADD COLUMN IF NOT EXISTS scan_account_limit INTEGER DEFAULT 10`);
+          await pool.query(`ALTER TABLE decision_runs ADD COLUMN IF NOT EXISTS scan_tweets_per_account INTEGER DEFAULT 8`);
+          await pool.query(`ALTER TABLE decision_runs ADD COLUMN IF NOT EXISTS decision_score NUMERIC`);
+          await pool.query(`ALTER TABLE decision_runs ADD COLUMN IF NOT EXISTS brain_rules_used JSONB DEFAULT '[]'`);
+          results.push('decision_runs columns added (scan limits, decision_score, brain_rules_used)');
+        } catch (e: any) {
+          results.push(`decision_runs columns: ${e.message}`);
+        }
+      } else {
+      // Alignment migration (original)
       // 1. Add provider column to model_routing_rules
       await pool.query(`ALTER TABLE model_routing_rules ADD COLUMN IF NOT EXISTS provider TEXT DEFAULT 'cloud'`);
       results.push('model_routing_rules.provider column added');
@@ -227,12 +263,13 @@ export async function POST(req: Request) {
         await pool.query(`CREATE POLICY "Service role full access" ON behavior_limits FOR ALL USING (true) WITH CHECK (true)`);
       } catch {}
       results.push('behavior_limits table created');
+      }
 
     } finally {
       await pool.end();
     }
 
-    return Response.json({ ok: true, action: 'run_alignment', results });
+    return Response.json({ ok: true, action: body.action, results });
   } catch (err: any) {
     return Response.json({ ok: false, error: err.message }, { status: 500 });
   }
