@@ -419,15 +419,25 @@ async function handleMessage(chatId: string, userId: string, username: string, t
       return;
     }
 
-    // Handle "نشرت URL" pattern directly (no flow needed)
+    // Handle "نشرت [number] URL" or "نشرت URL" pattern (no flow needed)
     if (/^نشرت\s+/i.test(text)) {
-      const urlPart = text.replace(/^نشرت\s+/i, '').trim();
+      const afterNashart = text.replace(/^نشرت\s+/i, '').trim();
+      // Check if there's a recommendation index: "نشرت 1 https://x.com/..."
+      const indexedMatch = afterNashart.match(/^(\d+)\s+(https?:\/\/\S+)/i);
+      let recommendationIndex: number | null = null;
+      let urlPart = afterNashart;
+
+      if (indexedMatch) {
+        recommendationIndex = Number(indexedMatch[1]);
+        urlPart = indexedMatch[2];
+      }
+
       const publishedUrl = extractTweetUrl(urlPart);
       if (!publishedUrl) {
-        await sendReply(chatId, '❌ لم أتعرف على رابط X. أرسل الرابط بعد كلمة "نشرت".\nمثال: نشرت https://x.com/30piq/status/123');
+        await sendReply(chatId, '❌ لم أتعرف على رابط X. أرسل الرابط بعد كلمة "نشرت".\nمثال: نشرت 1 https://x.com/30piq/status/123\nأو: نشرت https://x.com/30piq/status/123');
         return;
       }
-      await handleLogPublished(chatId, publishedUrl, supabase);
+      await handleLogPublished(chatId, publishedUrl, supabase, recommendationIndex);
       return;
     }
 
@@ -524,8 +534,9 @@ async function deliverScanResults(chatId: string, result: any) {
       const opp = opps[i];
       const typeLabel = opp.type === 'quote' ? '📌 اقتباس' : opp.type === 'reply' ? '↩️ رد' : opp.type === 'thread' ? '🧵 ثريد' : '📰 مقال';
       const shieldIcon = opp.shield_passed ? '✅' : '⚠️';
+      const recNum = i + 1;
 
-      lines.push(`\n${i + 1}. ${typeLabel} ${shieldIcon}`);
+      lines.push(`\n${recNum}. ${typeLabel} ${shieldIcon}`);
       if (opp.source_tweet_url) lines.push(`🔗 ${opp.source_tweet_url}`);
       lines.push(`<i>${htmlEscape(shortText(opp.crafted_text, 280))}</i>`);
       if (opp.why) lines.push(`💡 ${opp.why}`);
@@ -535,6 +546,7 @@ async function deliverScanResults(chatId: string, result: any) {
     lines.push('');
     lines.push('━━━━━━━━━━━━━━━━━━━━');
     lines.push('<i>انسخ المحتوى وانشره يدوياً على X</i>');
+    lines.push(`<i>بعد النشر أرسل: نشرت 1 https://x.com/...</i>`);
   }
 
   await sendReply(chatId, lines.join('\n'));
@@ -629,7 +641,7 @@ async function getBrainSummary(supabase: any): Promise<string> {
 
 // ═══ تسجيل منشور ═══
 
-async function handleLogPublished(chatId: string, publishedUrl: string, supabase: any) {
+async function handleLogPublished(chatId: string, publishedUrl: string, supabase: any, recommendationIndex: number | null = null) {
   try {
     const username = optionalEnv('X_USERNAME', '30piq');
 
@@ -643,11 +655,14 @@ async function handleLogPublished(chatId: string, publishedUrl: string, supabase
     let decisionRunId: string | null = null;
     let decisionScore: number | null = null;
     let brainRulesUsed: any[] = [];
+    let contentType: string | null = null;
+    let sourceTweetUrl: string | null = null;
+    let runShortId: string | null = null;
 
     try {
       const { data: recentRuns } = await supabase
         .from('decision_runs')
-        .select('id, selected_count, decision_score, brain_rules_used')
+        .select('id, selected_count, decision_score, brain_rules_used, selected_payload')
         .gt('selected_count', 0)
         .gte('created_at', seventyTwoHoursAgo)
         .order('created_at', { ascending: false })
@@ -657,23 +672,43 @@ async function handleLogPublished(chatId: string, publishedUrl: string, supabase
         decisionRunId = recentRuns[0].id;
         decisionScore = recentRuns[0].decision_score || null;
         brainRulesUsed = Array.isArray(recentRuns[0].brain_rules_used) ? recentRuns[0].brain_rules_used : [];
+        runShortId = String(decisionRunId).slice(0, 8);
         linked = true;
+
+        // If recommendation_index provided, extract specific recommendation data
+        if (recommendationIndex && recommendationIndex >= 1) {
+          const selectedPayload = Array.isArray(recentRuns[0].selected_payload) ? recentRuns[0].selected_payload : [];
+          const rec = selectedPayload[recommendationIndex - 1];
+          if (rec) {
+            contentType = rec.content_type || null;
+            sourceTweetUrl = rec.source_tweet_url || null;
+            if (rec.decision_score) decisionScore = rec.decision_score;
+            if (Array.isArray(rec.brain_rules_used) && rec.brain_rules_used.length > 0) {
+              brainRulesUsed = rec.brain_rules_used;
+            }
+          }
+        }
       }
     } catch {}
 
     // Insert
+    const insertData: Record<string, any> = {
+      decision_run_id: decisionRunId,
+      account_handle: accountHandle,
+      published_url: publishedUrl,
+      status: 'published',
+      decision_score: decisionScore,
+      brain_rules_used: brainRulesUsed,
+      content_type: contentType,
+      source_tweet_url: sourceTweetUrl,
+      performance_checked_at: null,
+      performance_payload: {},
+      feedback_payload: {}
+    };
+
     const { data: inserted, error } = await supabase
       .from('published_decisions')
-      .insert({
-        decision_run_id: decisionRunId,
-        account_handle: accountHandle,
-        published_url: publishedUrl,
-        status: 'published',
-        decision_score: decisionScore,
-        brain_rules_used: brainRulesUsed,
-        performance_checked_at: null,
-        performance_payload: {}
-      })
+      .insert(insertData)
       .select('id')
       .single();
 
@@ -690,8 +725,12 @@ async function handleLogPublished(chatId: string, publishedUrl: string, supabase
     msg += `━━━━━━━━━━━━━━━━━━━━\n`;
     msg += `🔗 ${publishedUrl}\n`;
     msg += `👤 @${htmlEscape(accountHandle)}\n`;
+    if (recommendationIndex) msg += `📋 توصية رقم: ${recommendationIndex}\n`;
+    if (contentType) msg += `📝 النوع: ${contentType}\n`;
     msg += linked ? `🔗 مربوط بقرار: نعم` : `⚠️ لم يُربط بقرار`;
-    if (decisionScore !== null) msg += ` | نقاط القرار: ${decisionScore}`;
+    if (runShortId) msg += ` (${runShortId})`;
+    if (decisionScore !== null) msg += ` | نقاط: ${decisionScore}`;
+    if (brainRulesUsed.length > 0) msg += ` | 🧠 ${brainRulesUsed.length} قاعدة`;
     msg += `\n\n<i>سيتم فحص الأداء لاحقًا.</i>`;
 
     await sendReply(chatId, msg);

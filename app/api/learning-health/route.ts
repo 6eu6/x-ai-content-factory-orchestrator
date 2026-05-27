@@ -80,7 +80,7 @@ export async function GET(req: Request) {
       .limit(5);
 
     // ── Published decisions stats ──
-    let publishedDecisions: any = { total: 0, unchecked: 0, checked_last_24h: 0, latest: [] };
+    let publishedDecisions: any = { total: 0, unchecked: 0, checked_last_24h: 0, feedback_applied: 0, feedback_pending: 0, outcome_summary: {}, latest: [] };
     try {
       const { count: publishedTotal } = await supabase
         .from('published_decisions')
@@ -96,9 +96,33 @@ export async function GET(req: Request) {
         .select('*', { count: 'exact', head: true })
         .gte('performance_checked_at', dayAgo);
 
+      const { count: feedbackApplied } = await supabase
+        .from('published_decisions')
+        .select('*', { count: 'exact', head: true })
+        .not('feedback_applied_at', 'is', null);
+
+      const { count: feedbackPending } = await supabase
+        .from('published_decisions')
+        .select('*', { count: 'exact', head: true })
+        .not('performance_checked_at', 'is', null)
+        .is('feedback_applied_at', null);
+
+      // Outcome label breakdown
+      const outcomeSummary: Record<string, number> = {};
+      try {
+        const { data: outcomeData } = await supabase
+          .from('published_decisions')
+          .select('outcome_label')
+          .not('outcome_label', 'is', null);
+        for (const row of (outcomeData || [])) {
+          const label = row.outcome_label || 'unknown';
+          outcomeSummary[label] = (outcomeSummary[label] || 0) + 1;
+        }
+      } catch {}
+
       const { data: latestPublished } = await supabase
         .from('published_decisions')
-        .select('id, account_handle, published_url, content_type, status, decision_score, performance_payload, created_at, performance_checked_at')
+        .select('id, account_handle, published_url, content_type, status, decision_score, outcome_label, outcome_score, performance_payload, created_at, performance_checked_at, feedback_applied_at')
         .order('created_at', { ascending: false })
         .limit(5);
 
@@ -106,6 +130,9 @@ export async function GET(req: Request) {
         total: publishedTotal || 0,
         unchecked: publishedUnchecked || 0,
         checked_last_24h: publishedChecked24h || 0,
+        feedback_applied: feedbackApplied || 0,
+        feedback_pending: feedbackPending || 0,
+        outcome_summary: outcomeSummary,
         latest: latestPublished || []
       };
     } catch {
@@ -136,6 +163,9 @@ export async function GET(req: Request) {
       if (staleUnchecked.length > 0) {
         warning_flags.push('PUBLISHED_DECISIONS_UNCHECKED');
       }
+    }
+    if (publishedDecisions.feedback_pending > 0) {
+      warning_flags.push('FEEDBACK_PENDING');
     }
 
     return Response.json({

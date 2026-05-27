@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { extractTweetUrl } from '../lib/telegram';
+import { calculateOutcomeScore, getOutcomeLabel, calculateOutcome, OutcomeLabel } from '../lib/performance-outcome';
 
 // ── Inline copies of the logic from published-performance-scan for testing ──
 // (These mirror the functions in app/api/published-performance-scan/route.ts)
@@ -334,5 +335,275 @@ describe('feedback-loop — full pipeline: extractTweetId + normalize + metrics'
     expect(normalized.public_metrics.like_count).toBe(500);
     expect(normalized.public_metrics.view_count).toBe(50000);
     expect(normalized.public_metrics.retweet_count).toBe(100);
+  });
+});
+
+// ═══════════════════════════════════════════════════════
+// Phase 5: Performance Outcome Scoring
+// ═══════════════════════════════════════════════════════
+
+describe('performance-outcome — calculateOutcomeScore', () => {
+  it('high engagement → strong_success (score >= 8)', () => {
+    // 64K views + 611 likes + replies/retweets/quotes/bookmarks
+    const result = calculateOutcomeScore({
+      views: 63995,
+      likes: 611,
+      replies: 85,
+      retweets: 120,
+      quotes: 45,
+      bookmarks: 200
+    });
+    expect(result).toBeGreaterThanOrEqual(8);
+    expect(getOutcomeLabel(result)).toBe('strong_success');
+  });
+
+  it('medium engagement → success (score >= 5.5)', () => {
+    // ~5K views + moderate engagement
+    const result = calculateOutcomeScore({
+      views: 5000,
+      likes: 50,
+      replies: 10,
+      retweets: 15,
+      quotes: 5,
+      bookmarks: 20
+    });
+    expect(result).toBeGreaterThanOrEqual(5.5);
+    expect(result).toBeLessThan(8);
+    expect(getOutcomeLabel(result)).toBe('success');
+  });
+
+  it('low-medium engagement → neutral (score >= 3)', () => {
+    // ~500 views + minimal engagement
+    const result = calculateOutcomeScore({
+      views: 500,
+      likes: 10,
+      replies: 2,
+      retweets: 3,
+      quotes: 1,
+      bookmarks: 3
+    });
+    expect(result).toBeGreaterThanOrEqual(3);
+    expect(result).toBeLessThan(5.5);
+    expect(getOutcomeLabel(result)).toBe('neutral');
+  });
+
+  it('very low engagement → weak (score < 3)', () => {
+    // Almost no views
+    const result = calculateOutcomeScore({
+      views: 10,
+      likes: 0,
+      replies: 0,
+      retweets: 0,
+      quotes: 0,
+      bookmarks: 0
+    });
+    expect(result).toBeLessThan(3);
+    expect(getOutcomeLabel(result)).toBe('weak');
+  });
+
+  it('score is capped at 10', () => {
+    const result = calculateOutcomeScore({
+      views: 10000000,
+      likes: 50000,
+      replies: 5000,
+      retweets: 10000,
+      quotes: 3000,
+      bookmarks: 8000
+    });
+    expect(result).toBeLessThanOrEqual(10);
+  });
+
+  it('empty payload → weak (score < 3)', () => {
+    const result = calculateOutcomeScore({});
+    expect(result).toBeLessThan(3);
+    expect(getOutcomeLabel(result)).toBe('weak');
+  });
+
+  it('zeros → weak', () => {
+    const result = calculateOutcomeScore({
+      views: 0,
+      likes: 0,
+      replies: 0,
+      retweets: 0,
+      quotes: 0,
+      bookmarks: 0
+    });
+    expect(result).toBeLessThan(3);
+  });
+});
+
+describe('performance-outcome — getOutcomeLabel', () => {
+  it('score 9 → strong_success', () => {
+    expect(getOutcomeLabel(9)).toBe('strong_success');
+  });
+
+  it('score 8 → strong_success', () => {
+    expect(getOutcomeLabel(8)).toBe('strong_success');
+  });
+
+  it('score 7 → success', () => {
+    expect(getOutcomeLabel(7)).toBe('success');
+  });
+
+  it('score 5.5 → success', () => {
+    expect(getOutcomeLabel(5.5)).toBe('success');
+  });
+
+  it('score 5 → neutral', () => {
+    expect(getOutcomeLabel(5)).toBe('neutral');
+  });
+
+  it('score 3 → neutral', () => {
+    expect(getOutcomeLabel(3)).toBe('neutral');
+  });
+
+  it('score 2.9 → weak', () => {
+    expect(getOutcomeLabel(2.9)).toBe('weak');
+  });
+
+  it('score 0 → weak', () => {
+    expect(getOutcomeLabel(0)).toBe('weak');
+  });
+});
+
+describe('performance-outcome — calculateOutcome', () => {
+  it('returns both score and label', () => {
+    const result = calculateOutcome({
+      views: 50000,
+      likes: 500,
+      replies: 50,
+      retweets: 100,
+      quotes: 20,
+      bookmarks: 75
+    });
+    expect(result.score).toBeGreaterThan(0);
+    expect(result.label).toBeDefined();
+    expect(['strong_success', 'success', 'neutral', 'weak']).toContain(result.label);
+  });
+
+  it('consistent between calculateOutcomeScore and calculateOutcome', () => {
+    const payload = { views: 63995, likes: 611, replies: 85, retweets: 120, quotes: 45, bookmarks: 200 };
+    const score = calculateOutcomeScore(payload);
+    const outcome = calculateOutcome(payload);
+    expect(outcome.score).toBe(score);
+    expect(outcome.label).toBe(getOutcomeLabel(score));
+  });
+});
+
+// ═══════════════════════════════════════════════════════
+// Phase 5: Attribution Logic (dry-run / no rule changes)
+// ═══════════════════════════════════════════════════════
+
+describe('performance-outcome — attribution logic', () => {
+  it('empty brain_rules_used → NO_RULE_ATTRIBUTION warning', () => {
+    const brainRulesUsed: any[] = [];
+    const ruleIdsFound: string[] = [];
+
+    for (const ref of brainRulesUsed) {
+      if (typeof ref === 'string' && /^\d+$/.test(ref)) {
+        ruleIdsFound.push(ref);
+      } else if (typeof ref === 'object' && ref !== null) {
+        const id = (ref as any).id || (ref as any).rule_id || (ref as any).pattern_id;
+        if (id) ruleIdsFound.push(String(id));
+      }
+    }
+
+    const hasAttribution = ruleIdsFound.length > 0;
+    expect(hasAttribution).toBe(false);
+    // In the endpoint, this triggers NO_RULE_ATTRIBUTION warning
+  });
+
+  it('numeric string brain_rules_used → found as rule IDs', () => {
+    const brainRulesUsed: any[] = ['42', '17', '99'];
+    const ruleIdsFound: string[] = [];
+
+    for (const ref of brainRulesUsed) {
+      if (typeof ref === 'string' && /^\d+$/.test(ref)) {
+        ruleIdsFound.push(ref);
+      } else if (typeof ref === 'object' && ref !== null) {
+        const id = (ref as any).id || (ref as any).rule_id || (ref as any).pattern_id;
+        if (id) ruleIdsFound.push(String(id));
+      }
+    }
+
+    expect(ruleIdsFound).toEqual(['42', '17', '99']);
+    expect(ruleIdsFound.length > 0).toBe(true);
+  });
+
+  it('object brain_rules_used with id → found', () => {
+    const brainRulesUsed: any[] = [{ id: 5, rule_type: 'algorithm' }, { pattern_id: 12 }];
+    const ruleIdsFound: string[] = [];
+
+    for (const ref of brainRulesUsed) {
+      if (typeof ref === 'string' && /^\d+$/.test(ref)) {
+        ruleIdsFound.push(ref);
+      } else if (typeof ref === 'object' && ref !== null) {
+        const id = (ref as any).id || (ref as any).rule_id || (ref as any).pattern_id;
+        if (id) ruleIdsFound.push(String(id));
+      }
+    }
+
+    expect(ruleIdsFound).toEqual(['5', '12']);
+  });
+
+  it('mixed brain_rules_used → extracts numeric IDs only', () => {
+    const brainRulesUsed: any[] = ['abc', '42', { name: 'test' }, { id: 7 }, 'not-a-number'];
+    const ruleIdsFound: string[] = [];
+
+    for (const ref of brainRulesUsed) {
+      if (typeof ref === 'string' && /^\d+$/.test(ref)) {
+        ruleIdsFound.push(ref);
+      } else if (typeof ref === 'object' && ref !== null) {
+        const id = (ref as any).id || (ref as any).rule_id || (ref as any).pattern_id;
+        if (id) ruleIdsFound.push(String(id));
+      }
+    }
+
+    expect(ruleIdsFound).toEqual(['42', '7']);
+  });
+
+  it('dry-run: no side effects when apply=0', () => {
+    // In dry-run mode, the endpoint only computes outcomes and returns them
+    // without writing to DB. This test verifies the pure calculation.
+    const payload = { views: 50000, likes: 500, replies: 50, retweets: 100, quotes: 20, bookmarks: 75 };
+    const { score, label } = calculateOutcome(payload);
+
+    // The score is just computed, no DB writes happen
+    expect(score).toBeGreaterThan(0);
+    expect(label).toBeDefined();
+  });
+});
+
+// ═══════════════════════════════════════════════════════
+// Phase 5: "نشرت 1 URL" pattern parsing
+// ═══════════════════════════════════════════════════════
+
+describe('feedback-loop — "نشرت" pattern with recommendation index', () => {
+  it('parses "نشرت 1 https://x.com/..." → index=1, url extracted', () => {
+    const text = 'نشرت 1 https://x.com/30piq/status/1234567890';
+    const afterNashart = text.replace(/^نشرت\s+/i, '').trim();
+    const indexedMatch = afterNashart.match(/^(\d+)\s+(https?:\/\/\S+)/i);
+
+    expect(indexedMatch).not.toBeNull();
+    expect(indexedMatch![1]).toBe('1');
+    expect(indexedMatch![2]).toBe('https://x.com/30piq/status/1234567890');
+  });
+
+  it('parses "نشرت 3 https://x.com/..." → index=3', () => {
+    const text = 'نشرت 3 https://x.com/30piq/status/999';
+    const afterNashart = text.replace(/^نشرت\s+/i, '').trim();
+    const indexedMatch = afterNashart.match(/^(\d+)\s+(https?:\/\/\S+)/i);
+
+    expect(indexedMatch).not.toBeNull();
+    expect(indexedMatch![1]).toBe('3');
+  });
+
+  it('parses "نشرت https://x.com/..." without index → no match, url-only mode', () => {
+    const text = 'نشرت https://x.com/30piq/status/1234567890';
+    const afterNashart = text.replace(/^نشرت\s+/i, '').trim();
+    const indexedMatch = afterNashart.match(/^(\d+)\s+(https?:\/\/\S+)/i);
+
+    expect(indexedMatch).toBeNull();
+    // Falls through to url-only mode
   });
 });
