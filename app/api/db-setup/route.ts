@@ -1,4 +1,5 @@
 import { supabaseAdmin } from '../../../lib/supabase';
+import { Pool } from 'pg';
 
 /**
  * GET /api/db-setup
@@ -136,4 +137,96 @@ function assertAuthorized(req: Request): void {
   if (token === secret) return;
   if (isCron && vercelCronHeader) return;
   throw new Error('Unauthorized');
+}
+
+/**
+ * POST /api/db-setup
+ *
+ * يشغّل alignment migration مباشرة على Supabase
+ * Body: { action: 'run_alignment' }
+ */
+export async function POST(req: Request) {
+  try {
+    assertAuthorized(req);
+    const body = await req.json();
+    if (body?.action !== 'run_alignment') {
+      return Response.json({ ok: false, error: 'Unknown action. Use action: "run_alignment"' }, { status: 400 });
+    }
+
+    const supabaseUrl = process.env.SUPABASE_URL;
+    if (!supabaseUrl) {
+      return Response.json({ ok: false, error: 'SUPABASE_URL not set' }, { status: 500 });
+    }
+
+    // Build PostgreSQL connection string from Supabase URL + service role key
+    const ref = supabaseUrl.replace('https://', '').replace('.supabase.co', '');
+    const dbUrl = `postgres://postgres.${ref}:${process.env.SUPABASE_SERVICE_ROLE_KEY}@aws-0-us-east-1.pooler.supabase.com:6543/postgres`;
+
+    const pool = new Pool({ connectionString: dbUrl, ssl: { rejectUnauthorized: false } });
+    const results: string[] = [];
+
+    try {
+      // 1. Add provider column to model_routing_rules
+      await pool.query(`ALTER TABLE model_routing_rules ADD COLUMN IF NOT EXISTS provider TEXT DEFAULT 'cloud'`);
+      results.push('model_routing_rules.provider column added');
+
+      // 2. Add columns to accounts
+      await pool.query(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS category TEXT`);
+      await pool.query(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS followers INTEGER`);
+      await pool.query(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS avg_engagement NUMERIC`);
+      await pool.query(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS our_reply_count INTEGER DEFAULT 0`);
+      await pool.query(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_reply_date TIMESTAMPTZ`);
+      await pool.query(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_checked TIMESTAMPTZ`);
+      results.push('accounts alignment columns added');
+
+      // 3. Create decision_runs table
+      await pool.query(`CREATE TABLE IF NOT EXISTS decision_runs (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        account_handle TEXT NOT NULL,
+        account_stage TEXT NOT NULL,
+        raw_opportunities INTEGER DEFAULT 0,
+        selected_count INTEGER DEFAULT 0,
+        held_count INTEGER DEFAULT 0,
+        budget JSONB DEFAULT '{}',
+        selected_payload JSONB DEFAULT '[]',
+        held_summary JSONB DEFAULT '[]',
+        run_source TEXT DEFAULT 'daily_run',
+        created_at TIMESTAMPTZ DEFAULT now()
+      )`);
+      await pool.query(`ALTER TABLE decision_runs ENABLE ROW LEVEL SECURITY`);
+      try {
+        await pool.query(`CREATE POLICY "Service role full access" ON decision_runs FOR ALL USING (true) WITH CHECK (true)`);
+      } catch {}
+      results.push('decision_runs table created');
+
+      // 4. Create behavior_limits table
+      await pool.query(`CREATE TABLE IF NOT EXISTS behavior_limits (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        account_handle TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        max_original_posts_per_day INTEGER DEFAULT 2,
+        max_replies_per_day INTEGER DEFAULT 8,
+        max_quotes_per_day INTEGER DEFAULT 2,
+        min_minutes_between_actions INTEGER DEFAULT 35,
+        max_same_author_interactions_per_day INTEGER DEFAULT 2,
+        links_allowed BOOLEAN DEFAULT false,
+        hashtags_allowed BOOLEAN DEFAULT false,
+        created_at TIMESTAMPTZ DEFAULT now(),
+        updated_at TIMESTAMPTZ DEFAULT now(),
+        UNIQUE(account_handle, stage)
+      )`);
+      await pool.query(`ALTER TABLE behavior_limits ENABLE ROW LEVEL SECURITY`);
+      try {
+        await pool.query(`CREATE POLICY "Service role full access" ON behavior_limits FOR ALL USING (true) WITH CHECK (true)`);
+      } catch {}
+      results.push('behavior_limits table created');
+
+    } finally {
+      await pool.end();
+    }
+
+    return Response.json({ ok: true, action: 'run_alignment', results });
+  } catch (err: any) {
+    return Response.json({ ok: false, error: err.message }, { status: 500 });
+  }
 }
