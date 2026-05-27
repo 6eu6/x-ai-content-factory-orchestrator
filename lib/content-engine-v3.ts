@@ -70,6 +70,7 @@ export type ScanResult = {
     media_patterns: number;
   };
   media_downloaded: number;
+  light_mode?: boolean;
   debug_log: string[];  // سجل تشخيصي للـ server logs فقط
 };
 
@@ -92,14 +93,21 @@ export type DeepAnalysis = {
 
 // ═══ الزحف والتحليل ═══
 
+export type ScanOptions = {
+  /** Light mode: skip deep AI analysis (callModel), only store basic metrics.
+   *  Designed for frequent lightweight cron runs. Deep analysis stays in daily-run. */
+  lightMode?: boolean;
+};
+
 /**
  * يزحف حسابات X المحفوظة ويحلل تغريداتها
  * + يحلل التغريدات المضافة يدوياً
  */
-export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10): Promise<ScanResult> {
+export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10, options: ScanOptions = {}): Promise<ScanResult> {
   const supabase = supabaseAdmin();
   const debugLog: string[] = [];
   let brainUpdates = { algorithmRules: 0, stylePatterns: 0, mcpOpportunities: 0 };
+  const lightMode = options.lightMode === true;
 
   // 1. جلب الحسابات المحفوظة — استعلام ذكي يفضّل غير المفحوصة والأعلى أولوية
   let accounts: any[] = [];
@@ -228,8 +236,9 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10): Pro
         const media = extractMediaFromTweet(tweet);
 
         // ═══ تحليل AI عميق لكل تغريدة فيروسية ═══
+        // Light mode: skip deep AI analysis — just store metrics
         let deepAnalysis: any = null;
-        if (score > 15) {
+        if (score > 15 && !lightMode) {
           try {
             const m: any = tweet.public_metrics || {};
             const aiResult = await callModel('learning_extraction' as TaskType, [
@@ -266,6 +275,10 @@ JSON format: {"viral_reason":"...","style_pattern":"...","media_impact":"...","t
           } catch (aiErr: any) {
             debugLog.push(`[scan] @${handle}: deep analysis failed: ${aiErr.message}`);
           }
+        }
+
+        if (lightMode && score > 15) {
+          debugLog.push(`[scan] @${handle}: lightMode — skipped deep analysis (score ${score})`);
         }
 
         // خزّن في viral_tweet_analyses — كل التغريدات مو بس الفيروسية
@@ -321,7 +334,8 @@ JSON format: {"viral_reason":"...","style_pattern":"...","media_impact":"...","t
         allMedia.push(...media);
 
         // ═══ تعلم مفاهيم من كل تغريدة فيروسية فوراً ═══
-        if (isViral && deepAnalysis) {
+        // Light mode: skip brain learning from individual tweets (kept for daily-run)
+        if (isViral && deepAnalysis && !lightMode) {
           try {
             // خزّن سبب الانتشار كقاعدة
             await insertIfMissing(supabase, 'x_algorithm_learning_rules',
@@ -478,7 +492,8 @@ JSON format: {"viral_reason":"...","style_pattern":"...","media_impact":"...","t
   }
 
   // 3.5. تعليم مفاهيمي: اجمع أنماط مشتركة بين التغريدات واكتشف مفاهيم عامة
-  try {
+  // Light mode: skip batch concept extraction (AI-heavy, kept for daily-run)
+  if (!lightMode) try {
     if (allAnalyzed.length >= 2) {
       // اجمع كل نصوص التغريدات والتحليلات مع بعض عشان AI يكتشف مفاهيم مشتركة
       const tweetsForConcept = allAnalyzed
@@ -578,6 +593,10 @@ ${tweetsForConcept.map((t, i) => `${i + 1}. @${t.handle} (engagement: ${t.score}
     console.error('Concept extraction failed:', e.message);
   }
 
+  if (lightMode) {
+    debugLog.push('[brain-concepts] lightMode — skipped batch concept extraction');
+  }
+
   // 3.5. علّم العقل أنماط الوسائط
   try {
     const accountMediaStats: Record<string, { total: number; withMedia: number; types: Set<string> }> = {};
@@ -620,14 +639,25 @@ ${tweetsForConcept.map((t, i) => `${i + 1}. @${t.handle} (engagement: ${t.score}
   }
 
   // 4. اكتشف فرص المحتوى
-  const opportunities = await discoverOpportunities(allAnalyzed, allMedia);
+  // Light mode: skip opportunity discovery (calls callModel for crafting) — just return raw data
+  let opportunities: ContentOpportunity[] = [];
+  if (lightMode) {
+    debugLog.push('[opportunities] lightMode — skipped opportunity discovery');
+  } else {
+    opportunities = await discoverOpportunities(allAnalyzed, allMedia);
+  }
 
   // 5. ═══ تحسين ذاتي: ارقب العقل وعلّق القواعد الضعيفة ═══
-  try {
+  // Light mode: skip self-improvement (DB-heavy, kept for daily-run)
+  if (!lightMode) try {
     const selfImprovement = await selfImproveBrain(supabase, debugLog);
     debugLog.push(`[self-improve] strengthened: ${selfImprovement.strengthened}, weakened: ${selfImprovement.weakened}, pruned: ${selfImprovement.pruned}`);
   } catch (e: any) {
     debugLog.push(`[self-improve] failed: ${e.message}`);
+  }
+
+  if (lightMode) {
+    debugLog.push('[self-improve] lightMode — skipped self-improvement');
   }
 
   return {
@@ -641,6 +671,7 @@ ${tweetsForConcept.map((t, i) => `${i + 1}. @${t.handle} (engagement: ${t.score}
       media_patterns: allMedia.length
     },
     media_downloaded: allMedia.length,
+    light_mode: lightMode || undefined,
     debug_log: debugLog
   };
 }

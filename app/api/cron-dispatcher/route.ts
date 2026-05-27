@@ -1,15 +1,45 @@
-import { assertAuthorized, optionalEnv } from '../../../lib/env';
+import { assertAuthorized, optionalEnv, envNumber } from '../../../lib/env';
 import { scanXAccounts } from '../../../lib/content-engine-v3';
 import { decideTelegramOpportunities, stageFromFollowerCount } from '../../../lib/decision-engine';
 import { supabaseAdmin } from '../../../lib/supabase';
 import { enrichOpportunitiesWithRulePerformance } from '../../../lib/enrich-opportunities-with-rule-performance';
 
-function envNumber(name: string, fallback: number, min: number, max: number): number {
-  const raw = optionalEnv(name, String(fallback));
-  const n = Number(raw);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, Math.floor(n)));
+// ═══ Error sanitization — never leak secrets ═══
+
+const SECRET_PATTERNS = [
+  /TWITTERAPI_IO_KEY/gi,
+  /ORCHESTRATOR_SECRET/gi,
+  /OPENAI_API_KEY/gi,
+  /SUPABASE_SERVICE_ROLE_KEY/gi,
+  /sk-[a-zA-Z0-9_-]{20,}/g,
+  /eyJ[a-zA-Z0-9_-]{20,}/g,  // JWT-like tokens
+];
+
+function sanitizeError(message: string): string {
+  let safe = message;
+  for (const pattern of SECRET_PATTERNS) {
+    safe = safe.replace(pattern, '[REDACTED]');
+  }
+  // Truncate very long error messages
+  if (safe.length > 500) safe = safe.slice(0, 500) + '...';
+  return safe;
 }
+
+type ExternalError = {
+  provider: 'twitterapi.io' | 'openrouter' | 'supabase';
+  phase: string;
+  status?: number;
+  message: string;
+  response_preview?: string;
+};
+
+type TimingInfo = {
+  started_at: string;
+  scan_ms?: number;
+  enrichment_ms?: number;
+  decision_ms?: number;
+  total_ms?: number;
+};
 
 async function getFollowerStage(username: string) {
   try {
@@ -25,26 +55,128 @@ async function getFollowerStage(username: string) {
 }
 
 export async function GET(req: Request) {
+  const startedAt = Date.now();
+  const timings: TimingInfo = { started_at: new Date(startedAt).toISOString() };
+  const externalErrors: ExternalError[] = [];
+  let partial = false;
+  let partialReason: string | null = null;
+
   try {
     assertAuthorized(req);
     const url = new URL(req.url);
     const source = url.searchParams.get('source') || 'manual';
     const notify = url.searchParams.get('notify') === '1';
     const username = optionalEnv('X_USERNAME', '30piq');
-    const accountLimit = envNumber('CRON_SCAN_ACCOUNT_LIMIT', 5, 1, 15);
-    const tweetsPerAccount = envNumber('CRON_SCAN_TWEETS_PER_ACCOUNT', 5, 1, 15);
 
-    const scanResult = await scanXAccounts(accountLimit, tweetsPerAccount);
+    // ═══ Phase 6.1: Lighter limits for cron ═══
+    const accountLimit = envNumber('CRON_SCAN_ACCOUNT_LIMIT', 2, 1, 15);
+    const tweetsPerAccount = envNumber('CRON_SCAN_TWEETS_PER_ACCOUNT', 3, 1, 15);
+    const maxRuntimeMs = envNumber('CRON_MAX_RUNTIME_MS', 45000, 10000, 120000);
+
+    // ═══ 1. Scan with lightMode ═══
+    let scanResult;
+    const scanStart = Date.now();
+    try {
+      scanResult = await scanXAccounts(accountLimit, tweetsPerAccount, { lightMode: true });
+      timings.scan_ms = Date.now() - scanStart;
+
+      // ═══ Runtime guard: check if we're approaching the limit ═══
+      if (Date.now() - startedAt > maxRuntimeMs * 0.8) {
+        partial = true;
+        partialReason = 'runtime_guard_reached';
+      }
+    } catch (scanErr: any) {
+      timings.scan_ms = Date.now() - scanStart;
+      const errMsg = sanitizeError(scanErr.message || 'Unknown scan error');
+
+      // Detect provider from error message
+      if (/twitterapi|api\.twitterapi/i.test(errMsg)) {
+        externalErrors.push({
+          provider: 'twitterapi.io',
+          phase: 'scan',
+          status: scanErr.status,
+          message: errMsg,
+          response_preview: sanitizeError(String(scanErr.response_preview || errMsg).slice(0, 200))
+        });
+      } else if (/openrouter|openai/i.test(errMsg)) {
+        externalErrors.push({
+          provider: 'openrouter',
+          phase: 'scan_deep_analysis',
+          message: errMsg
+        });
+      } else {
+        externalErrors.push({
+          provider: 'supabase',
+          phase: 'scan',
+          message: errMsg
+        });
+      }
+
+      // Return partial result instead of crashing
+      return Response.json({
+        ok: true,
+        partial: true,
+        reason: 'scan_failed_gracefully',
+        version: 'cron-dispatcher-v2',
+        source,
+        timings,
+        external_errors: externalErrors,
+        scan: { account_limit: accountLimit, tweets_per_account: tweetsPerAccount, accounts_scanned: 0, tweets_analyzed: 0, viral_found: 0, raw_opportunities: 0, brain_updates: { algorithm_rules: 0, style_patterns: 0, media_patterns: 0 }, media_downloaded: 0, debug_log: [] },
+        decision: { evaluated: 0, selected_if_notify: 0, held: 0, min_final_score: 0, delivery: 'scan_failed', rule_performance: { enriched_opportunities: 0, avg_weight: 0, boosted_count: 0, penalized_count: 0 } }
+      });
+    }
+
+    // If runtime guard hit after scan, return early
+    if (partial) {
+      return Response.json({
+        ok: true,
+        partial: true,
+        reason: partialReason,
+        version: 'cron-dispatcher-v2',
+        source,
+        notify,
+        account: { username, followers: 0, stage: 'stage_0_new' },
+        timings,
+        external_errors: externalErrors,
+        scan: {
+          account_limit: accountLimit,
+          tweets_per_account: tweetsPerAccount,
+          accounts_scanned: scanResult.accounts_scanned,
+          tweets_analyzed: scanResult.tweets_analyzed,
+          viral_found: scanResult.viral_tweets_found,
+          raw_opportunities: scanResult.opportunities?.length || 0,
+          brain_updates: scanResult.brain_updates,
+          media_downloaded: scanResult.media_downloaded,
+          light_mode: scanResult.light_mode || true,
+          debug_log: (scanResult.debug_log || []).slice(0, 20)
+        },
+        decision: { evaluated: 0, selected_if_notify: 0, held: 0, min_final_score: 0, delivery: 'partial_run', rule_performance: { enriched_opportunities: 0, avg_weight: 0, boosted_count: 0, penalized_count: 0 } }
+      });
+    }
+
+    // ═══ 2. Get follower stage ═══
     const { followers, stage } = await getFollowerStage(username);
 
-    // Phase 6: Enrich opportunities with rule performance data
+    // ═══ 3. Enrich opportunities with rule performance ═══
     let rulePerformanceStats = { enriched_opportunities: 0, avg_weight: 0, boosted_count: 0, penalized_count: 0 };
+    const enrichStart = Date.now();
     try {
       rulePerformanceStats = await enrichOpportunitiesWithRulePerformance(scanResult.opportunities || []);
-    } catch {}
+    } catch (enrichErr: any) {
+      externalErrors.push({
+        provider: 'supabase',
+        phase: 'enrichment',
+        message: sanitizeError(enrichErr.message || 'Enrichment failed')
+      });
+    }
+    timings.enrichment_ms = Date.now() - enrichStart;
 
+    // ═══ 4. Decision ═══
+    const decisionStart = Date.now();
     const decision = decideTelegramOpportunities(scanResult.opportunities || [], stage);
+    timings.decision_ms = Date.now() - decisionStart;
 
+    // ═══ 5. Log to Supabase ═══
     const supabase = supabaseAdmin();
     try {
       await supabase.from('decision_runs').insert({
@@ -70,14 +202,25 @@ export async function GET(req: Request) {
         })),
         run_source: `cron_dispatcher:${source}${notify ? ':notify' : ':silent'}`
       });
-    } catch {}
+    } catch (dbErr: any) {
+      externalErrors.push({
+        provider: 'supabase',
+        phase: 'log_decision_run',
+        message: sanitizeError(dbErr.message || 'DB insert failed')
+      });
+    }
+
+    timings.total_ms = Date.now() - startedAt;
 
     return Response.json({
       ok: true,
-      version: 'cron-dispatcher-v1',
+      partial: false,
+      version: 'cron-dispatcher-v2',
       source,
       notify,
       account: { username, followers, stage },
+      timings,
+      external_errors: externalErrors,
       scan: {
         account_limit: accountLimit,
         tweets_per_account: tweetsPerAccount,
@@ -87,6 +230,7 @@ export async function GET(req: Request) {
         raw_opportunities: scanResult.opportunities?.length || 0,
         brain_updates: scanResult.brain_updates,
         media_downloaded: scanResult.media_downloaded,
+        light_mode: scanResult.light_mode || true,
         debug_log: (scanResult.debug_log || []).slice(0, 20)
       },
       decision: {
@@ -99,6 +243,13 @@ export async function GET(req: Request) {
       }
     });
   } catch (err: any) {
-    return Response.json({ ok: false, error: err.message }, { status: 500 });
+    timings.total_ms = Date.now() - startedAt;
+    return Response.json({
+      ok: false,
+      partial: false,
+      error: sanitizeError(err.message || 'Unknown error'),
+      timings,
+      external_errors: externalErrors
+    }, { status: 500 });
   }
 }
