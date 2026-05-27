@@ -2,7 +2,7 @@ import { assertAuthorized, optionalEnv } from '../../../lib/env';
 import { supabaseAdmin } from '../../../lib/supabase';
 import { scoreXTweet } from '../../../lib/x';
 
-const VERSION = 'published-performance-scan-v1';
+const VERSION = 'published-performance-scan-v2';
 
 export async function GET(req: Request) {
   try {
@@ -12,12 +12,10 @@ export async function GET(req: Request) {
     const limit = Math.max(1, Math.min(20, Number(url.searchParams.get('limit') || 10)));
 
     // ── Find unchecked published decisions ──
-    const twelveHoursAgo = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString();
-
     const { data: unchecked, error: fetchError } = await supabase
       .from('published_decisions')
       .select('id, published_url, created_at, performance_checked_at')
-      .or(`performance_checked_at.is.null,and(created_at.lt.${twelveHoursAgo},performance_checked_at.is.null)`)
+      .is('performance_checked_at', null)
       .order('created_at', { ascending: true })
       .limit(limit);
 
@@ -41,6 +39,9 @@ export async function GET(req: Request) {
     let updated = 0;
     const failed: Array<{ id: string; error: string }> = [];
 
+    const { fetchTwitterApiJson, extractTweets, twitterApiBase: getBase } = await import('../../../lib/x');
+    const base = getBase();
+
     for (const pub of unchecked) {
       checked++;
 
@@ -54,56 +55,40 @@ export async function GET(req: Request) {
 
         const tweetId = statusMatch[1];
 
-        // Use TwitterAPI.io to fetch the tweet
-        const { fetchTwitterApiJson, extractTweets } = await import('../../../lib/x');
-        const apiUrl = `${optionalEnv('TWITTERAPI_IO_BASE_URL', 'https://api.twitterapi.io')}/twitter/tweet/commits?tweetId=${tweetId}`;
-        const json = await fetchTwitterApiJson(apiUrl);
-        const tweets = extractTweets(json);
+        // Strategy 1: Try /twitter/tweets?tweet_ids=xxx (batch lookup)
+        let tweet: any = null;
 
-        if (!tweets || tweets.length === 0) {
-          // Try another endpoint
-          const searchUrl = `${optionalEnv('TWITTERAPI_IO_BASE_URL', 'https://api.twitterapi.io')}/twitter/tweet/advanced_search?query=id:${tweetId}&queryType=Top`;
-          const searchJson = await fetchTwitterApiJson(searchUrl);
-          const searchTweets = extractTweets(searchJson);
-
-          if (!searchTweets || searchTweets.length === 0) {
-            failed.push({ id: pub.id, error: 'Tweet not found via API' });
-            continue;
+        try {
+          const batchUrl = `${base}/twitter/tweets?tweet_ids=${tweetId}`;
+          const batchJson = await fetchTwitterApiJson(batchUrl);
+          const batchTweets = extractTweets(batchJson);
+          if (batchTweets && batchTweets.length > 0) {
+            tweet = batchTweets[0];
           }
+        } catch {
+          // batch endpoint failed, try next
+        }
 
-          const tweet = searchTweets[0];
-          const m = tweet.public_metrics || {};
-          const engagementScore = scoreXTweet(tweet);
-
-          const performancePayload = {
-            views: m.view_count || 0,
-            likes: m.like_count || 0,
-            replies: m.reply_count || 0,
-            retweets: m.retweet_count || 0,
-            quotes: m.quote_count || 0,
-            bookmarks: m.bookmark_count || 0,
-            engagement_score: Math.round(engagementScore * 100) / 100,
-            checked_at: new Date().toISOString()
-          };
-
-          const { error: updateError } = await supabase
-            .from('published_decisions')
-            .update({
-              performance_payload: performancePayload,
-              performance_checked_at: new Date().toISOString(),
-              updated_at: new Date().toISOString()
-            })
-            .eq('id', pub.id);
-
-          if (updateError) {
-            failed.push({ id: pub.id, error: updateError.message });
-          } else {
-            updated++;
+        // Strategy 2: Try /twitter/tweet/advanced_search?query=id:xxx
+        if (!tweet) {
+          try {
+            const searchUrl = `${base}/twitter/tweet/advanced_search?query=id:${tweetId}&queryType=Top`;
+            const searchJson = await fetchTwitterApiJson(searchUrl);
+            const searchTweets = extractTweets(searchJson);
+            if (searchTweets && searchTweets.length > 0) {
+              tweet = searchTweets[0];
+            }
+          } catch {
+            // search failed too
           }
+        }
+
+        if (!tweet) {
+          failed.push({ id: pub.id, error: 'Tweet not found via any API endpoint' });
           continue;
         }
 
-        const tweet = tweets[0];
+        // ── Build performance payload ──
         const m = tweet.public_metrics || {};
         const engagementScore = scoreXTweet(tweet);
 
