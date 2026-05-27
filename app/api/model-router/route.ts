@@ -128,11 +128,23 @@ export async function POST(req: Request) {
     if (provider !== undefined) {
       payload.provider = provider;
     }
-    const { data, error } = await supabase
+    let { data, error } = await supabase
       .from('model_routing_rules')
       .upsert(payload, { onConflict: 'task_type' })
       .select('*')
       .single();
+
+    // Graceful fallback: if provider column doesn't exist yet (migration not run),
+    // retry without the provider field
+    if (error && provider !== undefined && error.message?.includes('provider')) {
+      delete payload.provider;
+      const retry = await supabase
+        .from('model_routing_rules')
+        .upsert(payload, { onConflict: 'task_type' })
+        .select('*')
+        .single();
+      if (retry.data) { data = retry.data; error = null; }
+    }
 
     if (error) {
       return Response.json({ ok: false, error: error.message }, { status: 500 });
