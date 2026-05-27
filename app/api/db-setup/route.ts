@@ -153,14 +153,21 @@ export async function POST(req: Request) {
       return Response.json({ ok: false, error: 'Unknown action. Use action: "run_alignment"' }, { status: 400 });
     }
 
-    const supabaseUrl = process.env.SUPABASE_URL;
-    if (!supabaseUrl) {
-      return Response.json({ ok: false, error: 'SUPABASE_URL not set' }, { status: 500 });
+    // Accept database_url from request body, or construct from env vars
+    let dbUrl = body.database_url as string | undefined;
+    
+    if (!dbUrl) {
+      const supabaseUrl = process.env.SUPABASE_URL;
+      if (!supabaseUrl) {
+        return Response.json({ 
+          ok: false, 
+          error: 'No database_url provided and SUPABASE_URL not set. Pass database_url in request body or set DATABASE_URL env var.',
+          hint: 'Find your connection string in Supabase Dashboard > Settings > Database > Connection string (URI mode). Use the pooler connection with port 6543.'
+        }, { status: 400 });
+      }
+      const ref = supabaseUrl.replace('https://', '').replace('.supabase.co', '');
+      dbUrl = `postgres://postgres.${ref}:${process.env.SUPABASE_SERVICE_ROLE_KEY}@aws-0-us-east-1.pooler.supabase.com:6543/postgres`;
     }
-
-    // Build PostgreSQL connection string from Supabase URL + service role key
-    const ref = supabaseUrl.replace('https://', '').replace('.supabase.co', '');
-    const dbUrl = `postgres://postgres.${ref}:${process.env.SUPABASE_SERVICE_ROLE_KEY}@aws-0-us-east-1.pooler.supabase.com:6543/postgres`;
 
     const pool = new Pool({ connectionString: dbUrl, ssl: { rejectUnauthorized: false } });
     const results: string[] = [];
