@@ -43,6 +43,14 @@ export type ContentOpportunity = {
   brain_rules_used: string[];  // قواعد العقل المستخدمة
   shield_passed: boolean;
   shield_issues: string[];
+  // Phase 6: rule performance weight (optional, set by enrich-opportunities)
+  avg_brain_rule_weight?: number;
+  rule_performance_summary?: {
+    matched_rules: number;
+    avg_weight: number;
+    strongest_rule: string | null;
+    weakest_rule: string | null;
+  };
 };
 
 export type MediaFromTweet = {

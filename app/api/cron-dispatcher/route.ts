@@ -2,6 +2,7 @@ import { assertAuthorized, optionalEnv } from '../../../lib/env';
 import { scanXAccounts } from '../../../lib/content-engine-v3';
 import { decideTelegramOpportunities, stageFromFollowerCount } from '../../../lib/decision-engine';
 import { supabaseAdmin } from '../../../lib/supabase';
+import { enrichOpportunitiesWithRulePerformance } from '../../../lib/enrich-opportunities-with-rule-performance';
 
 function envNumber(name: string, fallback: number, min: number, max: number): number {
   const raw = optionalEnv(name, String(fallback));
@@ -35,6 +36,13 @@ export async function GET(req: Request) {
 
     const scanResult = await scanXAccounts(accountLimit, tweetsPerAccount);
     const { followers, stage } = await getFollowerStage(username);
+
+    // Phase 6: Enrich opportunities with rule performance data
+    let rulePerformanceStats = { enriched_opportunities: 0, avg_weight: 0, boosted_count: 0, penalized_count: 0 };
+    try {
+      rulePerformanceStats = await enrichOpportunitiesWithRulePerformance(scanResult.opportunities || []);
+    } catch {}
+
     const decision = decideTelegramOpportunities(scanResult.opportunities || [], stage);
 
     const supabase = supabaseAdmin();
@@ -86,7 +94,8 @@ export async function GET(req: Request) {
         selected_if_notify: decision.selected.length,
         held: decision.held.length,
         min_final_score: decision.budget.min_final_score,
-        delivery: notify ? 'telegram_delivery_requested' : 'silent_learning_only'
+        delivery: notify ? 'telegram_delivery_requested' : 'silent_learning_only',
+        rule_performance: rulePerformanceStats
       }
     });
   } catch (err: any) {

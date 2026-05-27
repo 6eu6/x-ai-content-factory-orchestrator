@@ -3,6 +3,7 @@ import { supabaseAdmin } from '../../../lib/supabase';
 import { scanXAccounts } from '../../../lib/content-engine-v3';
 import { sendTelegramMessage, allowedChatId, htmlEscape, shortText, sendTelegramPhoto, sendTelegramVideo, sendTelegramAnimation, MAIN_KEYBOARD } from '../../../lib/telegram';
 import { decideTelegramOpportunities, stageFromFollowerCount } from '../../../lib/decision-engine';
+import { enrichOpportunitiesWithRulePerformance } from '../../../lib/enrich-opportunities-with-rule-performance';
 
 /**
  * GET/POST /api/daily-run
@@ -49,6 +50,13 @@ async function run(req: Request) {
     // ═══ 2. الزحف والتحليل ═══
     const scanResult = await scanXAccounts(accountLimit, tweetsPerAccount);
     const stage = stageFromFollowerCount(xSnapshot?.followers_count ?? 0);
+
+    // Phase 6: Enrich opportunities with rule performance data
+    let rulePerformanceStats = { enriched_opportunities: 0, avg_weight: 0, boosted_count: 0, penalized_count: 0 };
+    try {
+      rulePerformanceStats = await enrichOpportunitiesWithRulePerformance(scanResult.opportunities || []);
+    } catch {}
+
     const decision = decideTelegramOpportunities(scanResult.opportunities || [], stage);
 
     // ═══ 3. تسجيل ═══
@@ -97,6 +105,7 @@ async function run(req: Request) {
     const chatId = allowedChatId();
     if (chatId) {
       try {
+        (decision as any)._rulePerformance = rulePerformanceStats;
         await deliverToTelegram(chatId, scanResult, username, decision, xSnapshot?.followers_count ?? 0);
       } catch {}
     }
@@ -109,7 +118,8 @@ async function run(req: Request) {
         stage,
         selected: decision.selected.length,
         held: decision.held.length,
-        min_final_score: decision.budget.min_final_score
+        min_final_score: decision.budget.min_final_score,
+        rule_performance: rulePerformanceStats
       },
       scan: {
         account_limit: accountLimit,
@@ -140,6 +150,12 @@ async function deliverToTelegram(chatId: string, result: any, username: string, 
   lines.push(`🧠 عقل: +${result.brain_updates.algorithm_rules} قاعدة +${result.brain_updates.style_patterns} نمط`);
   lines.push(`🎯 القرار: ${decision.selected.length} مرسل | ${decision.held.length} مؤجل | الحد الأدنى: ${decision.budget.min_final_score}`);
   lines.push(`━━━━━━━━━━━━━━━━━━━━`);
+
+  // Phase 6: Show rule performance summary
+  const rulePerf = (decision as any)._rulePerformance;
+  if (rulePerf && rulePerf.enriched_opportunities > 0) {
+    lines.push(`🧪 وزن قواعد العقل: avg ${rulePerf.avg_weight} / boosted ${rulePerf.boosted_count} / penalized ${rulePerf.penalized_count}`);
+  }
 
   const selected = decision.selected || [];
   if (!selected.length) {

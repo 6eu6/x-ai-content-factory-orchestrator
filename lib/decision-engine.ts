@@ -20,6 +20,7 @@ export type DecisionScore = {
   safety_score: number;
   originality_score: number;
   media_fit_score: number;
+  rule_weight_adjustment: number;
   reasons: string[];
   rejection_reasons: string[];
 };
@@ -158,7 +159,15 @@ export function scoreOpportunity(opp: ContentOpportunity, budget: DecisionBudget
   const originality_score = clamp10(5.5 + (text.length > 40 ? 0.7 : 0) + (/[?]/.test(text) ? 0.3 : 0) + (opp.why ? 0.8 : 0) - (looksDuplicative(text) ? 2.5 : 0));
   const media_fit_score = clamp10(5 + Math.min((opp.media_urls || []).length, 3) * 1.2 + (isQuote && (opp.media_urls || []).length ? 0.8 : 0));
 
-  const final_score = clamp10(
+  // Phase 6: Rule performance weight adjustment
+  // Conservative: only ±0.4 max, and NEVER overrides safety_score
+  let rule_weight_adjustment = 0;
+  const avgWeight = opp.avg_brain_rule_weight;
+  if (avgWeight !== undefined && avgWeight !== null && Number.isFinite(avgWeight)) {
+    rule_weight_adjustment = Math.max(-0.4, Math.min(0.4, Math.round(((avgWeight - 0.6) * 1.0) * 100) / 100));
+  }
+
+  let final_score = clamp10(
     momentum_score * 0.30 +
     brain_match_score * 0.25 +
     audience_fit_score * 0.15 +
@@ -167,12 +176,21 @@ export function scoreOpportunity(opp: ContentOpportunity, budget: DecisionBudget
     media_fit_score * 0.05
   );
 
+  // Apply rule weight adjustment AFTER base scoring
+  // But ONLY if safety_score is acceptable — never let weight override safety
+  if (safety_score >= 6.5 && opp.shield_passed) {
+    final_score = clamp10(final_score + rule_weight_adjustment);
+  }
+
   const reasons = [
     `Momentum ${momentum_score.toFixed(1)}/10 from source engagement`,
     `Brain match ${brain_match_score.toFixed(1)}/10 using ${brainRules.length} learned rules`,
     `Safety ${safety_score.toFixed(1)}/10 after shield and behavior checks`,
     `Originality ${originality_score.toFixed(1)}/10`,
   ];
+  if (rule_weight_adjustment !== 0) {
+    reasons.push(`Rule weight ${rule_weight_adjustment > 0 ? '+' : ''}${rule_weight_adjustment.toFixed(1)} (avg brain rule weight: ${avgWeight?.toFixed(2) || 'N/A'})`);
+  }
   if ((opp.media_urls || []).length) reasons.push(`Media fit ${media_fit_score.toFixed(1)}/10 with ${(opp.media_urls || []).length} media item(s)`);
 
   return {
@@ -183,6 +201,7 @@ export function scoreOpportunity(opp: ContentOpportunity, budget: DecisionBudget
     safety_score: Math.round(safety_score * 10) / 10,
     originality_score: Math.round(originality_score * 10) / 10,
     media_fit_score: Math.round(media_fit_score * 10) / 10,
+    rule_weight_adjustment: Math.round(rule_weight_adjustment * 100) / 100,
     reasons,
     rejection_reasons
   };
