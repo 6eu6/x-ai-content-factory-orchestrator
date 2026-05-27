@@ -8,6 +8,18 @@ export function optionalEnv(name: string, fallback = ''): string {
   return process.env[name] || fallback;
 }
 
+/**
+ * Parse a numeric env var with bounds checking
+ * Returns fallback if missing, NaN, or out of [min, max]
+ */
+export function envNumber(name: string, fallback: number, min: number, max: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number(raw);
+  if (Number.isNaN(n) || n < min || n > max) return fallback;
+  return n;
+}
+
 export function assertAuthorized(req: Request): void {
   const secret = process.env.ORCHESTRATOR_SECRET;
   if (!secret) throw new Error('Missing ORCHESTRATOR_SECRET');

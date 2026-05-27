@@ -93,36 +93,39 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10): Pro
   const debugLog: string[] = [];
   let brainUpdates = { algorithmRules: 0, stylePatterns: 0, mcpOpportunities: 0 };
 
-  // 1. جلب الحسابات المحفوظة — جرب عدة طرق مع تسجيل الأخطاء
+  // 1. جلب الحسابات المحفوظة — استعلام ذكي يفضّل غير المفحوصة والأعلى أولوية
   let accounts: any[] = [];
 
-  // محاولة 1: select فقط handle — العمود الوحيد المضمون
+  // محاولة 1: smart query — يفضّل الحسابات اللي ما فُحصت (last_checked=null)
+  // ثم الأقدم فحصًا، ثم الأعلى أولوية حسب tier
   try {
     const { data, error } = await supabase
       .from('accounts')
-      .select('handle')
+      .select('handle, tier, notes, last_checked, followers, category')
+      .order('last_checked', { ascending: true, nullsFirst: true })
+      .order('tier', { ascending: true })
       .limit(maxAccounts);
 
     if (error) {
-      debugLog.push(`[accounts] query error: ${error.message}`);
-      console.error(`[scanXAccounts] accounts query error:`, error.message);
+      debugLog.push(`[accounts] smart query failed: ${error.message}`);
+      console.error(`[scanXAccounts] smart query failed:`, error.message);
     } else if (data?.length) {
       accounts = data;
-      debugLog.push(`[accounts] found ${data.length} accounts`);
+      debugLog.push(`[accounts] smart query found ${data.length} accounts`);
     } else {
-      debugLog.push(`[accounts] no data returned`);
+      debugLog.push(`[accounts] smart query returned no data`);
     }
   } catch (e: any) {
-    debugLog.push(`[accounts] exception: ${e.message}`);
-    console.error(`[scanXAccounts] accounts exception:`, e.message);
+    debugLog.push(`[accounts] smart query exception: ${e.message}`);
+    console.error(`[scanXAccounts] smart query exception:`, e.message);
   }
 
-  // محاولة 2: لو ما رجع شيء، جرب select *
+  // محاولة 2: fallback — لو فشل smart query (أعمدة ناقصة)، جرب handle فقط
   if (!accounts.length) {
     try {
       const { data, error } = await supabase
         .from('accounts')
-        .select('*')
+        .select('handle')
         .limit(maxAccounts);
 
       if (error) {
