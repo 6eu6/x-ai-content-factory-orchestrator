@@ -2,6 +2,7 @@ import { assertAuthorized, optionalEnv } from '../../../lib/env';
 import { supabaseAdmin } from '../../../lib/supabase';
 import { scanXAccounts } from '../../../lib/content-engine-v3';
 import { sendTelegramMessage, allowedChatId, htmlEscape, shortText, sendTelegramPhoto, sendTelegramVideo, sendTelegramAnimation, MAIN_KEYBOARD } from '../../../lib/telegram';
+import { decideTelegramOpportunities, stageFromFollowerCount } from '../../../lib/decision-engine';
 
 /**
  * GET/POST /api/daily-run
@@ -37,17 +38,19 @@ async function run(req: Request) {
 
     // ═══ 2. الزحف والتحليل ═══
     const scanResult = await scanXAccounts(5, 10);
+    const stage = stageFromFollowerCount(xSnapshot?.followers_count ?? 0);
+    const decision = decideTelegramOpportunities(scanResult.opportunities || [], stage);
 
     // ═══ 3. تسجيل ═══
     const supabase = supabaseAdmin();
     try {
       await supabase.from('daily_checkins').upsert({
         checkin_date: new Date().toISOString().slice(0, 10),
-        execution_mode: 'v3_crawl_and_engage',
+        execution_mode: 'v4_decision_gated_crawl',
         account_checked: Boolean(xSnapshot),
-        tweets_planned: scanResult.opportunities?.length || 0,
+        tweets_planned: decision.selected.length,
         creator_posts_analyzed: scanResult.tweets_analyzed,
-        notes: `v3: scanned ${scanResult.accounts_scanned} accounts, ${scanResult.tweets_analyzed} tweets, ${scanResult.viral_tweets_found} viral, ${scanResult.opportunities?.length || 0} opportunities`
+        notes: `v4: raw ${scanResult.opportunities?.length || 0}, selected ${decision.selected.length}, held ${decision.held.length}, stage ${stage}`
       }, { onConflict: 'checkin_date' });
     } catch {}
 
@@ -55,19 +58,25 @@ async function run(req: Request) {
     const chatId = allowedChatId();
     if (chatId) {
       try {
-        await deliverToTelegram(chatId, scanResult, username);
+        await deliverToTelegram(chatId, scanResult, username, decision, xSnapshot?.followers_count ?? 0);
       } catch {}
     }
 
     return Response.json({
       ok: true,
-      version: 'v3-crawl-and-engage',
+      version: 'v4-decision-gated-crawl',
       xSnapshot: xSnapshot ? { followers: xSnapshot.followers_count } : null,
+      decision: {
+        stage,
+        selected: decision.selected.length,
+        held: decision.held.length,
+        min_final_score: decision.budget.min_final_score
+      },
       scan: {
         accounts_scanned: scanResult.accounts_scanned,
         tweets_analyzed: scanResult.tweets_analyzed,
         viral_found: scanResult.viral_tweets_found,
-        opportunities: scanResult.opportunities?.length || 0,
+        raw_opportunities: scanResult.opportunities?.length || 0,
         brain_updates: scanResult.brain_updates,
         media_downloaded: scanResult.media_downloaded
       }
@@ -77,44 +86,63 @@ async function run(req: Request) {
   }
 }
 
-async function deliverToTelegram(chatId: string, result: any, username: string) {
+async function deliverToTelegram(chatId: string, result: any, username: string, decision: any, followers: number) {
   const lines: string[] = [];
 
-  lines.push(`🧠 <b>التشغيل الكامل — ${new Date().toISOString().slice(0, 10)}</b>`);
-  lines.push(`الحساب: @${username}`);
+  lines.push(`🧠 <b>Decision Run — ${new Date().toISOString().slice(0, 10)}</b>`);
+  lines.push(`الحساب: @${username} | المتابعون: ${followers || 0}`);
+  lines.push(`المرحلة: <b>${decision.stage}</b>`);
   lines.push(`━━━━━━━━━━━━━━━━━━━━`);
-  lines.push(`📊 حسابات: ${result.accounts_scanned} | تغريدات: ${result.tweets_analyzed} | فيروسية: ${result.viral_tweets_found}`);
+  lines.push(`📊 زحف: ${result.accounts_scanned} حساب | ${result.tweets_analyzed} تغريدة | خام: ${result.opportunities?.length || 0}`);
   lines.push(`🧠 عقل: +${result.brain_updates.algorithm_rules} قاعدة +${result.brain_updates.style_patterns} نمط`);
+  lines.push(`🎯 القرار: ${decision.selected.length} مرسل | ${decision.held.length} مؤجل | الحد الأدنى: ${decision.budget.min_final_score}`);
   lines.push(`━━━━━━━━━━━━━━━━━━━━`);
 
-  const opps = result.opportunities || [];
-  if (!opps.length) {
-    lines.push('\nℹ️ لا فرص تفاعل حالياً. أضف حسابات عبر تلقرام.');
+  const selected = decision.selected || [];
+  if (!selected.length) {
+    lines.push('\n🟡 <b>لا توجد توصية نشر قوية الآن</b>');
+    lines.push('العقل وجد فرصًا، لكنها لم تتجاوز بوابة القرار. الأفضل عدم النشر بدل إرسال محتوى ضعيف.');
+    const topHeld = (decision.held || [])[0];
+    if (topHeld) {
+      lines.push('\n<b>أقرب فرصة مؤجلة:</b>');
+      lines.push(`Score: ${topHeld.decision_score.final_score}/10`);
+      lines.push(`${htmlEscape(shortText(topHeld.crafted_text, 220))}`);
+      if (topHeld.decision_score.rejection_reasons?.length) {
+        lines.push(`سبب التأجيل: ${htmlEscape(topHeld.decision_score.rejection_reasons[0])}`);
+      }
+    }
   } else {
-    lines.push(`\n<b>📋 فرص التفاعل (${opps.length})</b>`);
-    for (let i = 0; i < Math.min(opps.length, 5); i++) {
-      const opp = opps[i];
+    lines.push(`\n<b>✅ توصيات النشر المختارة (${selected.length})</b>`);
+    for (let i = 0; i < selected.length; i++) {
+      const opp = selected[i];
       const typeLabel = opp.type === 'quote' ? '📌 اقتباس' : opp.type === 'reply' ? '↩️ رد' : opp.type === 'thread' ? '🧵 ثريد' : '📰 مقال';
-      const shield = opp.shield_passed ? '✅' : '⚠️';
-      lines.push(`\n${i + 1}. ${typeLabel} ${shield}`);
+      const score = opp.decision_score;
+      lines.push(`\n${i + 1}. ${typeLabel} — <b>${score.final_score}/10</b>`);
       if (opp.source_tweet_url) lines.push(`🔗 ${opp.source_tweet_url}`);
-      lines.push(`<i>${htmlEscape(shortText(opp.crafted_text, 280))}</i>`);
+      lines.push(`<i>${htmlEscape(shortText(opp.crafted_text, opp.type === 'thread' ? 900 : 280))}</i>`);
+      lines.push(`💡 ${htmlEscape((score.reasons || []).slice(0, 3).join(' | '))}`);
+      if ((opp.media_urls || []).length) {
+        lines.push(`🎬 وسائط مناسبة: ${(opp.media_urls || []).slice(0, 3).map((m: any) => m.type).join(', ')}`);
+      }
     }
   }
 
   lines.push('\n━━━━━━━━━━━━━━━━━━━━');
-  lines.push('<i>انسخ وانشر يدوياً</i>');
+  lines.push('<i>انسخ وانشر يدويًا فقط. بعد النشر شغّل تقرير الأداء لاحقًا للتعلم.</i>');
 
   await sendTelegramMessage(chatId, lines.join('\n'), MAIN_KEYBOARD);
 
-  // أرسل الوسائط
-  for (const opp of opps) {
-    for (const media of (opp.media_urls || []).slice(0, 3)) {
-      try {
-        if (media.type === 'photo') await sendTelegramPhoto(chatId, media.url, '📷');
-        else if (media.type === 'video') await sendTelegramVideo(chatId, media.url, '🎬');
-        else if (media.type === 'animated_gif') await sendTelegramAnimation(chatId, media.url, '🎞️');
-      } catch {}
+  const sendMedia = optionalEnv('SEND_SELECTED_MEDIA_TO_TELEGRAM', 'true') === 'true';
+  if (sendMedia) {
+    for (const opp of selected.slice(0, 1)) {
+      for (const media of (opp.media_urls || []).slice(0, 2)) {
+        try {
+          const caption = `Media for selected ${opp.type} — score ${opp.decision_score.final_score}/10`;
+          if (media.type === 'photo') await sendTelegramPhoto(chatId, media.url, htmlEscape(caption));
+          else if (media.type === 'video') await sendTelegramVideo(chatId, media.url, htmlEscape(caption));
+          else if (media.type === 'animated_gif') await sendTelegramAnimation(chatId, media.url, htmlEscape(caption));
+        } catch {}
+      }
     }
   }
 }
