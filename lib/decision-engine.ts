@@ -1,4 +1,4 @@
-import { ContentOpportunity } from './content-engine-v3';
+import type { ContentOpportunity } from './content-engine-v3';
 
 export type DecisionStage = 'stage_0_new' | 'stage_1_under_500' | 'stage_2_500_to_2000' | 'stage_3_stable';
 
