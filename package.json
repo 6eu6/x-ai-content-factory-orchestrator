@@ -6,22 +6,24 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test": "vitest run"
   },
   "dependencies": {
-    "@supabase/supabase-js": "latest",
+    "@supabase/supabase-js": "^2.106.1",
     "@vercel/functions": "^3.6.0",
-    "next": "latest",
-    "openai": "latest",
+    "next": "^16.2.6",
+    "openai": "^6.39.0",
     "pg": "^8.21.0",
-    "react": "latest",
-    "react-dom": "latest",
-    "zod": "latest"
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@types/node": "latest",
-    "@types/react": "latest",
-    "@types/react-dom": "latest",
-    "typescript": "latest"
+    "@types/node": "^25.9.1",
+    "@types/react": "^19.2.15",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "^6.0.3",
+    "vitest": "^3.2.4"
   }
 }

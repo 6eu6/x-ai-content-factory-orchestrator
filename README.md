@@ -170,3 +170,34 @@ PUBLIC_BASE_URL
 
 ### Other
 `session_logs`, `daily_checkins`, `action_queue`, `trends`, `creator_intel`, `learning_tweet_queue`, `learning_cycles`, `telegram_bot_state`, `growth_learning_runs`, `discovery_runs`, `discovered_items`, `discovery_sources`, `sources`, `quality_failure_patterns`, `prompt_improvement_candidates`, `source_performance`, `system_reflections`, `github_repos`, `repo_growth_snapshots`
+
+## Self-Hosting & Local Model (Raspberry Pi)
+
+البنية مهيّأة للتشغيل الذاتي على Raspberry Pi دون إعادة كتابة — التبديل **إعدادات لا كود**:
+
+### 1. تشغيل نموذج محلي لمهام مختارة (هجين)
+كل استدعاء AI يمر عبر `callModel()` في `lib/model-router.ts`، الذي يختار المزوّد لكل مهمة:
+- `provider = 'cloud'` (افتراضي) → OpenRouter/OpenAI عبر `OPENAI_BASE_URL`.
+- `provider = 'local'` → نموذج محلي عبر `LOCAL_AI_BASE_URL` (مثل Ollama).
+
+**خطوات التحويل** (بلا تعديل كود):
+1. على الـ Pi: `ollama serve` ثم `ollama pull qwen2.5:7b`.
+2. اضبط `LOCAL_AI_BASE_URL=http://localhost:11434/v1`.
+3. أضف عمود المزوّد مرة واحدة: `ALTER TABLE model_routing_rules ADD COLUMN IF NOT EXISTS provider text;`
+4. وجّه المهام الخفيفة محليًا، مثلاً:
+   ```sql
+   INSERT INTO model_routing_rules (task_type, model_id, provider, temperature, max_tokens, active)
+   VALUES ('shield_check', 'qwen2.5:7b', 'local', 0.0, 800, true);
+   ```
+   ابقِ المهام الثقيلة (`deep_analysis`, `learning_extraction`) على `cloud` — النماذج 7B لا تضاهيها.
+
+### 2. الاستضافة 24/7
+- `npm run build && npm start` تحت `pm2` أو `systemd` لإعادة التشغيل التلقائي.
+- بدل Vercel cron: `systemd timer` أو `node-cron` يستدعي `GET /api/daily-run?secret=...`.
+- اضبط `PUBLIC_BASE_URL` على عنوان الـ Pi، ثم استدعِ `/api/telegram/setup` لتحديث الـ webhook.
+- المهام الخلفية محمولة عبر `lib/background.ts` (`waitUntil` على Vercel، وإكمال طبيعي على Node الدائم).
+
+### 3. الموثوقية
+- كل استدعاءات الشبكة (النموذج، Telegram، TwitterAPI.io، البحث) تمر عبر `lib/retry.ts` (تراجع أسي على 429/5xx/أخطاء الشبكة).
+- إصدارات الحزم مثبّتة (لا `latest`) لبناء قابل للتكرار.
+- اختبارات الوحدة: `npm test` (vitest).

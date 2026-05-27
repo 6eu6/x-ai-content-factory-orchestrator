@@ -1,4 +1,4 @@
-import { waitUntil } from '@vercel/functions';
+import { runBackground } from '../../../../lib/background';
 import { optionalEnv } from '../../../../lib/env';
 import { supabaseAdmin } from '../../../../lib/supabase';
 import { assertTelegramChat, extractHandle, extractHandles, extractTweetUrl, htmlEscape, MAIN_KEYBOARD, sendTelegramMessage, shortText } from '../../../../lib/telegram';
@@ -37,7 +37,7 @@ export async function POST(req: Request) {
     assertTelegramChat(chatId);
 
     // ═══ رد فوري — المعالجة في الخلفية ═══
-    waitUntil(handleMessage(chatId, userId, username, text));
+    runBackground(handleMessage(chatId, userId, username, text));
     return Response.json({ ok: true });
   } catch (err: any) {
     return Response.json({ ok: false, error: err.message }, { status: 500 });
@@ -267,7 +267,7 @@ async function handleMessage(chatId: string, userId: string, username: string, t
       await sendReply(chatId, '⏳ جاري استرجاع محتويات العقل...');
       try {
         const summary = await getBrainSummary(supabase);
-        const viewerUrl = `${optionalEnv('VERCEL_URL', 'https://x-ai-content-factory-orchestrator.vercel.app')}/api/brain-viewer`;
+        const viewerUrl = `${optionalEnv('PUBLIC_BASE_URL') || optionalEnv('VERCEL_URL', 'https://x-ai-content-factory-orchestrator.vercel.app')}/api/brain-viewer`;
         await sendReply(chatId, `${summary}\n\n🔗 <a href="${viewerUrl}">عرض تفصيلي في المتصفح</a>\n📊 <a href="${viewerUrl}?format=json">بيانات خام JSON</a>`);
       } catch (e: any) {
         await sendReply(chatId, `❌ فشل الاسترجاع: ${htmlEscape(e.message || '')}`);

@@ -1,4 +1,5 @@
 import { optionalEnv, requiredEnv } from './env';
+import { fetchWithRetry } from './retry';
 
 export const MAIN_KEYBOARD = {
   keyboard: [
@@ -26,7 +27,7 @@ export function assertTelegramChat(chatId: string) {
 
 export async function sendTelegramMessage(chatId: string, text: string, replyMarkup: any = MAIN_KEYBOARD) {
   const token = telegramToken();
-  const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+  const res = await fetchWithRetry(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -36,7 +37,7 @@ export async function sendTelegramMessage(chatId: string, text: string, replyMar
       disable_web_page_preview: true,
       reply_markup: replyMarkup
     })
-  });
+  }, { label: 'telegram sendMessage' });
   if (!res.ok) throw new Error(`Telegram sendMessage failed: ${res.status} ${await res.text()}`);
   return res.json();
 }

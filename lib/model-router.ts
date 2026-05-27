@@ -1,6 +1,7 @@
 import OpenAI from 'openai';
 import { requiredEnv, optionalEnv } from './env';
 import { supabaseAdmin } from './supabase';
+import { withRetry, isTransientError } from './retry';
 
 /**
  * Model Router — يوجه كل مهمة للنموذج المناسب عبر OpenRouter
@@ -30,6 +31,8 @@ export type TaskType =
   | 'repo_artifact'           // كتابة ملفات مستودع (README, code, docs)
   | 'casual_generation';      // توليد سريع خفيف (short replies, quick takes)
 
+export type ModelProvider = 'cloud' | 'local';
+
 export type ModelConfig = {
   model: string;
   temperature: number;
@@ -37,6 +40,13 @@ export type ModelConfig = {
   top_p?: number;
   response_format?: { type: 'json_object' | 'text' };
   description?: string;
+  /**
+   * 'cloud' (افتراضي) = OpenRouter/OpenAI عبر OPENAI_BASE_URL.
+   * 'local' = نموذج محلي (Ollama/llama.cpp/vLLM) عبر LOCAL_AI_BASE_URL.
+   * لتحويل مهمة للنموذج المحلي على Pi: اضبط provider='local' في
+   * جدول model_routing_rules — بلا أي تعديل في الكود.
+   */
+  provider?: ModelProvider;
 };
 
 /**
@@ -148,7 +158,15 @@ function isOpenRouter(): boolean {
   return baseURL.includes('openrouter.ai');
 }
 
-function buildClient(): OpenAI {
+function buildClient(config?: ModelConfig): OpenAI {
+  // نموذج محلي (Raspberry Pi / Ollama / llama.cpp / vLLM) — endpoint متوافق مع OpenAI
+  if (config?.provider === 'local') {
+    return new OpenAI({
+      apiKey: optionalEnv('LOCAL_AI_API_KEY', 'ollama'),
+      baseURL: optionalEnv('LOCAL_AI_BASE_URL', 'http://localhost:11434/v1')
+    });
+  }
+
   const baseURL = optionalEnv('OPENAI_BASE_URL') || undefined;
   const headers: Record<string, string> = {};
   if (baseURL && baseURL.includes('openrouter.ai')) {
@@ -199,7 +217,8 @@ async function loadRoutingRules(): Promise<Record<string, ModelConfig>> {
         max_tokens: row.max_tokens ?? 2000,
         top_p: row.top_p ?? undefined,
         response_format: row.response_format === 'json_object' ? { type: 'json_object' } : undefined,
-        description: row.description ?? undefined
+        description: row.description ?? undefined,
+        provider: row.provider === 'local' ? 'local' : undefined
       };
     }
 
@@ -236,7 +255,7 @@ export async function getModelForTask(taskType: TaskType): Promise<ModelConfig> 
  */
 export async function getAIClientForTask(taskType: TaskType): Promise<{ client: OpenAI; config: ModelConfig }> {
   const config = await getModelForTask(taskType);
-  const client = buildClient();
+  const client = buildClient(config);
   return { client, config };
 }
 
@@ -251,14 +270,17 @@ export async function callModel(
   const { client, config } = await getAIClientForTask(taskType);
   const merged = { ...config, ...overrides };
 
-  const response = await client.chat.completions.create({
-    model: merged.model,
-    temperature: merged.temperature,
-    max_tokens: merged.max_tokens,
-    top_p: merged.top_p,
-    response_format: merged.response_format as any,
-    messages
-  });
+  const response = await withRetry(
+    () => client.chat.completions.create({
+      model: merged.model,
+      temperature: merged.temperature,
+      max_tokens: merged.max_tokens,
+      top_p: merged.top_p,
+      response_format: merged.response_format as any,
+      messages
+    }),
+    { attempts: 3, baseDelayMs: 1200, label: `callModel:${taskType}:${merged.model}`, shouldRetry: isTransientError }
+  );
 
   return response.choices[0]?.message?.content || '';
 }

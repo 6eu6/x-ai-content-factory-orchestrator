@@ -1,4 +1,5 @@
 import { optionalEnv } from './env';
+import { fetchWithRetry } from './retry';
 
 export type WebSearchResult = {
   title: string;
@@ -65,11 +66,11 @@ export async function webSearch(query: string, limit = 5): Promise<WebSearchResu
 async function searchSerper(query: string, limit: number): Promise<WebSearchResult[]> {
   const key = optionalEnv('SERPER_API_KEY');
   if (!key) return [];
-  const res = await fetch('https://google.serper.dev/search', {
+  const res = await fetchWithRetry('https://google.serper.dev/search', {
     method: 'POST',
     headers: { 'X-API-KEY': key, 'Content-Type': 'application/json' },
     body: JSON.stringify({ q: query, num: limit })
-  });
+  }, { label: 'serper' });
   const data = await res.json();
   if (!res.ok) throw new Error(`Serper error: ${res.status} ${JSON.stringify(data)}`);
   return (data.organic || []).slice(0, limit).map((x: any) => ({
@@ -88,7 +89,7 @@ async function searchSerpApi(query: string, limit: number): Promise<WebSearchRes
   url.searchParams.set('q', query);
   url.searchParams.set('num', String(limit));
   url.searchParams.set('api_key', key);
-  const res = await fetch(url.toString());
+  const res = await fetchWithRetry(url.toString(), undefined, { label: 'serpapi' });
   const data = await res.json();
   if (!res.ok || data.error) throw new Error(`SerpApi error: ${res.status} ${JSON.stringify(data)}`);
   return (data.organic_results || []).slice(0, limit).map((x: any) => ({

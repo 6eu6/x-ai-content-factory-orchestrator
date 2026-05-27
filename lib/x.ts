@@ -1,4 +1,5 @@
 import { optionalEnv } from './env';
+import { withRetry, isTransientError } from './retry';
 
 export type XAccountSnapshot = {
   username: string;
@@ -52,11 +53,17 @@ async function throttle() {
 }
 
 export async function fetchTwitterApiJson(url: string) {
-  await throttle();
-  const res = await fetch(url, { headers: twitterApiHeaders(), cache: 'no-store' });
-  const json = await res.json();
-  if (!res.ok || json?.status === 'error' || json?.error) throw new Error(`${res.status} ${JSON.stringify(json)}`);
-  return json;
+  return withRetry(async () => {
+    await throttle();
+    const res = await fetch(url, { headers: twitterApiHeaders(), cache: 'no-store' });
+    const json = await res.json();
+    if (!res.ok || json?.status === 'error' || json?.error) {
+      const err = new Error(`${res.status} ${JSON.stringify(json)}`) as Error & { status: number };
+      err.status = res.status;
+      throw err;
+    }
+    return json;
+  }, { attempts: 3, baseDelayMs: 1500, label: 'twitterapi', shouldRetry: isTransientError });
 }
 
 export function extractTweets(json: any) {
