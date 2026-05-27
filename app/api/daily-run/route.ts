@@ -65,7 +65,7 @@ async function run(req: Request) {
     } catch {}
 
     try {
-      await supabase.from('decision_runs').insert({
+      const { data: insertedRun } = await supabase.from('decision_runs').insert({
         account_handle: username,
         account_stage: stage,
         raw_opportunities: scanResult.opportunities?.length || 0,
@@ -78,6 +78,8 @@ async function run(req: Request) {
           source_tweet_url: o.source_tweet_url,
           source_author: o.source_author,
           crafted_text: shortText(o.crafted_text || '', 280),
+          brain_rules_used: (o.brain_rules_used || []).slice(0, 20),
+          shield_passed: o.shield_passed ?? null,
           reasons: o.decision_score?.reasons || []
         })),
         held_summary: decision.held.slice(0, 10).map((o: any) => ({
@@ -87,7 +89,8 @@ async function run(req: Request) {
           rejection_reasons: o.decision_score?.rejection_reasons || []
         })),
         run_source: 'daily_run'
-      });
+      }).select('id').single();
+      (decision as any)._runId = insertedRun?.id || null;
     } catch {}
 
     // ═══ 4. تسليم لتلقرام ═══
@@ -126,6 +129,7 @@ async function run(req: Request) {
 }
 
 async function deliverToTelegram(chatId: string, result: any, username: string, decision: any, followers: number) {
+  const runShortId = decision._runId ? String(decision._runId).slice(0, 8) : '—';
   const lines: string[] = [];
 
   lines.push(`🧠 <b>Decision Run — ${new Date().toISOString().slice(0, 10)}</b>`);
@@ -151,12 +155,15 @@ async function deliverToTelegram(chatId: string, result: any, username: string, 
       }
     }
   } else {
+    // Show run short ID for reference
     lines.push(`\n<b>✅ توصيات النشر المختارة (${selected.length})</b>`);
+    lines.push(`<i>Run: ${runShortId}</i>`);
     for (let i = 0; i < selected.length; i++) {
       const opp = selected[i];
       const typeLabel = opp.type === 'quote' ? '📌 اقتباس' : opp.type === 'reply' ? '↩️ رد' : opp.type === 'thread' ? '🧵 ثريد' : '📰 مقال';
       const score = opp.decision_score;
-      lines.push(`\n${i + 1}. ${typeLabel} — <b>${score.final_score}/10</b>`);
+      const recNum = i + 1;
+      lines.push(`\n<b>Rec #${recNum}</b> ${typeLabel} — <b>${score.final_score}/10</b>`);
       if (opp.source_tweet_url) lines.push(`🔗 ${opp.source_tweet_url}`);
       lines.push(`<i>${htmlEscape(shortText(opp.crafted_text, opp.type === 'thread' ? 900 : 280))}</i>`);
       lines.push(`💡 ${htmlEscape((score.reasons || []).slice(0, 3).join(' | '))}`);
@@ -167,7 +174,9 @@ async function deliverToTelegram(chatId: string, result: any, username: string, 
   }
 
   lines.push('\n━━━━━━━━━━━━━━━━━━━━');
-  lines.push('<i>انسخ وانشر يدويًا فقط. بعد النشر شغّل تقرير الأداء لاحقًا للتعلم.</i>');
+  lines.push('<i>انسخ وانشر يدويًا فقط. بعد النشر أرسل:</i>');
+  lines.push('<i>نشرت 1 https://x.com/30piq/status/...</i>');
+  lines.push('<i>(غيّر الرقم حسب التوصية)</i>');
 
   await sendTelegramMessage(chatId, lines.join('\n'), MAIN_KEYBOARD);
 

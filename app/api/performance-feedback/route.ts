@@ -1,8 +1,9 @@
 import { assertAuthorized } from '../../../lib/env';
 import { supabaseAdmin } from '../../../lib/supabase';
 import { calculateOutcome, OutcomeLabel } from '../../../lib/performance-outcome';
+import { resolveBrainRuleRefs, extractKnownRuleIds, ResolvedBrainRuleRef } from '../../../lib/resolve-brain-rules';
 
-const VERSION = 'performance-feedback-v1';
+const VERSION = 'performance-feedback-v1.1';
 
 const MAX_RULE_UPDATES_PER_RUN = 50;
 
@@ -66,21 +67,17 @@ export async function GET(req: Request) {
       const { score, label } = calculateOutcome(payload);
       const brainRulesUsed = Array.isArray(pub.brain_rules_used) ? pub.brain_rules_used : [];
 
-      // Try to find rule IDs from brain_rules_used
-      const ruleIdsFound: string[] = [];
+      // Try to find rule IDs from brain_rules_used — first check pre-resolved IDs
+      let ruleIdsFound: string[] = extractKnownRuleIds(brainRulesUsed);
+      let resolvedRefs: ResolvedBrainRuleRef[] = [];
       let hasAttribution = false;
 
-      if (brainRulesUsed.length > 0) {
-        for (const ref of brainRulesUsed) {
-          if (typeof ref === 'string') {
-            if (/^\d+$/.test(ref)) {
-              ruleIdsFound.push(ref);
-            }
-          } else if (typeof ref === 'object' && ref !== null) {
-            const id = (ref as any).id || (ref as any).rule_id || (ref as any).pattern_id;
-            if (id) ruleIdsFound.push(String(id));
-          }
-        }
+      // If no pre-resolved IDs found, try to resolve text-based rules via DB matching
+      if (ruleIdsFound.length === 0 && brainRulesUsed.length > 0) {
+        try {
+          resolvedRefs = await resolveBrainRuleRefs(brainRulesUsed);
+          ruleIdsFound = resolvedRefs.map(r => String(r.id));
+        } catch {}
       }
 
       hasAttribution = ruleIdsFound.length > 0;
@@ -97,6 +94,9 @@ export async function GET(req: Request) {
       if (!hasAttribution) {
         entry.warning = 'NO_RULE_ATTRIBUTION';
       }
+
+      // Store resolved refs for later use in apply mode
+      const entryResolvedRefs = resolvedRefs;
 
       outcomes.push(entry);
 
@@ -129,18 +129,32 @@ export async function GET(req: Request) {
             const isWeak = label === 'weak';
             const now = new Date().toISOString();
 
+            // Build lookup from resolved refs to determine table per ruleId
+            const resolvedByTable = new Map<string, ResolvedBrainRuleRef>();
+            for (const rf of entryResolvedRefs) {
+              resolvedByTable.set(`${rf.table}:${rf.id}`, rf);
+            }
+
             for (const ruleId of ruleIdsFound) {
               if (totalRuleUpdates >= MAX_RULE_UPDATES_PER_RUN) {
                 warnings.push(`MAX_RULE_UPDATES_REACHED: ${MAX_RULE_UPDATES_PER_RUN}`);
                 break;
               }
 
-              // Try x_algorithm_learning_rules first (numeric IDs)
-              if (/^\d+$/.test(ruleId)) {
+              if (!/^\d+$/.test(ruleId)) continue;
+              const numId = Number(ruleId);
+
+              // Determine which table(s) this ID belongs to
+              // Check resolved refs first (most accurate)
+              const algoRef = resolvedByTable.get(`x_algorithm_learning_rules:${numId}`);
+              const styleRef = resolvedByTable.get(`viral_style_patterns:${numId}`);
+
+              // Try x_algorithm_learning_rules
+              if (algoRef || !styleRef) {
                 const { data: rule } = await supabase
                   .from('x_algorithm_learning_rules')
                   .select('id, confidence_score, success_count, failure_count, status')
-                  .eq('id', Number(ruleId))
+                  .eq('id', numId)
                   .maybeSingle();
 
                 if (rule) {
@@ -183,15 +197,16 @@ export async function GET(req: Request) {
                       .eq('id', rule.id);
                     totalRuleUpdates++;
                   }
+                  continue; // Found in algo rules, skip style pattern check for same ID
                 }
               }
 
-              // Try viral_style_patterns (by numeric ID)
-              if (/^\d+$/.test(ruleId)) {
+              // Try viral_style_patterns
+              if (styleRef || !algoRef) {
                 const { data: pattern } = await supabase
                   .from('viral_style_patterns')
                   .select('id, confidence_score, success_count, failure_count, status')
-                  .eq('id', Number(ruleId))
+                  .eq('id', numId)
                   .maybeSingle();
 
                 if (pattern) {
@@ -236,6 +251,22 @@ export async function GET(req: Request) {
                   }
                 }
               }
+            }
+
+            // ── Update published_decisions.brain_rules_used with resolved refs ──
+            if (entryResolvedRefs.length > 0) {
+              try {
+                await supabase
+                  .from('published_decisions')
+                  .update({
+                    brain_rules_used: entryResolvedRefs.map(r => ({
+                      id: r.id,
+                      table: r.table,
+                      rule_preview: r.rule_preview
+                    }))
+                  })
+                  .eq('id', pub.id);
+              } catch {}
             }
           }
         }

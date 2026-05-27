@@ -50,7 +50,9 @@ export async function GET(req: Request) {
           type: o.type,
           score: o.decision_score?.final_score,
           source_tweet_url: o.source_tweet_url,
-          source_author: o.source_author
+          source_author: o.source_author,
+          brain_rules_used: (o.brain_rules_used || []).slice(0, 20),
+          shield_passed: o.shield_passed ?? null
         })) : [],
         held_summary: decision.held.slice(0, 10).map((o: any) => ({
           type: o.type,

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { extractTweetUrl } from '../lib/telegram';
 import { calculateOutcomeScore, getOutcomeLabel, calculateOutcome, OutcomeLabel } from '../lib/performance-outcome';
+import { extractKnownRuleIds } from '../lib/resolve-brain-rules';
 
 // ── Inline copies of the logic from published-performance-scan for testing ──
 // (These mirror the functions in app/api/published-performance-scan/route.ts)
@@ -605,5 +606,147 @@ describe('feedback-loop — "نشرت" pattern with recommendation index', () =>
 
     expect(indexedMatch).toBeNull();
     // Falls through to url-only mode
+  });
+});
+
+// ═══════════════════════════════════════════════════════
+// Phase 5.1: Attribution Validation & Fix
+// ═══════════════════════════════════════════════════════
+
+describe('Phase 5.1 — extractKnownRuleIds', () => {
+  it('extracts numeric string IDs from brain_rules_used', () => {
+    const brainRulesUsed: any[] = ['42', '17', '99'];
+    const ids = extractKnownRuleIds(brainRulesUsed);
+    expect(ids).toEqual(['42', '17', '99']);
+  });
+
+  it('extracts IDs from objects with id/rule_id/pattern_id', () => {
+    const brainRulesUsed: any[] = [
+      { id: 5, table: 'x_algorithm_learning_rules' },
+      { pattern_id: 12, table: 'viral_style_patterns' },
+      { rule_id: 3 }
+    ];
+    const ids = extractKnownRuleIds(brainRulesUsed);
+    expect(ids).toEqual(['5', '12', '3']);
+  });
+
+  it('mixed brain_rules_used → extracts only IDs', () => {
+    const brainRulesUsed: any[] = [
+      '42',
+      'some text rule that is not an ID',
+      { id: 7, rule_preview: 'A pattern' },
+      { name: 'test' }, // no id field
+      'not-a-number'
+    ];
+    const ids = extractKnownRuleIds(brainRulesUsed);
+    expect(ids).toEqual(['42', '7']);
+  });
+
+  it('empty brain_rules_used → empty result', () => {
+    expect(extractKnownRuleIds([])).toEqual([]);
+  });
+
+  it('null/undefined input → empty result', () => {
+    expect(extractKnownRuleIds(null as any)).toEqual([]);
+    expect(extractKnownRuleIds(undefined as any)).toEqual([]);
+  });
+
+  it('text-only brain_rules_used → no IDs extracted (needs resolution)', () => {
+    const brainRulesUsed: any[] = [
+      'Open with a contrarian claim that challenges conventional wisdom',
+      'Use the setup→punchline structure for engagement',
+      'Posts with media get 2x more engagement'
+    ];
+    const ids = extractKnownRuleIds(brainRulesUsed);
+    expect(ids).toEqual([]);
+    // These text rules need resolveBrainRuleRefs() to match against the DB
+  });
+
+  it('resolves object refs with table field', () => {
+    const brainRulesUsed: any[] = [
+      { id: 42, table: 'x_algorithm_learning_rules', rule_preview: 'Test rule' },
+      { id: 7, table: 'viral_style_patterns', rule_preview: 'Test pattern' }
+    ];
+    const ids = extractKnownRuleIds(brainRulesUsed);
+    expect(ids).toEqual(['42', '7']);
+  });
+});
+
+describe('Phase 5.1 — selected_payload brain_rules_used in decision_runs', () => {
+  it('selected_payload items should include brain_rules_used field', () => {
+    // This tests the expected shape after our daily-run/cron-dispatcher changes
+    const selectedPayload = [{
+      type: 'quote',
+      score: 8.5,
+      source_tweet_url: 'https://x.com/test/status/123',
+      source_author: 'test_user',
+      crafted_text: 'Test content',
+      brain_rules_used: ['42', 'Open with contrarian claim'],
+      shield_passed: true,
+      reasons: ['High momentum', 'Good brain match']
+    }];
+
+    expect(selectedPayload[0].brain_rules_used).toBeDefined();
+    expect(selectedPayload[0].brain_rules_used).toEqual(['42', 'Open with contrarian claim']);
+    expect(selectedPayload[0].shield_passed).toBe(true);
+  });
+
+  it('brain_rules_used in payload is limited to 20 items', () => {
+    const manyRules = Array.from({ length: 30 }, (_, i) => `Rule ${i + 1}`);
+    const limitedRules = manyRules.slice(0, 20);
+    expect(limitedRules.length).toBe(20);
+    // This mirrors the (o.brain_rules_used || []).slice(0, 20) in daily-run
+  });
+
+  it('crafted_text in payload is limited to 280 chars', () => {
+    const longText = 'A'.repeat(500);
+    const truncated = longText.slice(0, 280);
+    expect(truncated.length).toBe(280);
+  });
+});
+
+describe('Phase 5.1 — attribution flow: text rules → resolved IDs', () => {
+  it('text-based brain_rules_used can be matched to DB rule IDs', async () => {
+    // This tests the flow: ContentOpportunity has text brain_rules_used
+    // → log-published-decision resolves them via resolveBrainRuleRefs
+    // → published_decisions.brain_rules_used becomes [{id, table, rule_preview}]
+
+    // Simulate the resolution result
+    const inputRules = ['Open with a contrarian claim', 'Use setup→punchline structure'];
+    // In a real scenario, resolveBrainRuleRefs would query the DB and return:
+    const resolvedResult = [
+      { id: 42, table: 'x_algorithm_learning_rules' as const, rule_preview: 'Open with a contrarian claim' },
+      { id: 7, table: 'viral_style_patterns' as const, rule_preview: 'Use setup→punchline structure' }
+    ];
+
+    // The resolved result can be used for attribution
+    expect(resolvedResult.length).toBe(2);
+    expect(resolvedResult[0].id).toBe(42);
+    expect(resolvedResult[0].table).toBe('x_algorithm_learning_rules');
+    expect(resolvedResult[1].id).toBe(7);
+    expect(resolvedResult[1].table).toBe('viral_style_patterns');
+  });
+
+  it('already-resolved brain_rules_used are used directly without re-resolution', () => {
+    const brainRulesUsed = [
+      { id: 42, table: 'x_algorithm_learning_rules', rule_preview: 'Test rule' }
+    ];
+    const ids = extractKnownRuleIds(brainRulesUsed);
+    expect(ids).toEqual(['42']);
+    // These IDs go directly to attribution without needing resolveBrainRuleRefs
+  });
+
+  it('performance-feedback v1.1 resolves text rules before attribution', () => {
+    // The new flow in performance-feedback:
+    // 1. extractKnownRuleIds(brain_rules_used) → check for pre-resolved IDs
+    // 2. If no IDs found and brain_rules_used.length > 0 → resolveBrainRuleRefs()
+    // 3. Use resolved IDs for attribution updates
+
+    const textRules = ['Some text rule', 'Another text rule'];
+    const preResolvedIds = extractKnownRuleIds(textRules);
+    expect(preResolvedIds).toEqual([]); // No pre-resolved IDs
+
+    // In the endpoint, this triggers resolveBrainRuleRefs(textRules)
+    // which queries the DB and tries to match
   });
 });

@@ -536,7 +536,7 @@ async function deliverScanResults(chatId: string, result: any) {
       const shieldIcon = opp.shield_passed ? '✅' : '⚠️';
       const recNum = i + 1;
 
-      lines.push(`\n${recNum}. ${typeLabel} ${shieldIcon}`);
+      lines.push(`\n<b>Rec #${recNum}</b> ${typeLabel} ${shieldIcon}`);
       if (opp.source_tweet_url) lines.push(`🔗 ${opp.source_tweet_url}`);
       lines.push(`<i>${htmlEscape(shortText(opp.crafted_text, 280))}</i>`);
       if (opp.why) lines.push(`💡 ${opp.why}`);

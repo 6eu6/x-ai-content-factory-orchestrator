@@ -1,8 +1,9 @@
 import { assertAuthorized, optionalEnv } from '../../../lib/env';
 import { supabaseAdmin } from '../../../lib/supabase';
 import { extractTweetUrl } from '../../../lib/telegram';
+import { resolveBrainRuleRefs } from '../../../lib/resolve-brain-rules';
 
-const VERSION = 'log-published-decision-v2';
+const VERSION = 'log-published-decision-v2.1';
 
 const VALID_CONTENT_TYPES = ['reply', 'quote', 'thread', 'single_tweet', 'article'];
 
@@ -72,6 +73,7 @@ export async function POST(req: Request) {
     // ── Get decision_score and brain_rules_used from linked run ──
     let decisionScore: number | null = null;
     let brainRulesUsed: any[] = [];
+    let brainRulesResolved = false;
 
     if (linkedDecisionRunId) {
       try {
@@ -98,6 +100,7 @@ export async function POST(req: Request) {
                 // Will use rec.source_tweet_url
               }
               if (rec.decision_score) decisionScore = rec.decision_score;
+              if (rec.score) decisionScore = rec.score;  // also check 'score' field in payload
               if (Array.isArray(rec.brain_rules_used) && rec.brain_rules_used.length > 0) {
                 brainRulesUsed = rec.brain_rules_used;
               }
@@ -105,6 +108,21 @@ export async function POST(req: Request) {
               warnings.push(`recommendation_index ${recommendationIndex} out of range (selected_payload has ${selectedPayload.length} items)`);
             }
           }
+        }
+      } catch {}
+    }
+
+    // ── Resolve text-based brain_rules_used to IDs ──
+    if (brainRulesUsed.length > 0) {
+      try {
+        const resolved = await resolveBrainRuleRefs(brainRulesUsed);
+        if (resolved.length > 0) {
+          brainRulesUsed = resolved.map(r => ({
+            id: r.id,
+            table: r.table,
+            rule_preview: r.rule_preview
+          }));
+          brainRulesResolved = true;
         }
       } catch {}
     }
@@ -144,6 +162,7 @@ export async function POST(req: Request) {
       published_decision_id: inserted?.id || null,
       recommendation_index: recommendationIndex || undefined,
       brain_rules_count: brainRulesUsed.length,
+      brain_rules_resolved: brainRulesResolved || undefined,
       warning: warnings.length > 0 ? warnings.join('; ') : undefined
     });
   } catch (err: any) {
