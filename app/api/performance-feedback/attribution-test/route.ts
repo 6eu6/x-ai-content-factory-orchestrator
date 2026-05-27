@@ -205,12 +205,13 @@ export async function POST(req: Request) {
         .maybeSingle();
 
       if (ruleNow) {
-        const newConfidence = Math.min(10, Number(ruleNow.confidence_score || 7) + 0.2);
+        const currentConfidence = Number(ruleNow.confidence_score || 7);
+        const newConfidence = Math.min(10, currentConfidence + 0.2);
         const newSuccessCount = (ruleNow.success_count || 0) + 1;
 
         // Try with updated_at first, fallback without
         const updateData: Record<string, any> = {
-          confidence_score: Math.round(newConfidence * 100) / 100,
+          confidence_score: Math.round(newConfidence * 10) / 10, // Round to 1 decimal
           success_count: newSuccessCount,
           last_success_at: now,
           last_used_at: now

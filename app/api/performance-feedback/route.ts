@@ -161,7 +161,7 @@ export async function GET(req: Request) {
                     await supabase
                       .from('x_algorithm_learning_rules')
                       .update({
-                        confidence_score: Math.round(newConfidence * 100) / 100,
+                        confidence_score: Math.round(newConfidence * 10) / 10,
                         success_count: (rule.success_count || 0) + 1,
                         last_success_at: now,
                         last_used_at: now,
@@ -174,7 +174,7 @@ export async function GET(req: Request) {
                     const newFailureCount = (rule.failure_count || 0) + 1;
                     const newSuccessCount = rule.success_count || 0;
                     const updates: Record<string, any> = {
-                      confidence_score: Math.round(newConfidence * 100) / 100,
+                      confidence_score: Math.round(newConfidence * 10) / 10,
                       failure_count: newFailureCount,
                       last_failure_at: now,
                       last_used_at: now,
@@ -213,7 +213,7 @@ export async function GET(req: Request) {
                     await supabase
                       .from('viral_style_patterns')
                       .update({
-                        confidence_score: Math.round(newConfidence * 100) / 100,
+                        confidence_score: Math.round(newConfidence * 10) / 10,
                         success_count: (pattern.success_count || 0) + 1,
                         last_success_at: now,
                         last_used_at: now,
@@ -226,7 +226,7 @@ export async function GET(req: Request) {
                     const newFailureCount = (pattern.failure_count || 0) + 1;
                     const newSuccessCount = pattern.success_count || 0;
                     const updates: Record<string, any> = {
-                      confidence_score: Math.round(newConfidence * 100) / 100,
+                      confidence_score: Math.round(newConfidence * 10) / 10,
                       failure_count: newFailureCount,
                       last_failure_at: now,
                       last_used_at: now,
