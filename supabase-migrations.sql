@@ -974,3 +974,12 @@ DO $$ BEGIN
   CREATE POLICY "Service role full access" ON behavior_limits FOR ALL USING (true) WITH CHECK (true);
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
+
+-- ═══════════════════════════════════════════════════════════════
+-- MIGRATION v6: Add scan_account_limit and scan_tweets_per_account to decision_runs
+-- ═══════════════════════════════════════════════════════════════
+DO $$ BEGIN
+  ALTER TABLE decision_runs ADD COLUMN IF NOT EXISTS scan_account_limit INTEGER;
+  ALTER TABLE decision_runs ADD COLUMN IF NOT EXISTS scan_tweets_per_account INTEGER;
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
