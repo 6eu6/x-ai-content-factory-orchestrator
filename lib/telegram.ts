@@ -6,7 +6,8 @@ export const MAIN_KEYBOARD = {
     [{ text: '🧠 تشغيل كامل' }, { text: '📊 تقرير الأداء' }],
     [{ text: '✍️ اقتراح محتوى' }, { text: '🧩 محتويات العقل' }],
     [{ text: '🔗 إضافة تغريدة' }, { text: '➕ إضافة حساب' }],
-    [{ text: '📋 قائمة الحسابات' }, { text: '🔄 تصفير البيانات' }]
+    [{ text: '📋 قائمة الحسابات' }, { text: '✅ سجل منشور' }],
+    [{ text: '🔄 تصفير البيانات' }]
   ],
   resize_keyboard: true,
   one_time_keyboard: false

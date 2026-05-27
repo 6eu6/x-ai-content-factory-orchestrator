@@ -74,11 +74,43 @@ export async function GET(req: Request) {
       .order('updated_at', { ascending: false })
       .limit(10);
 
-    const { data: latestDecisions } = await supabase
-      .from('decision_runs')
+    const { data: latestDecisions } = await supabase .from('decision_runs')
       .select('account_stage, raw_opportunities, selected_count, held_count, run_source, created_at')
       .order('created_at', { ascending: false })
       .limit(5);
+
+    // ── Published decisions stats ──
+    let publishedDecisions: any = { total: 0, unchecked: 0, checked_last_24h: 0, latest: [] };
+    try {
+      const { count: publishedTotal } = await supabase
+        .from('published_decisions')
+        .select('*', { count: 'exact', head: true });
+
+      const { count: publishedUnchecked } = await supabase
+        .from('published_decisions')
+        .select('*', { count: 'exact', head: true })
+        .is('performance_checked_at', null);
+
+      const { count: publishedChecked24h } = await supabase
+        .from('published_decisions')
+        .select('*', { count: 'exact', head: true })
+        .gte('performance_checked_at', dayAgo);
+
+      const { data: latestPublished } = await supabase
+        .from('published_decisions')
+        .select('id, account_handle, published_url, content_type, status, decision_score, performance_payload, created_at, performance_checked_at')
+        .order('created_at', { ascending: false })
+        .limit(5);
+
+      publishedDecisions = {
+        total: publishedTotal || 0,
+        unchecked: publishedUnchecked || 0,
+        checked_last_24h: publishedChecked24h || 0,
+        latest: latestPublished || []
+      };
+    } catch {
+      // Table may not exist yet — that's ok
+    }
 
     const total = totalAccounts || 0;
     const never = neverScanned || 0;
@@ -95,6 +127,16 @@ export async function GET(req: Request) {
     if (rules === 0) warning_flags.push('NO_ACTIVE_BRAIN_RULES');
     if (total > 5 && scanned <= 5) warning_flags.push('SCAN_SCOPE_MAY_BE_TOO_SMALL');
     if (nextError) warning_flags.push('NEXT_TO_SCAN_QUERY_ERROR');
+    if (publishedDecisions.unchecked > 0) {
+      // Check if any are older than 24 hours
+      const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const staleUnchecked = (publishedDecisions.latest || []).filter(
+        (p: any) => !p.performance_checked_at && new Date(p.created_at) < twentyFourHoursAgo
+      );
+      if (staleUnchecked.length > 0) {
+        warning_flags.push('PUBLISHED_DECISIONS_UNCHECKED');
+      }
+    }
 
     return Response.json({
       ok: true,
@@ -119,6 +161,7 @@ export async function GET(req: Request) {
       decisions: {
         latest: latestDecisions || []
       },
+      published_decisions: publishedDecisions,
       warning_flags
     });
   } catch (err: any) {

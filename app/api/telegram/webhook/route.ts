@@ -412,6 +412,36 @@ async function handleMessage(chatId: string, userId: string, username: string, t
       return;
     }
 
+    // ═══ سجل منشور ═══
+    if (text === '✅ سجل منشور') {
+      await setFlow(supabase, chatId, 'awaiting_published_url');
+      await sendReply(chatId, 'أرسل رابط المنشور على X:\nمثال: https://x.com/30piq/status/123\n\nأو اكتب:\nنشرت https://x.com/30piq/status/123');
+      return;
+    }
+
+    // Handle "نشرت URL" pattern directly (no flow needed)
+    if (/^نشرت\s+/i.test(text)) {
+      const urlPart = text.replace(/^نشرت\s+/i, '').trim();
+      const publishedUrl = extractTweetUrl(urlPart);
+      if (!publishedUrl) {
+        await sendReply(chatId, '❌ لم أتعرف على رابط X. أرسل الرابط بعد كلمة "نشرت".\nمثال: نشرت https://x.com/30piq/status/123');
+        return;
+      }
+      await handleLogPublished(chatId, publishedUrl, supabase);
+      return;
+    }
+
+    if (state?.current_flow === 'awaiting_published_url') {
+      await clearFlow(supabase, chatId);
+      const publishedUrl = extractTweetUrl(text);
+      if (!publishedUrl) {
+        await sendReply(chatId, '❌ أرسل رابط تغريدة X صحيح.\nمثال: https://x.com/30piq/status/123');
+        return;
+      }
+      await handleLogPublished(chatId, publishedUrl, supabase);
+      return;
+    }
+
     // ═══ تصفير البيانات ═══
     if (text === '🔄 تصفير البيانات') {
       await setFlow(supabase, chatId, 'awaiting_reset');
@@ -595,6 +625,79 @@ async function getBrainSummary(supabase: any): Promise<string> {
   }
 
   return lines.join('\n');
+}
+
+// ═══ تسجيل منشور ═══
+
+async function handleLogPublished(chatId: string, publishedUrl: string, supabase: any) {
+  try {
+    const username = optionalEnv('X_USERNAME', '30piq');
+
+    // Extract handle from URL
+    const handleMatch = publishedUrl.match(/(?:x|twitter)\.com\/([^\s/]+)/i);
+    const accountHandle = handleMatch ? handleMatch[1] : username;
+
+    // Find latest decision_run with selected_count > 0 within 72h
+    const seventyTwoHoursAgo = new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString();
+    let linked = false;
+    let decisionRunId: string | null = null;
+    let decisionScore: number | null = null;
+    let brainRulesUsed: any[] = [];
+
+    try {
+      const { data: recentRuns } = await supabase
+        .from('decision_runs')
+        .select('id, selected_count, decision_score, brain_rules_used')
+        .gt('selected_count', 0)
+        .gte('created_at', seventyTwoHoursAgo)
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (recentRuns && recentRuns.length > 0) {
+        decisionRunId = recentRuns[0].id;
+        decisionScore = recentRuns[0].decision_score || null;
+        brainRulesUsed = Array.isArray(recentRuns[0].brain_rules_used) ? recentRuns[0].brain_rules_used : [];
+        linked = true;
+      }
+    } catch {}
+
+    // Insert
+    const { data: inserted, error } = await supabase
+      .from('published_decisions')
+      .insert({
+        decision_run_id: decisionRunId,
+        account_handle: accountHandle,
+        published_url: publishedUrl,
+        status: 'published',
+        decision_score: decisionScore,
+        brain_rules_used: brainRulesUsed,
+        performance_checked_at: null,
+        performance_payload: {}
+      })
+      .select('id')
+      .single();
+
+    if (error) {
+      if (error.message?.includes('unique') || error.message?.includes('duplicate')) {
+        await sendReply(chatId, '⚠️ هذا المنشور مسجل مسبقًا.');
+        return;
+      }
+      await sendReply(chatId, `❌ فشل التسجيل: ${htmlEscape(error.message)}`);
+      return;
+    }
+
+    let msg = `✅ <b>تم تسجيل المنشور</b>\n`;
+    msg += `━━━━━━━━━━━━━━━━━━━━\n`;
+    msg += `🔗 ${publishedUrl}\n`;
+    msg += `👤 @${htmlEscape(accountHandle)}\n`;
+    msg += linked ? `🔗 مربوط بقرار: نعم` : `⚠️ لم يُربط بقرار`;
+    if (decisionScore !== null) msg += ` | نقاط القرار: ${decisionScore}`;
+    msg += `\n\n<i>سيتم فحص الأداء لاحقًا.</i>`;
+
+    await sendReply(chatId, msg);
+  } catch (e: any) {
+    await sendReply(chatId, `❌ فشل التسجيل: ${htmlEscape(e.message || 'خطأ غير معروف')}`);
+  }
 }
 
 // ═══ مساعدات ═══
