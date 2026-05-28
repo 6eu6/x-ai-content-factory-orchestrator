@@ -1895,3 +1895,532 @@ Write ONLY the content. No explanations or notes.`
     return { ok: false, error: e.message || 'Generation error' };
   }
 }
+
+// ═══════════════════════════════════════════════════════════════
+// Exported functions for the Queue + Worker architecture
+//
+// These preserve the EXACT same quality as scanXAccounts:
+//   - Full deep AI analysis per viral tweet
+//   - Brain learning (viral patterns, style patterns, media patterns, concept extraction)
+//   - Full opportunity discovery with AI crafting + shield checks
+//   - Self-improvement (brain monitors itself)
+//
+// The worker MUST use these instead of any simplified logic.
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Result of scanning a single account for the pipeline worker.
+ * Contains all analyzed data needed for the merge step.
+ */
+export type SingleAccountScanResult = {
+  account_handle: string;
+  tweets_analyzed: number;
+  viral_found: number;
+  analyzed_data: any[];        // Full analysis objects for merge step
+  media: MediaFromTweet[];     // All media found
+  brain_updates: {
+    algorithm_rules: number;
+    style_patterns: number;
+    media_patterns: number;
+  };
+  debug_log: string[];
+};
+
+/**
+ * Scan a single X account with FULL content-engine-v3 quality.
+ *
+ * This is the per-account function extracted from scanXAccounts.
+ * It does everything scanXAccounts does for ONE account:
+ *   - Fetch timeline via getXUserTimeline
+ *   - Analyze each tweet with analyzeXTweet + scoreXTweet
+ *   - Deep AI analysis for viral tweets (callModel learning_extraction)
+ *   - Store in viral_tweet_analyses
+ *   - Learn viral patterns, psychological triggers, style patterns
+ *   - Learn media patterns per account
+ *   - Update account last_checked
+ *
+ * It does NOT discover opportunities (that happens at the merge/global step).
+ *
+ * This is NOT a simplified version. It is the same quality logic.
+ */
+export async function scanSingleAccountForPipeline(
+  accountHandle: string,
+  tweetsPerAccount: number = 8
+): Promise<SingleAccountScanResult> {
+  const supabase = supabaseAdmin();
+  const debugLog: string[] = [];
+  let brainUpdates = { algorithmRules: 0, stylePatterns: 0, mcpOpportunities: 0 };
+  const allAnalyzed: any[] = [];
+  const allMedia: MediaFromTweet[] = [];
+  let viralFound = 0;
+  let totalAnalyzed = 0;
+
+  console.log(`[scanSingleAccountForPipeline] Scanning @${accountHandle}...`);
+
+  try {
+    const tweets = await getXUserTimeline(accountHandle, tweetsPerAccount, true);
+    debugLog.push(`[scan] @${accountHandle}: got ${tweets.length} tweets`);
+
+    for (const tweet of tweets) {
+      totalAnalyzed++;
+      const user = { username: accountHandle, followers_count: 0, public_metrics: { followers_count: 0 } };
+      const analysis = analyzeXTweet(tweet, user);
+      const score = scoreXTweet(tweet);
+      const media = extractMediaFromTweet(tweet);
+
+      // ═══ Deep AI analysis for each viral tweet (same as scanXAccounts) ═══
+      let deepAnalysis: any = null;
+      if (score > 15) {
+        try {
+          const m: any = tweet.public_metrics || {};
+          const aiResult = await callModel('learning_extraction' as TaskType, [
+            {
+              role: 'system',
+              content: `You are a viral content analyst. Analyze WHY this tweet performed well and extract transferable patterns. Be specific and actionable. Output valid JSON only.`
+            },
+            {
+              role: 'user',
+              content: `Analyze this tweet from @${accountHandle}:
+Text: "${(analysis.text || '').slice(0, 400)}"
+Type: ${media.length > 0 ? 'media' : (analysis.is_reply ? 'reply' : 'original')}
+Metrics: likes=${m.like_count||0} replies=${m.reply_count||0} retweets=${m.retweet_count||0} quotes=${m.quote_count||0} bookmarks=${m.bookmark_count||0} views=${m.view_count||0}
+Score: ${score}
+
+Extract:
+1. "viral_reason": WHY this tweet went viral (specific mechanism, not generic)
+2. "style_pattern": The writing style technique used (hook, structure, voice)
+3. "media_impact": How media/visuals contributed (or "text_only" if no media)
+4. "timing_insight": What about the timing or context helped
+5. "tweet_type_insight": What about the tweet type (original/reply/quote) helped
+6. "engagement_quality": Quality of engagement (genuine discussion vs vanity metrics)
+7. "adaptation": How to apply this EXACT mechanism for @30piq (specific, not generic)
+8. "hook_formula": The exact hook formula used (if identifiable)
+9. "psychological_trigger": What psychological trigger made people engage
+10. "confidence": 1-10 how confident you are in this analysis
+
+JSON format: {"viral_reason":"...","style_pattern":"...","media_impact":"...","timing_insight":"...","tweet_type_insight":"...","engagement_quality":"...","adaptation":"...","hook_formula":"...","psychological_trigger":"...","confidence":N}`
+            }
+          ], { temperature: 0.1, max_tokens: 1500, response_format: { type: 'json_object' } });
+
+          deepAnalysis = parseModelJson(aiResult);
+          debugLog.push(`[scan] @${accountHandle}: deep analysis OK (conf: ${deepAnalysis?.confidence})`);
+        } catch (aiErr: any) {
+          debugLog.push(`[scan] @${accountHandle}: deep analysis failed: ${aiErr.message}`);
+        }
+      }
+
+      // Store in viral_tweet_analyses (same as scanXAccounts)
+      const isViral = score > 20 || analysis.engagement_per_1k_followers > 5;
+      if (isViral) viralFound++;
+
+      try {
+        const upsertData: any = {
+          tweet_id: String(analysis.tweet_id || tweet.id || ''),
+          tweet_url: analysis.tweet_url || '',
+          creator_handle: accountHandle,
+          tweet_text: (analysis.text || '').slice(0, 500),
+          engagement_score: score,
+          engagement_per_1k_followers: analysis.engagement_per_1k_followers,
+          tweet_type: media.length > 0 ? 'media' : (analysis.is_reply ? 'reply' : 'original'),
+          metrics: analysis.metrics
+        };
+
+        if (deepAnalysis) {
+          upsertData.analysis_payload = deepAnalysis;
+          upsertData.hook_formula = deepAnalysis.hook_formula || null;
+          upsertData.why_bookmarks = deepAnalysis.engagement_quality || null;
+          upsertData.adaptation_for_30piq = deepAnalysis.adaptation || null;
+          upsertData.tone = deepAnalysis.style_pattern || null;
+          upsertData.format_pattern = deepAnalysis.tweet_type_insight || null;
+        }
+
+        await supabase.from('viral_tweet_analyses').upsert(upsertData, { onConflict: 'tweet_id' });
+      } catch (dbErr: any) {
+        debugLog.push(`[scan] upsert error: ${dbErr.message}`);
+      }
+
+      // Store analysis for merge step
+      allAnalyzed.push({
+        ...analysis,
+        score,
+        media,
+        handle: accountHandle,
+        deepAnalysis
+      });
+
+      allMedia.push(...media);
+
+      // ═══ Learn from viral tweets (same as scanXAccounts) ═══
+      if (isViral && deepAnalysis) {
+        try {
+          // Store viral reason as rule
+          await insertIfMissing(supabase, 'x_algorithm_learning_rules',
+            { rule_type: 'viral_pattern', rule: `@${accountHandle}: ${deepAnalysis.viral_reason}` },
+            {
+              rule_type: 'viral_pattern',
+              rule: deepAnalysis.viral_reason,
+              evidence: `@${accountHandle} tweet (score: ${score}): "${(analysis.text || '').slice(0, 80)}..."`,
+              source_type: 'real_time_crawl',
+              source_url: analysis.tweet_url,
+              applies_to: 'content_strategy,engagement_crafting',
+              confidence_score: Math.min(10, deepAnalysis.confidence || 5),
+              status: 'active',
+              test_run: false,
+              updated_at: new Date().toISOString()
+            }
+          );
+          brainUpdates.algorithmRules++;
+
+          // Store psychological pattern
+          if (deepAnalysis.psychological_trigger) {
+            await insertIfMissing(supabase, 'x_algorithm_learning_rules',
+              { rule_type: 'psychological_trigger', rule: deepAnalysis.psychological_trigger },
+              {
+                rule_type: 'psychological_trigger',
+                rule: deepAnalysis.psychological_trigger,
+                evidence: `Trigger in @${accountHandle} viral tweet (score: ${score})`,
+                source_type: 'real_time_crawl',
+                applies_to: 'hook_crafting,engagement_crafting',
+                confidence_score: Math.min(10, (deepAnalysis.confidence || 5) - 1),
+                status: 'active',
+                test_run: false,
+                updated_at: new Date().toISOString()
+              }
+            );
+            brainUpdates.algorithmRules++;
+          }
+
+          // Store style pattern
+          if (deepAnalysis.style_pattern || deepAnalysis.adaptation) {
+            try {
+              await insertIfMissing(supabase, 'viral_style_patterns',
+                { pattern_name: deepAnalysis.hook_formula || deepAnalysis.style_pattern?.slice(0, 80) || `Pattern from @${accountHandle}` },
+                {
+                  pattern_name: deepAnalysis.hook_formula || deepAnalysis.style_pattern?.slice(0, 80) || `Pattern from @${accountHandle}`,
+                  pattern_description: deepAnalysis.style_pattern || '',
+                  adaptation_for_30piq: deepAnalysis.adaptation || '',
+                  pattern_type: deepAnalysis.psychological_trigger ? 'hook' : 'structure',
+                  why_it_works: deepAnalysis.viral_reason || '',
+                  source_handles: [accountHandle],
+                  source_tweet_urls: [analysis.tweet_url],
+                  confidence_score: Math.min(10, deepAnalysis.confidence || 5),
+                  status: 'active',
+                  test_run: false,
+                  updated_at: new Date().toISOString()
+                }
+              );
+              brainUpdates.stylePatterns++;
+            } catch (spErr: any) {
+              debugLog.push(`[scan] style pattern insert error: ${spErr.message}`);
+            }
+          }
+        } catch (learnErr: any) {
+          debugLog.push(`[scan] learning error: ${learnErr.message}`);
+        }
+      }
+    }
+
+    // ═══ Learn media patterns (same as scanXAccounts) ═══
+    try {
+      let totalTweets = allAnalyzed.length;
+      let withMedia = allAnalyzed.filter(a => a.media?.length > 0).length;
+      if (withMedia > 0) {
+        const mediaRatio = Math.round((withMedia / totalTweets) * 100);
+        const mediaTypes = [...new Set(allAnalyzed.flatMap(a => (a.media || []).map((m: MediaFromTweet) => m.type)))].join(', ');
+        const rule = `@${accountHandle} uses media in ${mediaRatio}% of tweets (${mediaTypes}). Accounts with high media usage get better engagement. Consider media when crafting engagement with their tweets.`;
+        await insertIfMissing(supabase, 'x_algorithm_learning_rules',
+          { rule_type: 'media_pattern', rule },
+          {
+            rule_type: 'media_pattern',
+            rule,
+            evidence: `Scanned ${totalTweets} tweets from @${accountHandle}: ${withMedia} had media (${mediaTypes})`,
+            source_type: 'x_account_scan_v3',
+            source_url: `https://x.com/${accountHandle}`,
+            applies_to: 'crawl_strategy,content_score,engagement_crafting',
+            confidence_score: Math.min(10, 5 + Math.floor(mediaRatio / 20)),
+            status: 'active',
+            test_run: false,
+            updated_at: new Date().toISOString()
+          }
+        );
+        brainUpdates.algorithmRules++;
+      }
+    } catch (e: any) {
+      debugLog.push(`[brain-media] pattern failed: ${e.message}`);
+    }
+
+    // ═══ Update account state (same as scanXAccounts) ═══
+    try {
+      const snapshot = await getXUserByUsername(accountHandle);
+      await supabase.from('accounts').update({
+        notes: `Followers: ${snapshot.followers_count}, Scanned: ${new Date().toISOString()}`,
+        last_checked: new Date().toISOString(),
+        followers: snapshot.followers_count || null
+      }).eq('handle', accountHandle);
+    } catch (updErr: any) {
+      debugLog.push(`[scan] update account error: ${updErr.message}`);
+    }
+
+  } catch (e: any) {
+    debugLog.push(`[scan] FAILED @${accountHandle}: ${e.message}`);
+    console.error(`[scanSingleAccountForPipeline] Failed to scan @${accountHandle}:`, e.message);
+  }
+
+  return {
+    account_handle: accountHandle,
+    tweets_analyzed: totalAnalyzed,
+    viral_found: viralFound,
+    analyzed_data: allAnalyzed,
+    media: allMedia,
+    brain_updates: {
+      algorithm_rules: brainUpdates.algorithmRules,
+      style_patterns: brainUpdates.stylePatterns,
+      media_patterns: allMedia.length
+    },
+    debug_log: debugLog
+  };
+}
+
+/**
+ * Result of running the global merge + discover step for the pipeline worker.
+ * Contains the full ContentOpportunity[] array with crafted text and shield checks.
+ */
+export type MergeAndDiscoverResult = {
+  accounts_scanned: number;
+  tweets_analyzed: number;
+  viral_found: number;
+  raw_opportunities: number;
+  opportunities: ContentOpportunity[];
+  brain_updates: {
+    algorithm_rules: number;
+    style_patterns: number;
+    media_patterns: number;
+  };
+  media_downloaded: number;
+  debug_log: string[];
+};
+
+/**
+ * Merge per-account scan results and discover opportunities with FULL quality.
+ *
+ * This is the global/merge step extracted from scanXAccounts.
+ * It does everything scanXAccounts does AFTER per-account scanning:
+ *   - Brain learning from crawled data (learnFromCrawlerItems)
+ *   - Concept extraction (batch AI analysis)
+ *   - Media pattern learning across accounts
+ *   - Full opportunity discovery (AI crafting + shield checks)
+ *   - Thread crafting from brain
+ *   - Self-improvement (brain monitors itself)
+ *
+ * This is NOT a simplified version. It produces real ContentOpportunity objects
+ * with crafted_text, shield_passed, media_urls, and brain_rules_used.
+ */
+export async function mergeAndDiscoverOpportunities(
+  accountScanResults: SingleAccountScanResult[]
+): Promise<MergeAndDiscoverResult> {
+  const supabase = supabaseAdmin();
+  const debugLog: string[] = [];
+  let brainUpdates = { algorithmRules: 0, stylePatterns: 0, mcpOpportunities: 0 };
+
+  // Merge all analyzed data from all accounts
+  const allAnalyzed: any[] = [];
+  const allMedia: MediaFromTweet[] = [];
+  let totalTweetsAnalyzed = 0;
+  let totalViralFound = 0;
+
+  for (const result of accountScanResults) {
+    allAnalyzed.push(...result.analyzed_data);
+    allMedia.push(...result.media);
+    totalTweetsAnalyzed += result.tweets_analyzed;
+    totalViralFound += result.viral_found;
+    brainUpdates.algorithmRules += result.brain_updates.algorithm_rules;
+    brainUpdates.stylePatterns += result.brain_updates.style_patterns;
+  }
+
+  debugLog.push(`[merge] Merged ${accountScanResults.length} account scans: ${totalTweetsAnalyzed} tweets, ${totalViralFound} viral`);
+
+  // ═══ Brain learning from crawled data (same as scanXAccounts) ═══
+  try {
+    const { data: existingViralRules } = await supabase
+      .from('x_algorithm_learning_rules')
+      .select('rule_type, rule, evidence')
+      .in('rule_type', ['viral_pattern', 'spread_pattern', 'media_impact'])
+      .eq('status', 'active')
+      .order('confidence_score', { ascending: false })
+      .limit(30);
+
+    const { data: existingStylePatterns } = await supabase
+      .from('viral_style_patterns')
+      .select('pattern_name, pattern_description, adaptation_for_30piq')
+      .eq('status', 'active')
+      .order('confidence_score', { ascending: false })
+      .limit(30);
+
+    const crawlerItems = allAnalyzed.map(a => {
+      const relatedRule = (existingViralRules || []).find((r: any) =>
+        r.evidence?.includes(a.username) || r.evidence?.includes(a.tweet_id)
+      );
+      const relatedStyle = (existingStylePatterns || []).find((p: any) =>
+        p.pattern_name?.includes(a.username) || p.evidence?.includes(a.username)
+      );
+
+      const mediaDesc = a.media?.length > 0
+        ? `Contains ${a.media.map((m: MediaFromTweet) => m.type).join('+')}`
+        : 'Text only';
+      const deepInsight = relatedRule?.rule || '';
+      const styleInsight = relatedStyle?.pattern_description || '';
+
+      let summary = `Engagement: ${a.score}, per 1K followers: ${a.engagement_per_1k_followers}, ${mediaDesc}`;
+      if (deepInsight) summary += ` | Viral reason: ${deepInsight.slice(0, 150)}`;
+      if (styleInsight) summary += ` | Style: ${styleInsight.slice(0, 100)}`;
+
+      return {
+        title: a.text?.slice(0, 200) || 'Tweet analysis',
+        url: a.tweet_url,
+        summary,
+        confidence_score: Math.min(10, Math.max(1, Math.round(a.score / 10))),
+      };
+    });
+
+    if (crawlerItems.length > 0) {
+      const learned = await learnFromCrawlerItems(supabase, {
+        runType: 'x_account_scan_v3',
+        source: 'twitter_scan',
+        items: crawlerItems,
+        mode: 'production'
+      });
+      brainUpdates.algorithmRules += learned.algorithmRules;
+      brainUpdates.stylePatterns += learned.stylePatterns;
+      brainUpdates.mcpOpportunities += learned.mcpOpportunities;
+    }
+  } catch (e: any) {
+    debugLog.push(`[brain] learning failed: ${e.message}`);
+    console.error('[mergeAndDiscoverOpportunities] Brain learning failed:', e.message);
+  }
+
+  // ═══ Concept extraction (same as scanXAccounts) ═══
+  try {
+    if (allAnalyzed.length >= 2) {
+      const tweetsForConcept = allAnalyzed
+        .filter(a => (a.score || 0) > 20)
+        .slice(0, 15)
+        .map(a => ({
+          text: a.text?.slice(0, 150),
+          score: a.score,
+          handle: a.handle || a.username,
+          media: a.media?.map((m: MediaFromTweet) => m.type).join(',') || 'none',
+          per1k: a.engagement_per_1k_followers
+        }));
+
+      if (tweetsForConcept.length >= 2) {
+        const conceptResponse = await callModel('learning_extraction' as TaskType, [
+          {
+            role: 'system',
+            content: `You are an expert viral pattern analyst. You are given a set of successful tweets and must discover the shared concepts between them.
+
+Your task: Discover 1-3 general concepts/patterns shared across these tweets. Each concept must be:
+1. Specific and actionable (not generic like "good content")
+2. Connecting multiple tweets together
+3. Providing a transferable recommendation — how can this MECHANIC (not topic) be applied to any account
+
+Respond in JSON only:
+{
+  "concepts": [
+    {
+      "name": "Concept name",
+      "description": "Explanation of the concept and its connection to the tweets",
+      "adaptation": "How to apply this mechanic to any account"
+    }
+  ]
+}`
+          },
+          {
+            role: 'user',
+            content: `Analyze these tweets and discover shared concepts:
+
+${tweetsForConcept.map((t, i) => `${i + 1}. @${t.handle} (engagement: ${t.score}, media: ${t.media}): "${t.text}"`).join('\n\n')}`
+          }
+        ], { temperature: 0.15, max_tokens: 2000, response_format: { type: 'json_object' } });
+
+        const parsed = parseModelJson(conceptResponse);
+        const concepts = parsed.concepts || [];
+
+        for (const concept of concepts.slice(0, 3)) {
+          if (concept.name && concept.description) {
+            await insertIfMissing(supabase, 'x_algorithm_learning_rules',
+              { rule_type: 'viral_concept', rule: `${concept.name}: ${concept.description}` },
+              {
+                rule_type: 'viral_concept',
+                rule: `${concept.name}: ${concept.description}`,
+                evidence: `Shared concept extracted from ${tweetsForConcept.length} viral tweets`,
+                source_type: 'batch_concept_extraction',
+                source_url: '',
+                applies_to: 'content_strategy,engagement_crafting',
+                confidence_score: Math.min(10, 5 + Math.floor(tweetsForConcept.length / 3)),
+                status: 'active',
+                test_run: false,
+                updated_at: new Date().toISOString()
+              }
+            );
+            brainUpdates.algorithmRules++;
+
+            if (concept.adaptation) {
+              try {
+                await insertIfMissing(supabase, 'viral_style_patterns',
+                  { pattern_name: concept.name.slice(0, 100) },
+                  {
+                    pattern_name: concept.name.slice(0, 100),
+                    pattern_description: concept.description,
+                    adaptation_for_30piq: concept.adaptation,
+                    pattern_type: 'structure',
+                    why_it_works: `Shared concept from ${tweetsForConcept.length} viral tweets`,
+                    source_handles: [],
+                    source_tweet_urls: [],
+                    confidence_score: Math.min(10, 5 + Math.floor(tweetsForConcept.length / 3)),
+                    status: 'active',
+                    test_run: false,
+                    updated_at: new Date().toISOString()
+                  }
+                );
+                brainUpdates.stylePatterns++;
+              } catch (spErr: any) {
+                debugLog.push(`[brain-concepts] style pattern insert error: ${spErr.message}`);
+              }
+            }
+          }
+        }
+        debugLog.push(`[brain-concepts] extracted ${concepts.length} concepts from ${tweetsForConcept.length} tweets`);
+      }
+    }
+  } catch (e: any) {
+    debugLog.push(`[brain-concepts] concept extraction failed: ${e.message}`);
+    console.error('[mergeAndDiscoverOpportunities] Concept extraction failed:', e.message);
+  }
+
+  // ═══ Full opportunity discovery (same as scanXAccounts — uses discoverOpportunities) ═══
+  const opportunities = await discoverOpportunities(allAnalyzed, allMedia);
+  debugLog.push(`[opportunities] discovered ${opportunities.length} opportunities`);
+
+  // ═══ Self-improvement (same as scanXAccounts) ═══
+  try {
+    const selfImprovement = await selfImproveBrain(supabase, debugLog);
+    debugLog.push(`[self-improve] strengthened: ${selfImprovement.strengthened}, weakened: ${selfImprovement.weakened}, pruned: ${selfImprovement.pruned}`);
+  } catch (e: any) {
+    debugLog.push(`[self-improve] failed: ${e.message}`);
+  }
+
+  return {
+    accounts_scanned: accountScanResults.length,
+    tweets_analyzed: totalTweetsAnalyzed,
+    viral_found: totalViralFound,
+    raw_opportunities: opportunities.length,
+    opportunities,
+    brain_updates: {
+      algorithm_rules: brainUpdates.algorithmRules,
+      style_patterns: brainUpdates.stylePatterns,
+      media_patterns: allMedia.length
+    },
+    media_downloaded: allMedia.length,
+    debug_log: debugLog
+  };
+}

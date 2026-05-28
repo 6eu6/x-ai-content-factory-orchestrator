@@ -8,8 +8,8 @@
  *
  * Each task type maps to a specific pipeline step:
  *   - load_account_state: Load X account state and store in account_state table
- *   - scan_account: Scan a single X account (one account per task)
- *   - merge_scan_results: Merge all scan_account results into a unified opportunity list
+ *   - scan_account: Scan a single X account (ONE account per task, FULL quality)
+ *   - merge_scan_results: Merge all scan_account results + discover opportunities
  *   - enrich_opportunities: Enrich opportunities with rule performance data
  *   - publish_gate: Filter opportunities through English publish gate
  *   - decision: Apply decision engine to publishable opportunities
@@ -18,6 +18,11 @@
  *
  * Critical: scan_account processes ONE account per task.
  * This is not a quality reduction. It is execution partitioning.
+ *
+ * Quality guarantee: All content-engine-v3 logic is preserved.
+ * The worker uses scanSingleAccountForPipeline and mergeAndDiscoverOpportunities
+ * from content-engine-v3 — the SAME quality logic as scanXAccounts.
+ * No placeholder opportunities with empty crafted_text or shield_passed=false.
  */
 
 import { supabaseAdmin } from './supabase';
@@ -34,6 +39,11 @@ import {
   updatePipelineRun,
   appendPipelineRunLog
 } from './pipeline-run-tracker';
+import {
+  scanSingleAccountForPipeline,
+  mergeAndDiscoverOpportunities,
+  type SingleAccountScanResult
+} from './content-engine-v3';
 
 // ═══ Types ═══
 
@@ -156,7 +166,7 @@ type TaskResult = {
 
 /**
  * Process a single pipeline task based on its type.
- * Each task type has its own processing logic.
+ * Each task type uses the real content-engine-v3 logic — no simplified rewrites.
  */
 async function processTask(task: PipelineTaskRow): Promise<TaskResult> {
   switch (task.task_type) {
@@ -215,7 +225,7 @@ async function processLoadAccountState(task: PipelineTaskRow): Promise<TaskResul
   }
 }
 
-// ═══ scan_account (ONE account per task) ═══
+// ═══ scan_account (ONE account per task, FULL content-engine-v3 quality) ═══
 
 async function processScanAccount(task: PipelineTaskRow): Promise<TaskResult> {
   try {
@@ -226,139 +236,21 @@ async function processScanAccount(task: PipelineTaskRow): Promise<TaskResult> {
       return { ok: false, result: {}, error: 'No account_handle specified for scan_account task' };
     }
 
-    // Use scanXAccounts with limit=1 for this specific account
-    // We set the account's last_checked to null temporarily so it gets picked up
-    // Actually, we use a direct scan approach instead
-    const { getXUserTimeline, analyzeXTweet, scoreXTweet } = await import('./x');
-    const { learnFromCrawlerItems } = await import('./learning-memory');
-    const { insertIfMissing } = await import('./db-helpers');
-    const { queryBrainForContent } = await import('./brain-query');
-    const { shieldCheck, quickShieldCheck } = await import('./account-shield');
-    const { callModel, parseModelJson } = await import('./model-router');
-    const supabase = supabaseAdmin();
+    // Use the REAL content-engine-v3 per-account function — same quality as scanXAccounts
+    const scanResult = await scanSingleAccountForPipeline(handle, tweetsPerAccount);
 
-    const tweets = await getXUserTimeline(handle, tweetsPerAccount, true);
-
-    const analyzed: any[] = [];
-    let viralFound = 0;
-    let brainUpdates = { algorithmRules: 0, stylePatterns: 0, mediaPatterns: 0 };
-    let mediaDownloaded = 0;
-
-    for (const tweet of tweets) {
-      const user = { username: handle, followers_count: 0, public_metrics: { followers_count: 0 } };
-      const analysis = analyzeXTweet(tweet, user);
-      const score = scoreXTweet(tweet);
-      const isViral = score > 20 || analysis.engagement_per_1k_followers > 5;
-
-      if (isViral) viralFound++;
-
-      let deepAnalysis: any = null;
-      if (score > 15) {
-        try {
-          const m: any = tweet.public_metrics || {};
-          const aiResult = await callModel('learning_extraction', [
-            {
-              role: 'system',
-              content: `You are a viral content analyst. Analyze WHY this tweet performed well and extract transferable patterns. Output valid JSON only.`
-            },
-            {
-              role: 'user',
-              content: `Analyze this tweet from @${handle}:
-Text: "${(analysis.text || '').slice(0, 400)}"
-Metrics: likes=${m.like_count||0} replies=${m.reply_count||0} retweets=${m.retweet_count||0} quotes=${m.quote_count||0} bookmarks=${m.bookmark_count||0} views=${m.view_count||0}
-Score: ${score}
-
-Extract: viral_reason, style_pattern, media_impact, timing_insight, adaptation, hook_formula, psychological_trigger, confidence (1-10).
-JSON format: {"viral_reason":"...","style_pattern":"...","media_impact":"...","timing_insight":"...","adaptation":"...","hook_formula":"...","psychological_trigger":"...","confidence":N}`
-            }
-          ], { temperature: 0.1, max_tokens: 1500, response_format: { type: 'json_object' } });
-
-          deepAnalysis = parseModelJson(aiResult);
-        } catch {}
-      }
-
-      // Store in viral_tweet_analyses
-      try {
-        const upsertData: any = {
-          tweet_id: String(analysis.tweet_id || tweet.id || ''),
-          tweet_url: analysis.tweet_url || '',
-          creator_handle: handle,
-          tweet_text: (analysis.text || '').slice(0, 500),
-          engagement_score: score,
-          engagement_per_1k_followers: analysis.engagement_per_1k_followers,
-          tweet_type: analysis.is_reply ? 'reply' : 'original',
-          metrics: analysis.metrics
-        };
-        if (deepAnalysis) {
-          upsertData.analysis_payload = deepAnalysis;
-          upsertData.hook_formula = deepAnalysis.hook_formula || null;
-          upsertData.adaptation_for_30piq = deepAnalysis.adaptation || null;
-          upsertData.tone = deepAnalysis.style_pattern || null;
-        }
-        await supabase.from('viral_tweet_analyses').upsert(upsertData, { onConflict: 'tweet_id' });
-      } catch {}
-
-      // Learn from viral tweets
-      if (isViral && deepAnalysis) {
-        try {
-          await insertIfMissing(supabase, 'x_algorithm_learning_rules',
-            { rule_type: 'viral_pattern', rule: deepAnalysis.viral_reason },
-            {
-              rule_type: 'viral_pattern',
-              rule: deepAnalysis.viral_reason,
-              evidence: `@${handle} tweet (score: ${score})`,
-              source_type: 'real_time_crawl',
-              applies_to: 'content_strategy',
-              confidence_score: Math.min(10, deepAnalysis.confidence || 5),
-              status: 'active',
-              test_run: false,
-              updated_at: new Date().toISOString()
-            }
-          );
-          brainUpdates.algorithmRules++;
-        } catch {}
-      }
-
-      analyzed.push({
-        ...analysis,
-        score,
-        handle,
-        deepAnalysis,
-        media: extractMediaFromTweetLocal(tweet)
-      });
-    }
-
-    // Update account's last_checked
-    try {
-      const { getXUserByUsername } = await import('./x');
-      const snapshot = await getXUserByUsername(handle);
-      await supabase.from('accounts').update({
-        notes: `Followers: ${snapshot.followers_count}, Scanned: ${new Date().toISOString()}`,
-        last_checked: new Date().toISOString(),
-        followers: snapshot.followers_count || null
-      }).eq('handle', handle);
-    } catch {}
-
+    // Store the full scan result as JSONB for the merge step to pick up
     return {
       ok: true,
       result: {
-        account_handle: handle,
-        tweets_analyzed: analyzed.length,
-        viral_found: viralFound,
-        analyzed_count: analyzed.length,
-        brain_updates: brainUpdates,
-        // Store raw analysis data for merge step to pick up
-        _analyzed_data: analyzed.map(a => ({
-          text: a.text?.slice(0, 200),
-          score: a.score,
-          handle: a.handle,
-          tweet_url: a.tweet_url,
-          metrics: a.metrics,
-          deepAnalysis: a.deepAnalysis,
-          media: a.media,
-          is_reply: a.is_reply,
-          engagement_per_1k_followers: a.engagement_per_1k_followers
-        }))
+        account_handle: scanResult.account_handle,
+        tweets_analyzed: scanResult.tweets_analyzed,
+        viral_found: scanResult.viral_found,
+        brain_updates: scanResult.brain_updates,
+        // Store the full analyzed_data for merge step — this is critical
+        _analyzed_data: scanResult.analyzed_data,
+        _media: scanResult.media,
+        _debug_log: scanResult.debug_log
       }
     };
   } catch (err: any) {
@@ -366,7 +258,7 @@ JSON format: {"viral_reason":"...","style_pattern":"...","media_impact":"...","t
   }
 }
 
-// ═══ merge_scan_results ═══
+// ═══ merge_scan_results (FULL content-engine-v3 quality) ═══
 
 async function processMergeScanResults(task: PipelineTaskRow): Promise<TaskResult> {
   try {
@@ -385,82 +277,41 @@ async function processMergeScanResults(task: PipelineTaskRow): Promise<TaskResul
       return { ok: false, result: {}, error: `Failed to fetch scan results: ${error.message}` };
     }
 
-    // Merge all analyzed data into a unified list
-    const allAnalyzed: any[] = [];
-    let totalTweetsAnalyzed = 0;
-    let totalViralFound = 0;
-    let brainUpdates = { algorithm_rules: 0, style_patterns: 0, media_patterns: 0 };
-    let mediaDownloaded = 0;
-
-    for (const scanTask of (scanTasks || [])) {
-      const result = scanTask.result || {};
-      allAnalyzed.push(...(result._analyzed_data || []));
-      totalTweetsAnalyzed += result.tweets_analyzed || 0;
-      totalViralFound += result.viral_found || 0;
-      brainUpdates.algorithm_rules += result.brain_updates?.algorithmRules || 0;
-      brainUpdates.style_patterns += result.brain_updates?.stylePatterns || 0;
-      mediaDownloaded += result.media?.length || 0;
+    if (!scanTasks?.length) {
+      return { ok: false, result: {}, error: 'No completed scan_account tasks found — cannot merge' };
     }
 
-    // Now discover opportunities from all analyzed data
-    // We use the content engine's discoverOpportunities equivalent
-    let opportunities: any[] = [];
-    try {
-      const { scanXAccounts } = await import('./content-engine-v3');
-      // Since we've already scanned, we now need to discover opportunities
-      // We call discoverOpportunities from the content engine module
-      const contentEngine = await import('./content-engine-v3');
-      if (typeof (contentEngine as any).discoverOpportunities === 'function') {
-        opportunities = await (contentEngine as any).discoverOpportunities(allAnalyzed, []);
-      } else {
-        // If discoverOpportunities is not exported, scan with 0 accounts and pass data
-        // This is a fallback: we need the opportunity discovery logic
-        // For now, create simple opportunities from viral tweets
-        opportunities = allAnalyzed
-          .filter((a: any) => (a.score || 0) > 15)
-          .map((a: any) => ({
-            type: a.is_reply ? 'reply' : 'quote',
-            source_tweet_url: a.tweet_url || '',
-            source_text: a.text || '',
-            source_author: a.handle || '',
-            source_metrics: a.metrics || {},
-            media_urls: a.media || [],
-            crafted_text: '',
-            why: `Viral tweet from @${a.handle} with score ${a.score}`,
-            brain_rules_used: [],
-            shield_passed: false,
-            shield_issues: []
-          }));
-      }
-    } catch (err: any) {
-      // Fallback: create raw opportunities from analyzed data
-      opportunities = allAnalyzed
-        .filter((a: any) => (a.score || 0) > 15)
-        .map((a: any) => ({
-          type: a.is_reply ? 'reply' : 'quote',
-          source_tweet_url: a.tweet_url || '',
-          source_text: a.text || '',
-          source_author: a.handle || '',
-          source_metrics: a.metrics || {},
-          media_urls: a.media || [],
-          crafted_text: '',
-          why: `Viral tweet from @${a.handle} with score ${a.score}`,
-          brain_rules_used: [],
-          shield_passed: false,
-          shield_issues: []
-        }));
+    // Reconstruct SingleAccountScanResult[] from stored task results
+    const accountScanResults: SingleAccountScanResult[] = [];
+    for (const scanTask of scanTasks) {
+      const r = scanTask.result || {};
+      accountScanResults.push({
+        account_handle: r.account_handle || scanTask.account_handle || '',
+        tweets_analyzed: r.tweets_analyzed || 0,
+        viral_found: r.viral_found || 0,
+        analyzed_data: r._analyzed_data || [],
+        media: r._media || [],
+        brain_updates: r.brain_updates || { algorithm_rules: 0, style_patterns: 0, media_patterns: 0 },
+        debug_log: r._debug_log || []
+      });
     }
+
+    // Use the REAL content-engine-v3 merge+discover function
+    // This produces real ContentOpportunity objects with crafted_text, shield_passed, etc.
+    const mergeResult = await mergeAndDiscoverOpportunities(accountScanResults);
 
     return {
       ok: true,
       result: {
-        accounts_scanned: scanTasks?.length || 0,
-        tweets_analyzed: totalTweetsAnalyzed,
-        viral_found: totalViralFound,
-        raw_opportunities: opportunities.length,
-        brain_updates: brainUpdates,
-        media_downloaded: mediaDownloaded,
-        _opportunities: opportunities
+        accounts_scanned: mergeResult.accounts_scanned,
+        tweets_analyzed: mergeResult.tweets_analyzed,
+        viral_found: mergeResult.viral_found,
+        raw_opportunities: mergeResult.raw_opportunities,
+        brain_updates: mergeResult.brain_updates,
+        media_downloaded: mergeResult.media_downloaded,
+        // Store the FULL opportunities for subsequent steps
+        _opportunities: mergeResult.opportunities,
+        _debug_log: mergeResult.debug_log
       }
     };
   } catch (err: any) {
@@ -696,7 +547,6 @@ async function processPersistDecision(task: PipelineTaskRow): Promise<TaskResult
       }).select('id').single();
       decisionRunId = insertedRun?.id || null;
     } catch (dbErr: any) {
-      // Don't fail the whole task if DB insert fails
       console.error('[pipeline-worker] persist_decision DB error:', dbErr.message);
     }
 
@@ -811,43 +661,6 @@ async function processTelegramDelivery(task: PipelineTaskRow): Promise<TaskResul
   } catch (err: any) {
     return { ok: false, result: {}, error: err.message };
   }
-}
-
-// ═══ Helper: Extract media from tweet (simplified) ═══
-
-function extractMediaFromTweetLocal(tweet: any): any[] {
-  const media: any[] = [];
-  const raw = tweet.raw || tweet;
-
-  try {
-    const sources: any[] = [];
-    if (Array.isArray(raw.media)) sources.push(...raw.media);
-    if (Array.isArray(raw.mediaDetails)) sources.push(...raw.mediaDetails);
-    if (Array.isArray(raw.entities?.media)) sources.push(...raw.entities?.media);
-    if (Array.isArray(raw.extended_entities?.media)) sources.push(...raw.extended_entities?.media);
-
-    for (const m of sources) {
-      if (!m || typeof m !== 'object') continue;
-      if (m.type === 'photo' || m.media_url_https) {
-        media.push({ type: 'photo', url: m.media_url_https || m.media_url || m.url || '', alt_text: m.alt_text || '' });
-      } else if (m.type === 'video') {
-        const variant = m.video_info?.variants?.find((v: any) => v.content_type === 'video/mp4') || m.video_info?.variants?.[0];
-        media.push({ type: 'video', url: variant?.url || m.video_url || '', alt_text: m.alt_text || '' });
-      } else if (m.type === 'animated_gif') {
-        const variant = m.video_info?.variants?.find((v: any) => v.content_type === 'video/mp4') || m.video_info?.variants?.[0];
-        media.push({ type: 'animated_gif', url: variant?.url || m.video_url || '', alt_text: m.alt_text || '' });
-      }
-    }
-
-    if (Array.isArray(raw.photos)) {
-      for (const p of raw.photos) {
-        const url = typeof p === 'string' ? p : (p.media_url_https || p.url || '');
-        if (url) media.push({ type: 'photo', url, alt_text: '' });
-      }
-    }
-  } catch {}
-
-  return media;
 }
 
 // ═══ Helper: Build batch result ═══

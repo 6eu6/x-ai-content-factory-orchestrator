@@ -42,8 +42,18 @@ CREATE INDEX IF NOT EXISTS idx_pipeline_tasks_queue_lock
 
 -- RLS for pipeline_tasks
 ALTER TABLE pipeline_tasks ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "Service role full access on pipeline_tasks" ON pipeline_tasks
-  FOR ALL USING (true) WITH CHECK (true);
+
+-- Guard CREATE POLICY with DO block for idempotency
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE tablename = 'pipeline_tasks' AND policyname = 'Service role full access on pipeline_tasks'
+  ) THEN
+    CREATE POLICY "Service role full access on pipeline_tasks" ON pipeline_tasks
+      FOR ALL USING (true) WITH CHECK (true);
+  END IF;
+END $$;
 
 -- ═══ 3. Add columns to pipeline_runs if missing ═══
 

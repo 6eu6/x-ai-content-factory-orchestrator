@@ -12,6 +12,7 @@ import { supabaseAdmin } from './supabase';
 export type PipelineRunCreateInput = {
   source: string;
   account_handle?: string;
+  initialStatus?: string;  // Default: 'running' for backward compat, 'queued' for pipeline queue
 };
 
 export type PipelineRunUpdateInput = {
@@ -42,8 +43,8 @@ export async function createPipelineRun(input: PipelineRunCreateInput): Promise<
       .from('pipeline_runs')
       .insert({
         source: input.source,
-        status: 'running',
-        current_step: 'init',
+        status: input.initialStatus || 'running',
+        current_step: input.initialStatus === 'queued' ? 'queued' : 'init',
         account_handle: input.account_handle || null,
         started_at: new Date().toISOString(),
         updated_at: new Date().toISOString()

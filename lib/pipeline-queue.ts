@@ -160,10 +160,12 @@ export async function enqueuePipelineRun(options: EnqueuePipelineRunOptions = {}
     };
   }
 
-  // Create the pipeline_runs row
+  // Create the pipeline_runs row with status='queued' (not 'running')
+  // The status transitions to 'running' when a worker locks the first task
   const runId = await createPipelineRun({
     source: runSource,
-    account_handle: username
+    account_handle: username,
+    initialStatus: 'queued'
   });
 
   if (!runId) {
@@ -660,6 +662,19 @@ export async function lockNextTask(workerId: string, options: LockNextTaskOption
         continue;
       }
 
+      // Transition pipeline_runs from 'queued' to 'running' on first task lock
+      if (runData && runData.status === 'queued') {
+        await supabase
+          .from('pipeline_runs')
+          .update({
+            status: 'running',
+            current_step: candidate.task_type,
+            updated_at: now
+          })
+          .eq('id', candidate.run_id)
+          .eq('status', 'queued');  // CAS: only transition if still queued
+      }
+
       return {
         locked: true,
         task: updated as PipelineTaskRow,
@@ -984,10 +999,17 @@ export async function finalizeRunIfReady(runId: string): Promise<void> {
 
     // Determine run status
     let runStatus: string;
+    const failedScanTasks = tasks.filter((t: any) => t.task_type === 'scan_account' && t.status === 'failed');
+    const hasFailedScans = failedScanTasks.length > 0;
+
     if (completed === total) {
       runStatus = 'completed';
     } else if (completed === 0) {
       runStatus = 'failed';
+    } else if (hasFailedScans && completed > 0) {
+      // Partial completion: some scans failed but global steps completed
+      // Mark as completed_with_warnings to signal partial failure
+      runStatus = 'completed_with_warnings';
     } else {
       runStatus = 'completed';  // Partial success still counts as completed
     }
@@ -1018,6 +1040,15 @@ export async function finalizeRunIfReady(runId: string): Promise<void> {
       decisionPayload.gate_rejected = gr.rejected ?? gr.gate_rejected;
     }
 
+    // Add failed scan account info for partial failure visibility
+    if (hasFailedScans) {
+      decisionPayload.failed_scan_accounts = failedScanTasks.map((t: any) => ({
+        account: t.account_handle,
+        error: (t.error_message || '').slice(0, 200)
+      }));
+      decisionPayload.failed_scan_count = failedScanTasks.length;
+    }
+
     // Update the run
     const updatePayload: Record<string, any> = {
       status: runStatus,
@@ -1032,6 +1063,10 @@ export async function finalizeRunIfReady(runId: string): Promise<void> {
     if (runStatus === 'completed') {
       updatePayload.completed_at = new Date().toISOString();
       updatePayload.current_step = 'completed';
+    } else if (runStatus === 'completed_with_warnings') {
+      updatePayload.completed_at = new Date().toISOString();
+      updatePayload.current_step = 'completed_with_warnings';
+      updatePayload.error_message = `${failedScanTasks.length} scan_account task(s) failed: ${failedScanTasks.map((t: any) => t.account_handle || '?').join(', ')}`;
     } else if (runStatus === 'failed') {
       const failedTask = tasks.find((t: any) => t.status === 'failed');
       updatePayload.failed_at = new Date().toISOString();

@@ -147,6 +147,7 @@ async function handleMessage(chatId: string, userId: string, username: string, t
         }
 
         const statusEmoji = run.status === 'completed' ? '✅'
+          : run.status === 'completed_with_warnings' ? '⚠️'
           : run.status === 'failed' ? '❌'
           : run.status === 'stuck' ? '⚠️'
           : run.status === 'cancelled' ? '🚫'
