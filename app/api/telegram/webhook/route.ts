@@ -4,8 +4,9 @@ import { supabaseAdmin } from '../../../../lib/supabase';
 import { assertTelegramChat, extractHandles, extractTweetUrl, htmlEscape, MAIN_KEYBOARD, sendTelegramMessage } from '../../../../lib/telegram';
 import { runDailyPipeline } from '../../../../lib/daily-runner';
 import { logPublishedDecision } from '../../../../lib/published-decision-logger';
+import { getLatestPipelineRuns, getPipelineRun } from '../../../../lib/pipeline-run-tracker';
 
-const VERSION = 'telegram-webhook-v5-direct-pipeline';
+const VERSION = 'telegram-webhook-v6-tracked';
 
 export async function POST(req: Request) {
   try {
@@ -65,6 +66,12 @@ async function handleMessage(chatId: string, userId: string, username: string, t
           notifyTelegram: true   // pipeline will deliver recommendations to Telegram itself
         });
 
+        // Send run_id as soon as available
+        if (result.pipeline_run_id) {
+          const shortId = result.pipeline_run_id.slice(0, 8);
+          await sendReply(chatId, `🆔 Run ID: ${shortId}`);
+        }
+
         if (!result.ok) {
           await sendReply(chatId, `❌ فشل التشغيل: ${htmlEscape(result.error || 'unknown error')}`);
           return;
@@ -74,6 +81,56 @@ async function handleMessage(chatId: string, userId: string, username: string, t
         await sendReply(chatId, `✅ انتهى التشغيل الموحّد.\nالنسخة: ${htmlEscape(result.version || 'unknown')}\nمختار: ${result.decision.selected}\nمؤجل: ${result.decision.held}\nبوابة النشر: ${result.publishGate.accepted} صالح / ${result.publishGate.rejected} مرفوض`);
       } catch (pipelineErr: any) {
         await sendReply(chatId, `❌ فشل التشغيل: ${htmlEscape(pipelineErr.message || 'unknown error')}`);
+      }
+      return;
+    }
+
+    // ═══ 🧾 حالة التشغيل — show latest pipeline run status ═══
+    if (text === '🧾 حالة التشغيل' || text === 'حالة التشغيل') {
+      try {
+        const runs = await getLatestPipelineRuns(1);
+        if (!runs.length) {
+          await sendReply(chatId, 'ℹ️ لا توجد عمليات تشغيل مسجلة بعد.');
+          return;
+        }
+
+        const run = runs[0];
+        const shortId = String(run.id).slice(0, 8);
+        const startedAt = run.started_at ? new Date(run.started_at) : null;
+        const updatedAt = run.updated_at ? new Date(run.updated_at) : null;
+        const durationMs = startedAt && updatedAt ? updatedAt.getTime() - startedAt.getTime() : null;
+        const durationStr = durationMs !== null ? `${Math.round(durationMs / 1000)}s` : '—';
+
+        const statusEmoji = run.status === 'completed' ? '✅' : run.status === 'failed' ? '❌' : '⏳';
+
+        const lines: string[] = [
+          `${statusEmoji} <b>حالة آخر تشغيل</b>`,
+          '━━━━━━━━━━━━━━━━━━━━',
+          `🆔 Run: ${shortId}`,
+          `📡 المصدر: ${htmlEscape(run.source || '—')}`,
+          `📊 الحالة: <b>${htmlEscape(run.status || '—')}</b>`,
+          `🔄 الخطوة: ${htmlEscape(run.current_step || '—')}`,
+          `⏱ المدة: ${durationStr}`,
+          `👤 الحساب: ${htmlEscape(run.account_handle || '—')}`,
+        ];
+
+        // Decision info
+        const dp = run.decision_payload || {};
+        if (dp.selected !== undefined) lines.push(`🎯 مختار: ${dp.selected} | مؤجل: ${dp.held || 0}`);
+        if (dp.gate_accepted !== undefined) lines.push(`🛡️ بوابة: ${dp.gate_accepted} صالح / ${dp.gate_rejected} مرفوض`);
+
+        // Error
+        if (run.error_message) {
+          lines.push(`❌ الخطأ: ${htmlEscape(run.error_message.slice(0, 200))}`);
+        }
+
+        // Timing
+        if (run.completed_at) lines.push(`✅ اكتمل: ${new Date(run.completed_at).toISOString().slice(0, 19)}`);
+        if (run.failed_at) lines.push(`❌ فشل: ${new Date(run.failed_at).toISOString().slice(0, 19)}`);
+
+        await sendReply(chatId, lines.join('\n'));
+      } catch (err: any) {
+        await sendReply(chatId, `❌ فشل جلب الحالة: ${htmlEscape(err.message || 'unknown')}`);
       }
       return;
     }
@@ -165,7 +222,7 @@ async function handleMessage(chatId: string, userId: string, username: string, t
       return;
     }
 
-    await sendReply(chatId, 'استخدم الأزرار. للتشغيل: 🧠 تشغيل كامل. بعد النشر: نشرت 1 الرابط');
+    await sendReply(chatId, 'استخدم الأزرار. للتشغيل: 🧠 تشغيل كامل. للحالة: 🧾 حالة التشغيل. بعد النشر: نشرت 1 الرابط');
   } catch (err: any) {
     console.error('[telegram unified] error:', err.message);
     await sendReply(chatId, `❌ خطأ: ${htmlEscape(err.message || 'unknown error')}`);

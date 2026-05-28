@@ -3,11 +3,9 @@ import { fetchWithRetry } from './retry';
 
 export const MAIN_KEYBOARD = {
   keyboard: [
-    [{ text: '🧠 تشغيل كامل' }, { text: '📊 تقرير الأداء' }],
-    [{ text: '✍️ اقتراح محتوى' }, { text: '🧩 محتويات العقل' }],
-    [{ text: '🔗 إضافة تغريدة' }, { text: '➕ إضافة حساب' }],
-    [{ text: '📋 قائمة الحسابات' }, { text: '✅ سجل منشور' }],
-    [{ text: '🔄 تصفير البيانات' }]
+    [{ text: '🧠 تشغيل كامل' }, { text: '🧾 حالة التشغيل' }],
+    [{ text: '🧩 محتويات العقل' }, { text: '➕ إضافة حساب' }],
+    [{ text: '📋 قائمة الحسابات' }, { text: '✅ سجل منشور' }]
   ],
   resize_keyboard: true,
   one_time_keyboard: false

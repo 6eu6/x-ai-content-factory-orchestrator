@@ -23,12 +23,18 @@ async function run(req: Request) {
     });
 
     if (!result.ok) {
-      return Response.json({ ok: false, error: result.error }, { status: 500 });
+      return Response.json({
+        ok: false,
+        error: result.error,
+        pipeline_run_id: result.pipeline_run_id,
+        step_timings: result.step_timings
+      }, { status: 500 });
     }
 
     return Response.json({
       ok: true,
       version: result.version,
+      pipeline_run_id: result.pipeline_run_id,
       xSnapshot: result.xSnapshot,
       decision: {
         stage: result.stage,
@@ -38,7 +44,8 @@ async function run(req: Request) {
         rule_performance: result.decision.rule_performance,
         publish_gate: result.publishGate
       },
-      scan: result.scan
+      scan: result.scan,
+      step_timings: result.step_timings
     });
   } catch (err: any) {
     return Response.json({ ok: false, error: err.message }, { status: 500 });

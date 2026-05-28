@@ -1,5 +1,5 @@
 /**
- * daily-runner.ts — Shared daily pipeline orchestrator
+ * daily-runner.ts — Shared daily pipeline orchestrator with run tracking
  *
  * Canonical pipeline: load X account → scan → enrich → publish gate → decide → log → Telegram delivery
  *
@@ -18,6 +18,13 @@ import { sendTelegramMessage, allowedChatId, htmlEscape, shortText, sendTelegram
 import { decideTelegramOpportunities, stageFromFollowerCount } from './decision-engine';
 import { enrichOpportunitiesWithRulePerformance } from './enrich-opportunities-with-rule-performance';
 import { filterPublishableOpportunities } from './content-policy';
+import {
+  createPipelineRun,
+  updatePipelineRun,
+  appendPipelineRunLog,
+  completePipelineRun,
+  failPipelineRun
+} from './pipeline-run-tracker';
 
 // ═══ Types ═══
 
@@ -31,6 +38,13 @@ export type DailyPipelineOptions = {
   runSource?: string;         // Explicit run_source label
 };
 
+export type StepTiming = {
+  step: string;
+  started_at: string;
+  finished_at: string;
+  duration_ms: number;
+};
+
 export type DailyPipelineResult = {
   ok: boolean;
   error?: string;
@@ -39,6 +53,7 @@ export type DailyPipelineResult = {
   username: string;
   xSnapshot: { followers: number } | null;
   stage: string;
+  pipeline_run_id: string | null;
   scan: {
     account_limit: number;
     tweets_per_account: number;
@@ -72,7 +87,26 @@ export type DailyPipelineResult = {
     };
   };
   decision_run_id: string | null;
+  step_timings: StepTiming[];
 };
+
+// ═══ Step timing helper ═══
+
+const stepTimings: StepTiming[] = [];
+
+function startStep(name: string): number {
+  return Date.now();
+}
+
+function endStep(name: string, startTime: number) {
+  const now = new Date().toISOString();
+  stepTimings.push({
+    step: name,
+    started_at: new Date(startTime).toISOString(),
+    finished_at: now,
+    duration_ms: Date.now() - startTime
+  });
+}
 
 // ═══ Main pipeline ═══
 
@@ -85,141 +119,300 @@ export async function runDailyPipeline(options: DailyPipelineOptions = {}): Prom
   const notifyTelegram = options.notifyTelegram ?? true;
   const runSource = options.runSource || source;
 
-  // ═══ 1. Load X account state ═══
-  let xSnapshot: any = null;
+  // Reset step timings for this run
+  stepTimings.length = 0;
+
+  // ═══ Create pipeline run tracking row ═══
+  const pipelineRunId = await createPipelineRun({
+    source: runSource,
+    account_handle: username
+  });
+
+  // Helper that combines update + append log
+  async function trackStep(step: string, meta?: Record<string, any>) {
+    await Promise.all([
+      updatePipelineRun(pipelineRunId, { current_step: step }),
+      appendPipelineRunLog(pipelineRunId, `step: ${step}`, meta)
+    ]);
+  }
+
   try {
-    const { getXUserByUsername } = await import('./x');
-    xSnapshot = await getXUserByUsername(username);
-    const supabase = supabaseAdmin();
-    await supabase.from('account_state').upsert({
-      account_handle: username,
-      x_url: `https://x.com/${username}`,
-      followers_count: xSnapshot.followers_count ?? null,
-      following_count: xSnapshot.following_count ?? null,
-      posts_count: xSnapshot.tweet_count ?? null,
-      last_live_check_at: new Date().toISOString(),
-      last_known_source: runSource
-    }, { onConflict: 'account_handle' });
-  } catch {}
-
-  // ═══ 2. Scan ═══
-  const scanResult = await scanXAccounts(accountLimit, tweetsPerAccount, lightMode ? { lightMode: true } : undefined);
-  const stage = stageFromFollowerCount(xSnapshot?.followers_count ?? 0);
-
-  // ═══ 3. Enrich with rule performance ═══
-  let rulePerformanceStats = { enriched_opportunities: 0, avg_weight: 0, boosted_count: 0, penalized_count: 0 };
-  try {
-    rulePerformanceStats = await enrichOpportunitiesWithRulePerformance(scanResult.opportunities || []);
-  } catch {}
-
-  // ═══ 4. Publish gate ═══
-  const publishGate = filterPublishableOpportunities(scanResult.opportunities || []);
-
-  // ═══ 5. Decision ═══
-  const decision = decideTelegramOpportunities(publishGate.accepted || [], stage);
-  (decision as any)._publishGate = {
-    accepted: publishGate.accepted.length,
-    rejected: publishGate.rejected.length,
-    reasons: publishGate.rejected.slice(0, 5).map(r => r.reason)
-  };
-  (decision as any)._rulePerformance = rulePerformanceStats;
-
-  // ═══ 6. Log daily checkin (only for non-cron, full runs) ═══
-  if (!lightMode) {
-    const supabase = supabaseAdmin();
+    // ═══ 1. Load X account state ═══
+    let t = startStep('account_state_start');
+    await trackStep('account_state_start');
+    let xSnapshot: any = null;
     try {
-      await supabase.from('daily_checkins').upsert({
-        checkin_date: new Date().toISOString().slice(0, 10),
-        execution_mode: 'v5_english_publish_gate',
-        account_checked: Boolean(xSnapshot),
-        tweets_planned: decision.selected.length,
-        creator_posts_analyzed: scanResult.tweets_analyzed,
-        notes: `v5: raw ${scanResult.opportunities?.length || 0}, gate_ok ${publishGate.accepted.length}, gate_blocked ${publishGate.rejected.length}, selected ${decision.selected.length}, held ${decision.held.length}, stage ${stage}, account_limit ${accountLimit}, tweets_per_account ${tweetsPerAccount}, source ${runSource}`
-      }, { onConflict: 'checkin_date' });
-    } catch {}
-  }
-
-  // ═══ 7. Insert decision_runs ═══
-  let decisionRunId: string | null = null;
-  const supabase = supabaseAdmin();
-  try {
-    const { data: insertedRun } = await supabase.from('decision_runs').insert({
-      account_handle: username,
-      account_stage: stage,
-      raw_opportunities: scanResult.opportunities?.length || 0,
-      selected_count: decision.selected.length,
-      held_count: decision.held.length,
-      budget: { ...decision.budget, publish_gate: (decision as any)._publishGate },
-      selected_payload: decision.selected.slice(0, 5).map((o: any) => ({
-        type: o.type,
-        score: o.decision_score?.final_score,
-        source_tweet_url: o.source_tweet_url,
-        source_author: o.source_author,
-        crafted_text: shortText(o.crafted_text || '', 280),
-        brain_rules_used: (o.brain_rules_used || []).slice(0, 20),
-        shield_passed: o.shield_passed ?? null,
-        reasons: o.decision_score?.reasons || []
-      })),
-      held_summary: decision.held.slice(0, 10).map((o: any) => ({
-        type: o.type,
-        score: o.decision_score?.final_score,
-        source_tweet_url: o.source_tweet_url,
-        rejection_reasons: o.decision_score?.rejection_reasons || []
-      })),
-      run_source: runSource
-    }).select('id').single();
-    decisionRunId = insertedRun?.id || null;
-    (decision as any)._runId = decisionRunId;
-  } catch {}
-
-  // ═══ 8. Telegram delivery ═══
-  if (notifyTelegram) {
-    const chatId = allowedChatId();
-    if (chatId) {
-      try {
-        await deliverDecisionToTelegram(chatId, scanResult, username, decision, xSnapshot?.followers_count ?? 0);
-      } catch (telegramErr: any) {
-        console.error('[daily-runner] Telegram delivery failed:', telegramErr.message);
-      }
+      const { getXUserByUsername } = await import('./x');
+      xSnapshot = await getXUserByUsername(username);
+      const supabase = supabaseAdmin();
+      await supabase.from('account_state').upsert({
+        account_handle: username,
+        x_url: `https://x.com/${username}`,
+        followers_count: xSnapshot.followers_count ?? null,
+        following_count: xSnapshot.following_count ?? null,
+        posts_count: xSnapshot.tweet_count ?? null,
+        last_live_check_at: new Date().toISOString(),
+        last_known_source: runSource
+      }, { onConflict: 'account_handle' });
+    } catch (accountErr: any) {
+      await appendPipelineRunLog(pipelineRunId, `account_state warning: ${accountErr?.message || 'unknown'}`);
     }
-  }
+    endStep('account_state_done', t);
+    await trackStep('account_state_done', { followers: xSnapshot?.followers_count });
 
-  // ═══ 9. Build result ═══
-  return {
-    ok: true,
-    version: 'v5-english-publish-gate',
-    source,
-    username,
-    xSnapshot: xSnapshot ? { followers: xSnapshot.followers_count } : null,
-    stage,
-    scan: {
-      account_limit: accountLimit,
-      tweets_per_account: tweetsPerAccount,
+    // ═══ 2. Scan ═══
+    t = startStep('scan_start');
+    await trackStep('scan_start', { accountLimit, tweetsPerAccount, lightMode });
+    let scanResult: any;
+    try {
+      scanResult = await scanXAccounts(accountLimit, tweetsPerAccount, lightMode ? { lightMode: true } : undefined);
+    } catch (scanErr: any) {
+      endStep('scan_failed', t);
+      await failPipelineRun(pipelineRunId, scanErr, 'scan_start');
+      // Notify Telegram about scan failure
+      if (notifyTelegram) {
+        const chatId = allowedChatId();
+        if (chatId) {
+          try {
+            await sendTelegramMessage(chatId, `❌ فشل التشغيل عند: scan_start\n${htmlEscape(scanErr?.message || 'Unknown scan error')}`, MAIN_KEYBOARD);
+          } catch {}
+        }
+      }
+      return buildErrorResult(source, username, scanErr?.message || 'Scan failed', pipelineRunId);
+    }
+    endStep('scan_done', t);
+    await trackStep('scan_done', {
       accounts_scanned: scanResult.accounts_scanned,
-      actual_accounts_scanned: scanResult.actual_accounts_scanned ?? scanResult.accounts_scanned,
-      manual_tweets_loaded: scanResult.manual_tweets_loaded ?? 0,
+      actual_accounts_scanned: scanResult.actual_accounts_scanned,
       tweets_analyzed: scanResult.tweets_analyzed,
       viral_found: scanResult.viral_tweets_found,
-      raw_opportunities: scanResult.opportunities?.length || 0,
-      gate_accepted: publishGate.accepted.length,
-      gate_rejected: publishGate.rejected.length,
-      brain_updates: scanResult.brain_updates,
-      media_downloaded: scanResult.media_downloaded,
-      light_mode: lightMode,
-      debug_log: (scanResult.debug_log || []).slice(0, 20)
-    },
-    publishGate: {
+      raw_opportunities: scanResult.opportunities?.length || 0
+    });
+
+    const stage = stageFromFollowerCount(xSnapshot?.followers_count ?? 0);
+
+    // ═══ 3. Enrich with rule performance ═══
+    t = startStep('enrich_start');
+    await trackStep('enrich_start');
+    let rulePerformanceStats = { enriched_opportunities: 0, avg_weight: 0, boosted_count: 0, penalized_count: 0 };
+    try {
+      rulePerformanceStats = await enrichOpportunitiesWithRulePerformance(scanResult.opportunities || []);
+    } catch (enrichErr: any) {
+      await appendPipelineRunLog(pipelineRunId, `enrichment warning: ${enrichErr?.message || 'unknown'}`);
+    }
+    endStep('enrich_done', t);
+    await trackStep('enrich_done', rulePerformanceStats);
+
+    // ═══ 4. Publish gate ═══
+    const publishGate = filterPublishableOpportunities(scanResult.opportunities || []);
+    await trackStep('publish_gate_done', {
+      accepted: publishGate.accepted.length,
+      rejected: publishGate.rejected.length,
+      top_reasons: publishGate.rejected.slice(0, 3).map(r => r.reason)
+    });
+
+    // ═══ 5. Decision ═══
+    const decision = decideTelegramOpportunities((publishGate.accepted || []) as any[], stage);
+    (decision as any)._publishGate = {
       accepted: publishGate.accepted.length,
       rejected: publishGate.rejected.length,
       reasons: publishGate.rejected.slice(0, 5).map(r => r.reason)
-    },
-    decision: {
+    };
+    (decision as any)._rulePerformance = rulePerformanceStats;
+    await trackStep('decision_done', {
       selected: decision.selected.length,
       held: decision.held.length,
-      min_final_score: decision.budget.min_final_score,
-      rule_performance: rulePerformanceStats
+      min_final_score: decision.budget.min_final_score
+    });
+
+    // ═══ 6. Log daily checkin (only for non-cron, full runs) ═══
+    if (!lightMode) {
+      const supabase = supabaseAdmin();
+      try {
+        await supabase.from('daily_checkins').upsert({
+          checkin_date: new Date().toISOString().slice(0, 10),
+          execution_mode: 'v5_english_publish_gate',
+          account_checked: Boolean(xSnapshot),
+          tweets_planned: decision.selected.length,
+          creator_posts_analyzed: scanResult.tweets_analyzed,
+          notes: `v5: raw ${scanResult.opportunities?.length || 0}, gate_ok ${publishGate.accepted.length}, gate_blocked ${publishGate.rejected.length}, selected ${decision.selected.length}, held ${decision.held.length}, stage ${stage}, account_limit ${accountLimit}, tweets_per_account ${tweetsPerAccount}, source ${runSource}`
+        }, { onConflict: 'checkin_date' });
+      } catch {}
+    }
+
+    // ═══ 7. Insert decision_runs ═══
+    t = startStep('db_insert_start');
+    await trackStep('db_insert_start');
+    let decisionRunId: string | null = null;
+    const supabase = supabaseAdmin();
+    try {
+      const { data: insertedRun } = await supabase.from('decision_runs').insert({
+        account_handle: username,
+        account_stage: stage,
+        raw_opportunities: scanResult.opportunities?.length || 0,
+        selected_count: decision.selected.length,
+        held_count: decision.held.length,
+        budget: { ...decision.budget, publish_gate: (decision as any)._publishGate },
+        selected_payload: decision.selected.slice(0, 5).map((o: any) => ({
+          type: o.type,
+          score: o.decision_score?.final_score,
+          source_tweet_url: o.source_tweet_url,
+          source_author: o.source_author,
+          crafted_text: shortText(o.crafted_text || '', 280),
+          brain_rules_used: (o.brain_rules_used || []).slice(0, 20),
+          shield_passed: o.shield_passed ?? null,
+          reasons: o.decision_score?.reasons || []
+        })),
+        held_summary: decision.held.slice(0, 10).map((o: any) => ({
+          type: o.type,
+          score: o.decision_score?.final_score,
+          source_tweet_url: o.source_tweet_url,
+          rejection_reasons: o.decision_score?.rejection_reasons || []
+        })),
+        run_source: runSource
+      }).select('id').single();
+      decisionRunId = insertedRun?.id || null;
+      (decision as any)._runId = decisionRunId;
+    } catch (dbErr: any) {
+      await appendPipelineRunLog(pipelineRunId, `decision_runs insert warning: ${dbErr?.message || 'unknown'}`);
+    }
+    endStep('db_insert_done', t);
+    await trackStep('db_insert_done', { decision_run_id: decisionRunId });
+
+    // ═══ 8. Telegram delivery ═══
+    t = startStep('telegram_delivery_start');
+    await trackStep('telegram_delivery_start');
+    if (notifyTelegram) {
+      const chatId = allowedChatId();
+      if (chatId) {
+        try {
+          await deliverDecisionToTelegram(chatId, scanResult, username, decision, xSnapshot?.followers_count ?? 0);
+        } catch (telegramErr: any) {
+          await appendPipelineRunLog(pipelineRunId, `telegram delivery warning: ${telegramErr?.message || 'unknown'}`);
+        }
+      }
+    }
+    endStep('telegram_delivery_done', t);
+    await trackStep('telegram_delivery_done', { delivered: notifyTelegram });
+
+    // ═══ 9. Mark pipeline as completed ═══
+    await completePipelineRun(pipelineRunId, {
+      scan_payload: {
+        account_limit: accountLimit,
+        tweets_per_account: tweetsPerAccount,
+        accounts_scanned: scanResult.accounts_scanned,
+        actual_accounts_scanned: scanResult.actual_accounts_scanned ?? scanResult.accounts_scanned,
+        tweets_analyzed: scanResult.tweets_analyzed,
+        viral_found: scanResult.viral_tweets_found,
+        raw_opportunities: scanResult.opportunities?.length || 0
+      },
+      decision_payload: {
+        selected: decision.selected.length,
+        held: decision.held.length,
+        min_final_score: decision.budget.min_final_score,
+        gate_accepted: publishGate.accepted.length,
+        gate_rejected: publishGate.rejected.length,
+        decision_run_id: decisionRunId
+      },
+      telegram_payload: {
+        delivered: notifyTelegram,
+        selected_count: decision.selected.length
+      }
+    });
+
+    // ═══ 10. Build result ═══
+    return {
+      ok: true,
+      version: 'v6-tracked-pipeline',
+      source,
+      username,
+      xSnapshot: xSnapshot ? { followers: xSnapshot.followers_count } : null,
+      stage,
+      pipeline_run_id: pipelineRunId,
+      scan: {
+        account_limit: accountLimit,
+        tweets_per_account: tweetsPerAccount,
+        accounts_scanned: scanResult.accounts_scanned,
+        actual_accounts_scanned: scanResult.actual_accounts_scanned ?? scanResult.accounts_scanned,
+        manual_tweets_loaded: scanResult.manual_tweets_loaded ?? 0,
+        tweets_analyzed: scanResult.tweets_analyzed,
+        viral_found: scanResult.viral_tweets_found,
+        raw_opportunities: scanResult.opportunities?.length || 0,
+        gate_accepted: publishGate.accepted.length,
+        gate_rejected: publishGate.rejected.length,
+        brain_updates: scanResult.brain_updates,
+        media_downloaded: scanResult.media_downloaded,
+        light_mode: lightMode,
+        debug_log: (scanResult.debug_log || []).slice(0, 20)
+      },
+      publishGate: {
+        accepted: publishGate.accepted.length,
+        rejected: publishGate.rejected.length,
+        reasons: publishGate.rejected.slice(0, 5).map(r => r.reason)
+      },
+      decision: {
+        selected: decision.selected.length,
+        held: decision.held.length,
+        min_final_score: decision.budget.min_final_score,
+        rule_performance: rulePerformanceStats
+      },
+      decision_run_id: decisionRunId,
+      step_timings: [...stepTimings]
+    };
+  } catch (pipelineErr: any) {
+    // ═══ Unhandled pipeline failure ═══
+    const failedAtStep = stepTimings.length > 0 ? stepTimings[stepTimings.length - 1].step : 'unknown';
+    await failPipelineRun(pipelineRunId, pipelineErr, failedAtStep);
+
+    // Notify Telegram
+    if (notifyTelegram) {
+      const chatId = allowedChatId();
+      if (chatId) {
+        try {
+          await sendTelegramMessage(chatId, `❌ فشل التشغيل عند: ${failedAtStep}\n${htmlEscape(pipelineErr?.message || 'Unknown error')}`, MAIN_KEYBOARD);
+        } catch {}
+      }
+    }
+
+    return buildErrorResult(source, username, pipelineErr?.message || 'Pipeline failed', pipelineRunId);
+  }
+}
+
+function buildErrorResult(source: string, username: string, error: string, pipelineRunId: string | null): DailyPipelineResult {
+  return {
+    ok: false,
+    error,
+    version: 'v6-tracked-pipeline',
+    source,
+    username,
+    xSnapshot: null,
+    stage: 'unknown',
+    pipeline_run_id: pipelineRunId,
+    scan: {
+      account_limit: 0,
+      tweets_per_account: 0,
+      accounts_scanned: 0,
+      actual_accounts_scanned: 0,
+      manual_tweets_loaded: 0,
+      tweets_analyzed: 0,
+      viral_found: 0,
+      raw_opportunities: 0,
+      gate_accepted: 0,
+      gate_rejected: 0,
+      brain_updates: {},
+      media_downloaded: 0,
+      light_mode: false,
+      debug_log: []
     },
-    decision_run_id: decisionRunId
+    publishGate: { accepted: 0, rejected: 0, reasons: [] },
+    decision: {
+      selected: 0,
+      held: 0,
+      min_final_score: 0,
+      rule_performance: { enriched_opportunities: 0, avg_weight: 0, boosted_count: 0, penalized_count: 0 }
+    },
+    decision_run_id: null,
+    step_timings: [...stepTimings]
   };
 }
 
