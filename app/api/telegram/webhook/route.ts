@@ -4,9 +4,12 @@ import { supabaseAdmin } from '../../../../lib/supabase';
 import { assertTelegramChat, extractHandles, extractTweetUrl, htmlEscape, MAIN_KEYBOARD, sendTelegramMessage } from '../../../../lib/telegram';
 import { runDailyPipeline } from '../../../../lib/daily-runner';
 import { logPublishedDecision } from '../../../../lib/published-decision-logger';
-import { getLatestPipelineRuns, getPipelineRun } from '../../../../lib/pipeline-run-tracker';
+import { getLatestPipelineRuns, getPipelineRun, markStuckPipelineRuns } from '../../../../lib/pipeline-run-tracker';
 
-const VERSION = 'telegram-webhook-v6-tracked';
+const VERSION = 'telegram-webhook-v7-heartbeat';
+
+// Extend Vercel function timeout to maximum allowed (requires Pro plan or higher)
+export const maxDuration = 300;
 
 export async function POST(req: Request) {
   try {
@@ -57,6 +60,17 @@ async function handleMessage(chatId: string, userId: string, username: string, t
 
     // ═══ 🧠 تشغيل كامل — run shared pipeline directly (NO HTTP self-fetch) ═══
     if (text === '🧠 تشغيل كامل') {
+      // Check if there's already a running pipeline
+      const activeRuns = await getLatestPipelineRuns(1);
+      const activeRun = activeRuns.find((r: any) => r.status === 'running');
+      if (activeRun) {
+        const startedAt = activeRun.started_at ? new Date(activeRun.started_at) : null;
+        const elapsedMin = startedAt ? Math.round((Date.now() - startedAt.getTime()) / 60000) : '?';
+        const shortId = String(activeRun.id).slice(0, 8);
+        await sendReply(chatId, `⚠️ يوجد تشغيل جارٍ بالفعل!\n🆔 ${shortId} | الخطوة: ${htmlEscape(activeRun.current_step || '—')} | المدة: ~${elapsedMin} دقيقة\nاضغط 🧾 حالة التشغيل للمتابعة أو 🔄 إعادة تشغيل للبدء من جديد.`);
+        return;
+      }
+
       // Immediate status so the user knows the run started
       await sendReply(chatId, '⏳ بدأ التشغيل الموحّد...');
 
@@ -85,9 +99,12 @@ async function handleMessage(chatId: string, userId: string, username: string, t
       return;
     }
 
-    // ═══ 🧾 حالة التشغيل — show latest pipeline run status ═══
+    // ═══ 🧾 حالة التشغيل — show latest pipeline run status (LIVE time) ═══
     if (text === '🧾 حالة التشغيل' || text === 'حالة التشغيل') {
       try {
+        // Auto-detect and mark stuck runs before showing status
+        const stuckMarked = await markStuckPipelineRuns(10);
+
         const runs = await getLatestPipelineRuns(1);
         if (!runs.length) {
           await sendReply(chatId, 'ℹ️ لا توجد عمليات تشغيل مسجلة بعد.');
@@ -97,11 +114,41 @@ async function handleMessage(chatId: string, userId: string, username: string, t
         const run = runs[0];
         const shortId = String(run.id).slice(0, 8);
         const startedAt = run.started_at ? new Date(run.started_at) : null;
-        const updatedAt = run.updated_at ? new Date(run.updated_at) : null;
-        const durationMs = startedAt && updatedAt ? updatedAt.getTime() - startedAt.getTime() : null;
-        const durationStr = durationMs !== null ? `${Math.round(durationMs / 1000)}s` : '—';
 
-        const statusEmoji = run.status === 'completed' ? '✅' : run.status === 'failed' ? '❌' : '⏳';
+        // CRITICAL FIX: For running runs, show LIVE elapsed time (now - started_at),
+        // NOT the frozen (updated_at - started_at) which never changes after Vercel kills the function
+        let durationStr = '—';
+        let lastHeartbeatStr = '—';
+        const isRunning = run.status === 'running';
+
+        if (startedAt) {
+          if (isRunning) {
+            // Live time: how long since the run started
+            const elapsedMs = Date.now() - startedAt.getTime();
+            durationStr = formatDuration(elapsedMs);
+
+            // Show heartbeat freshness — how long since the last updated_at (heartbeat)
+            const updatedAt = run.updated_at ? new Date(run.updated_at) : null;
+            if (updatedAt) {
+              const heartbeatAgeMs = Date.now() - updatedAt.getTime();
+              lastHeartbeatStr = formatDuration(heartbeatAgeMs) + ' مضت';
+            }
+          } else {
+            // Completed/failed/stuck: show actual duration
+            const endTime = run.completed_at ? new Date(run.completed_at)
+              : run.failed_at ? new Date(run.failed_at)
+              : run.updated_at ? new Date(run.updated_at)
+              : null;
+            if (endTime) {
+              durationStr = formatDuration(endTime.getTime() - startedAt.getTime());
+            }
+          }
+        }
+
+        const statusEmoji = run.status === 'completed' ? '✅'
+          : run.status === 'failed' ? '❌'
+          : run.status === 'stuck' ? '⚠️'
+          : '⏳';
 
         const lines: string[] = [
           `${statusEmoji} <b>حالة آخر تشغيل</b>`,
@@ -111,8 +158,30 @@ async function handleMessage(chatId: string, userId: string, username: string, t
           `📊 الحالة: <b>${htmlEscape(run.status || '—')}</b>`,
           `🔄 الخطوة: ${htmlEscape(run.current_step || '—')}`,
           `⏱ المدة: ${durationStr}`,
-          `👤 الحساب: ${htmlEscape(run.account_handle || '—')}`,
         ];
+
+        // Show heartbeat freshness for running runs
+        if (isRunning && lastHeartbeatStr !== '—') {
+          lines.push(`💓 آخر نبضة: ${lastHeartbeatStr}`);
+        }
+
+        lines.push(`👤 الحساب: ${htmlEscape(run.account_handle || '—')}`);
+
+        // Stuck warning
+        if (run.status === 'stuck') {
+          lines.push('');
+          lines.push('⚠️ <b>التشغيل علِق — غالباً بسبب انتهاء وقت Vercel Serverless</b>');
+          lines.push('الحل: اضغط 🔄 إعادة تشغيل أو قلّل عدد الحسابات.');
+        }
+
+        // Running for too long warning
+        if (isRunning && startedAt) {
+          const elapsedMin = (Date.now() - startedAt.getTime()) / 60000;
+          if (elapsedMin > 5) {
+            lines.push('');
+            lines.push(`⚠️ التشغيل جارٍ منذ ${Math.round(elapsedMin)} دقيقة — قد يعلِق قريباً`);
+          }
+        }
 
         // Decision info
         const dp = run.decision_payload || {};
@@ -128,9 +197,45 @@ async function handleMessage(chatId: string, userId: string, username: string, t
         if (run.completed_at) lines.push(`✅ اكتمل: ${new Date(run.completed_at).toISOString().slice(0, 19)}`);
         if (run.failed_at) lines.push(`❌ فشل: ${new Date(run.failed_at).toISOString().slice(0, 19)}`);
 
+        // Stuck runs marked just now
+        if (stuckMarked > 0) {
+          lines.push('');
+          lines.push(`🔄 تم تعليم ${stuckMarked} تشغيل علِيق تلقائيًا`);
+        }
+
         await sendReply(chatId, lines.join('\n'));
       } catch (err: any) {
         await sendReply(chatId, `❌ فشل جلب الحالة: ${htmlEscape(err.message || 'unknown')}`);
+      }
+      return;
+    }
+
+    // ═══ 🔄 إعادة تشغيل — retry a stuck/failed pipeline run ═══
+    if (text === '🔄 إعادة تشغيل' || text === 'إعادة تشغيل') {
+      // Mark any stuck runs first
+      await markStuckPipelineRuns(10);
+
+      await sendReply(chatId, '⏳ بدأ التشغيل الموحّد من جديد...');
+
+      try {
+        const result = await runDailyPipeline({
+          source: 'telegram-retry',
+          notifyTelegram: true
+        });
+
+        if (result.pipeline_run_id) {
+          const shortId = result.pipeline_run_id.slice(0, 8);
+          await sendReply(chatId, `🆔 Run ID: ${shortId}`);
+        }
+
+        if (!result.ok) {
+          await sendReply(chatId, `❌ فشل التشغيل: ${htmlEscape(result.error || 'unknown error')}`);
+          return;
+        }
+
+        await sendReply(chatId, `✅ انتهى التشغيل الموحّد.\nالنسخة: ${htmlEscape(result.version || 'unknown')}\nمختار: ${result.decision.selected}\nمؤجل: ${result.decision.held}\nبوابة النشر: ${result.publishGate.accepted} صالح / ${result.publishGate.rejected} مرفوض`);
+      } catch (pipelineErr: any) {
+        await sendReply(chatId, `❌ فشل التشغيل: ${htmlEscape(pipelineErr.message || 'unknown error')}`);
       }
       return;
     }
@@ -222,11 +327,25 @@ async function handleMessage(chatId: string, userId: string, username: string, t
       return;
     }
 
-    await sendReply(chatId, 'استخدم الأزرار. للتشغيل: 🧠 تشغيل كامل. للحالة: 🧾 حالة التشغيل. بعد النشر: نشرت 1 الرابط');
+    await sendReply(chatId, 'استخدم الأزرار. للتشغيل: 🧠 تشغيل كامل. للحالة: 🧾 حالة التشغيل. لإعادة: 🔄 إعادة تشغيل. بعد النشر: نشرت 1 الرابط');
   } catch (err: any) {
     console.error('[telegram unified] error:', err.message);
     await sendReply(chatId, `❌ خطأ: ${htmlEscape(err.message || 'unknown error')}`);
   }
+}
+
+// ═══ Helpers ═══
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainSeconds = seconds % 60;
+  if (minutes < 60) return `${minutes}m ${remainSeconds}s`;
+  const hours = Math.floor(minutes / 60);
+  const remainMinutes = minutes % 60;
+  return `${hours}h ${remainMinutes}m`;
 }
 
 function parsePublishedCommand(text: string): { recommendation_index: number | null; published_url: string | null } {

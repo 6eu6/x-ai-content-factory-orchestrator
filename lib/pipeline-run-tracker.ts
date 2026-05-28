@@ -250,3 +250,63 @@ export async function getLatestPipelineRuns(limit = 10): Promise<any[]> {
     return [];
   }
 }
+
+/**
+ * Mark pipeline runs that have been "running" for too long as "stuck".
+ * A run is considered stuck if status='running' and updated_at is older than staleMinutes.
+ * Returns the number of runs marked as stuck.
+ */
+export async function markStuckPipelineRuns(staleMinutes = 10): Promise<number> {
+  try {
+    const supabase = supabaseAdmin();
+    const cutoff = new Date(Date.now() - staleMinutes * 60 * 1000).toISOString();
+
+    // Find running runs with stale updated_at
+    const { data: stuckRuns, error: findError } = await supabase
+      .from('pipeline_runs')
+      .select('id, current_step')
+      .eq('status', 'running')
+      .lt('updated_at', cutoff);
+
+    if (findError || !stuckRuns?.length) return 0;
+
+    // Mark each as stuck
+    let marked = 0;
+    for (const run of stuckRuns) {
+      const { error: updateError } = await supabase
+        .from('pipeline_runs')
+        .update({
+          status: 'stuck',
+          error_message: `Pipeline stuck at step "${run.current_step || 'unknown'}" for >${staleMinutes}min — likely Vercel serverless timeout`,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', run.id);
+      if (!updateError) marked++;
+    }
+    return marked;
+  } catch (err: any) {
+    console.error('[pipeline-run-tracker] markStuckPipelineRuns exception:', err.message);
+    return 0;
+  }
+}
+
+/**
+ * Start a heartbeat that updates pipeline run's updated_at every intervalMs.
+ * Returns a stop function to clear the interval.
+ * This lets us detect if the serverless function is still alive.
+ */
+export function startPipelineHeartbeat(runId: string | null, intervalMs = 30000): () => void {
+  if (!runId) return () => {};
+  const timer = setInterval(async () => {
+    try {
+      const supabase = supabaseAdmin();
+      await supabase
+        .from('pipeline_runs')
+        .update({ updated_at: new Date().toISOString() })
+        .eq('id', runId);
+    } catch {
+      // heartbeat must never crash the pipeline
+    }
+  }, intervalMs);
+  return () => clearInterval(timer);
+}

@@ -23,7 +23,8 @@ import {
   updatePipelineRun,
   appendPipelineRunLog,
   completePipelineRun,
-  failPipelineRun
+  failPipelineRun,
+  startPipelineHeartbeat
 } from './pipeline-run-tracker';
 
 // ═══ Types ═══
@@ -128,6 +129,9 @@ export async function runDailyPipeline(options: DailyPipelineOptions = {}): Prom
     account_handle: username
   });
 
+  // Heartbeat: update updated_at every 30s so we can detect if Vercel killed the function
+  const stopHeartbeat = startPipelineHeartbeat(pipelineRunId, 30000);
+
   // Helper that combines update + append log
   async function trackStep(step: string, meta?: Record<string, any>) {
     await Promise.all([
@@ -168,6 +172,7 @@ export async function runDailyPipeline(options: DailyPipelineOptions = {}): Prom
       scanResult = await scanXAccounts(accountLimit, tweetsPerAccount, lightMode ? { lightMode: true } : undefined);
     } catch (scanErr: any) {
       endStep('scan_failed', t);
+      stopHeartbeat();
       await failPipelineRun(pipelineRunId, scanErr, 'scan_start');
       // Notify Telegram about scan failure
       if (notifyTelegram) {
@@ -296,6 +301,7 @@ export async function runDailyPipeline(options: DailyPipelineOptions = {}): Prom
     await trackStep('telegram_delivery_done', { delivered: notifyTelegram });
 
     // ═══ 9. Mark pipeline as completed ═══
+    stopHeartbeat();
     await completePipelineRun(pipelineRunId, {
       scan_payload: {
         account_limit: accountLimit,
@@ -361,6 +367,7 @@ export async function runDailyPipeline(options: DailyPipelineOptions = {}): Prom
     };
   } catch (pipelineErr: any) {
     // ═══ Unhandled pipeline failure ═══
+    stopHeartbeat();
     const failedAtStep = stepTimings.length > 0 ? stepTimings[stepTimings.length - 1].step : 'unknown';
     await failPipelineRun(pipelineRunId, pipelineErr, failedAtStep);
 

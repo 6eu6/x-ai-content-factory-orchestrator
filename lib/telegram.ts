@@ -4,8 +4,9 @@ import { fetchWithRetry } from './retry';
 export const MAIN_KEYBOARD = {
   keyboard: [
     [{ text: '🧠 تشغيل كامل' }, { text: '🧾 حالة التشغيل' }],
-    [{ text: '🧩 محتويات العقل' }, { text: '➕ إضافة حساب' }],
-    [{ text: '📋 قائمة الحسابات' }, { text: '✅ سجل منشور' }]
+    [{ text: '🔄 إعادة تشغيل' }, { text: '➕ إضافة حساب' }],
+    [{ text: '📋 قائمة الحسابات' }, { text: '✅ سجل منشور' }],
+    [{ text: '🧩 محتويات العقل' }]
   ],
   resize_keyboard: true,
   one_time_keyboard: false

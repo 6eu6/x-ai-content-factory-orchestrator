@@ -4,6 +4,7 @@ import { decideTelegramOpportunities, stageFromFollowerCount } from '../../../li
 import { supabaseAdmin } from '../../../lib/supabase';
 import { enrichOpportunitiesWithRulePerformance } from '../../../lib/enrich-opportunities-with-rule-performance';
 import { filterPublishableOpportunities } from '../../../lib/content-policy';
+import { markStuckPipelineRuns } from '../../../lib/pipeline-run-tracker';
 import type { ContentOpportunity } from '../../../lib/content-engine-v3';
 
 // ═══ Error sanitization — never leak secrets ═══
@@ -69,6 +70,9 @@ export async function GET(req: Request) {
     const source = url.searchParams.get('source') || 'manual';
     const notify = url.searchParams.get('notify') === '1';
     const username = optionalEnv('X_USERNAME', '30piq');
+
+    // ═══ Housekeeping: mark stuck pipeline runs ═══
+    try { await markStuckPipelineRuns(10); } catch {}
 
     // ═══ Phase 6.1: Lighter limits for cron ═══
     const accountLimit = envNumber('CRON_SCAN_ACCOUNT_LIMIT', 2, 1, 15);
