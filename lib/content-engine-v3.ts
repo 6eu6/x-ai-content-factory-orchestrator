@@ -1909,6 +1909,15 @@ Write ONLY the content. No explanations or notes.`
 // ═══════════════════════════════════════════════════════════════
 
 /**
+ * Legitimate reasons an account scan may return zero tweets without being an error.
+ * These are NOT failures — the account simply had no scannable content.
+ */
+export type AccountScanEmptyReason =
+  | 'empty_timeline'       // Account exists but has no tweets
+  | 'protected_account'    // Account is private/protected
+  | 'no_recent_tweets';    // Account has tweets but none within the API window
+
+/**
  * Result of scanning a single account for the pipeline worker.
  * Contains all analyzed data needed for the merge step.
  */
@@ -1924,7 +1933,29 @@ export type SingleAccountScanResult = {
     media_patterns: number;
   };
   debug_log: string[];
+  /**
+   * Set when the scan completed legitimately but found no tweets.
+   * If set, tweets_analyzed will be 0 and analyzed_data will be [].
+   * This is NOT an error — downstream steps should skip this account gracefully.
+   */
+  empty_reason?: AccountScanEmptyReason;
 };
+
+/**
+ * Error thrown by scanSingleAccountForPipeline when the scan fails
+ * due to API/network/provider errors (not legitimate empty results).
+ */
+export class AccountScanError extends Error {
+  public readonly accountHandle: string;
+  public readonly isTransient: boolean;
+
+  constructor(accountHandle: string, message: string, isTransient = true) {
+    super(`Account scan failed for @${accountHandle}: ${message}`);
+    this.name = 'AccountScanError';
+    this.accountHandle = accountHandle;
+    this.isTransient = isTransient;
+  }
+}
 
 /**
  * Scan a single X account with FULL content-engine-v3 quality.
@@ -1957,10 +1988,61 @@ export async function scanSingleAccountForPipeline(
 
   console.log(`[scanSingleAccountForPipeline] Scanning @${accountHandle}...`);
 
+  // ═══ Fetch timeline — API/network errors MUST propagate, not get swallowed ═══
+  let tweets: any[];
   try {
-    const tweets = await getXUserTimeline(accountHandle, tweetsPerAccount, true);
-    debugLog.push(`[scan] @${accountHandle}: got ${tweets.length} tweets`);
+    tweets = await getXUserTimeline(accountHandle, tweetsPerAccount, true);
+  } catch (apiErr: any) {
+    // Distinguish protected/suspended accounts from transient API failures
+    const msg = (apiErr.message || '').toLowerCase();
+    if (msg.includes('protected') || msg.includes('private') || msg.includes('suspended') || msg.includes('not found') || msg.includes('does not exist')) {
+      // Legitimate unavailability — return success with empty_reason
+      debugLog.push(`[scan] @${accountHandle}: account unavailable (${msg.slice(0, 100)})`);
+      return {
+        account_handle: accountHandle,
+        tweets_analyzed: 0,
+        viral_found: 0,
+        analyzed_data: [],
+        media: [],
+        brain_updates: { algorithm_rules: 0, style_patterns: 0, media_patterns: 0 },
+        debug_log: debugLog,
+        empty_reason: msg.includes('protected') || msg.includes('private') ? 'protected_account' as AccountScanEmptyReason : 'no_recent_tweets' as AccountScanEmptyReason
+      };
+    }
+    // Real API/network/provider error — throw so the task fails
+    console.error(`[scanSingleAccountForPipeline] API error for @${accountHandle}:`, apiErr.message);
+    throw new AccountScanError(accountHandle, apiErr.message, true);
+  }
 
+  // Legitimate empty timeline — account has no tweets
+  if (!tweets || tweets.length === 0) {
+    debugLog.push(`[scan] @${accountHandle}: empty timeline (0 tweets)`);
+    // Still try to update account state before returning
+    try {
+      const snapshot = await getXUserByUsername(accountHandle);
+      await supabase.from('accounts').update({
+        notes: `Followers: ${snapshot.followers_count}, Scanned: ${new Date().toISOString()} (empty timeline)`,
+        last_checked: new Date().toISOString(),
+        followers: snapshot.followers_count || null
+      }).eq('handle', accountHandle);
+    } catch (updErr: any) {
+      debugLog.push(`[scan] update account error (empty timeline): ${updErr.message}`);
+    }
+    return {
+      account_handle: accountHandle,
+      tweets_analyzed: 0,
+      viral_found: 0,
+      analyzed_data: [],
+      media: [],
+      brain_updates: { algorithm_rules: 0, style_patterns: 0, media_patterns: 0 },
+      debug_log: debugLog,
+      empty_reason: 'empty_timeline'
+    };
+  }
+
+  debugLog.push(`[scan] @${accountHandle}: got ${tweets.length} tweets`);
+
+  try {
     for (const tweet of tweets) {
       totalAnalyzed++;
       const user = { username: accountHandle, followers_count: 0, public_metrics: { followers_count: 0 } };
@@ -2162,8 +2244,20 @@ JSON format: {"viral_reason":"...","style_pattern":"...","media_impact":"...","t
     }
 
   } catch (e: any) {
+    // ═══ Non-recoverable error during tweet processing ═══
+    // If we got tweets but couldn't process ANY of them, that's a real failure.
+    // Do NOT swallow — throw so the pipeline task fails properly.
     debugLog.push(`[scan] FAILED @${accountHandle}: ${e.message}`);
     console.error(`[scanSingleAccountForPipeline] Failed to scan @${accountHandle}:`, e.message);
+
+    if (totalAnalyzed === 0) {
+      // Zero tweets processed despite having tweets available = scan failure
+      throw new AccountScanError(accountHandle, `Tweet processing failed: ${e.message}`, true);
+    }
+
+    // If some tweets were processed before the error, return partial result
+    // This is acceptable — the merge step can still work with partial data
+    console.warn(`[scanSingleAccountForPipeline] Partial scan for @${accountHandle}: ${totalAnalyzed} tweets processed before error`);
   }
 
   return {

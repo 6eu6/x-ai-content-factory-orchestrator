@@ -42,7 +42,9 @@ import {
 import {
   scanSingleAccountForPipeline,
   mergeAndDiscoverOpportunities,
-  type SingleAccountScanResult
+  AccountScanError,
+  type SingleAccountScanResult,
+  type AccountScanEmptyReason
 } from './content-engine-v3';
 
 // ═══ Types ═══
@@ -237,23 +239,36 @@ async function processScanAccount(task: PipelineTaskRow): Promise<TaskResult> {
     }
 
     // Use the REAL content-engine-v3 per-account function — same quality as scanXAccounts
+    // AccountScanError is thrown for API/network/provider failures → task fails
+    // empty_reason is set for legitimate empty results → task succeeds with metadata
     const scanResult = await scanSingleAccountForPipeline(handle, tweetsPerAccount);
 
-    // Store the full scan result as JSONB for the merge step to pick up
-    return {
-      ok: true,
-      result: {
-        account_handle: scanResult.account_handle,
-        tweets_analyzed: scanResult.tweets_analyzed,
-        viral_found: scanResult.viral_found,
-        brain_updates: scanResult.brain_updates,
-        // Store the full analyzed_data for merge step — this is critical
-        _analyzed_data: scanResult.analyzed_data,
-        _media: scanResult.media,
-        _debug_log: scanResult.debug_log
-      }
+    // Build the result, including empty_reason if present
+    const result: Record<string, any> = {
+      account_handle: scanResult.account_handle,
+      tweets_analyzed: scanResult.tweets_analyzed,
+      viral_found: scanResult.viral_found,
+      brain_updates: scanResult.brain_updates,
+      // Store the full analyzed_data for merge step — this is critical
+      _analyzed_data: scanResult.analyzed_data,
+      _media: scanResult.media,
+      _debug_log: scanResult.debug_log
     };
+
+    // If the account had a legitimate empty result, include the reason
+    // This is NOT a failure — the task succeeds, but downstream knows why it's empty
+    if (scanResult.empty_reason) {
+      result.empty_reason = scanResult.empty_reason;
+    }
+
+    return { ok: true, result };
   } catch (err: any) {
+    // AccountScanError = API/network/provider failure → mark task as failed
+    // This ensures completed_with_warnings is triggered in finalizeRunIfReady
+    if (err instanceof AccountScanError) {
+      console.error(`[pipeline-worker] scan_account failed for @${err.accountHandle}: ${err.message}`);
+      return { ok: false, result: { account_handle: err.accountHandle, is_transient: err.isTransient }, error: err.message };
+    }
     return { ok: false, result: {}, error: err.message };
   }
 }
@@ -283,8 +298,13 @@ async function processMergeScanResults(task: PipelineTaskRow): Promise<TaskResul
 
     // Reconstruct SingleAccountScanResult[] from stored task results
     const accountScanResults: SingleAccountScanResult[] = [];
+    const emptyAccounts: { handle: string; reason: AccountScanEmptyReason }[] = [];
     for (const scanTask of scanTasks) {
       const r = scanTask.result || {};
+      const emptyReason = r.empty_reason as AccountScanEmptyReason | undefined;
+      if (emptyReason) {
+        emptyAccounts.push({ handle: r.account_handle || scanTask.account_handle || '', reason: emptyReason });
+      }
       accountScanResults.push({
         account_handle: r.account_handle || scanTask.account_handle || '',
         tweets_analyzed: r.tweets_analyzed || 0,
@@ -292,7 +312,9 @@ async function processMergeScanResults(task: PipelineTaskRow): Promise<TaskResul
         analyzed_data: r._analyzed_data || [],
         media: r._media || [],
         brain_updates: r.brain_updates || { algorithm_rules: 0, style_patterns: 0, media_patterns: 0 },
-        debug_log: r._debug_log || []
+        debug_log: r._debug_log || [],
+        // Preserve empty_reason so mergeAndDiscoverOpportunities can skip empty accounts if needed
+        empty_reason: emptyReason
       });
     }
 
@@ -300,20 +322,24 @@ async function processMergeScanResults(task: PipelineTaskRow): Promise<TaskResul
     // This produces real ContentOpportunity objects with crafted_text, shield_passed, etc.
     const mergeResult = await mergeAndDiscoverOpportunities(accountScanResults);
 
-    return {
-      ok: true,
-      result: {
-        accounts_scanned: mergeResult.accounts_scanned,
-        tweets_analyzed: mergeResult.tweets_analyzed,
-        viral_found: mergeResult.viral_found,
-        raw_opportunities: mergeResult.raw_opportunities,
-        brain_updates: mergeResult.brain_updates,
-        media_downloaded: mergeResult.media_downloaded,
-        // Store the FULL opportunities for subsequent steps
-        _opportunities: mergeResult.opportunities,
-        _debug_log: mergeResult.debug_log
-      }
+    const result: Record<string, any> = {
+      accounts_scanned: mergeResult.accounts_scanned,
+      tweets_analyzed: mergeResult.tweets_analyzed,
+      viral_found: mergeResult.viral_found,
+      raw_opportunities: mergeResult.raw_opportunities,
+      brain_updates: mergeResult.brain_updates,
+      media_downloaded: mergeResult.media_downloaded,
+      // Store the FULL opportunities for subsequent steps
+      _opportunities: mergeResult.opportunities,
+      _debug_log: mergeResult.debug_log
     };
+
+    // Include info about legitimately empty accounts for downstream visibility
+    if (emptyAccounts.length > 0) {
+      result.empty_accounts = emptyAccounts;
+    }
+
+    return { ok: true, result };
   } catch (err: any) {
     return { ok: false, result: {}, error: err.message };
   }

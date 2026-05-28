@@ -1080,12 +1080,23 @@ export async function finalizeRunIfReady(runId: string): Promise<void> {
       .eq('id', runId);
 
     // Also update the pipeline run using the tracker for consistency
-    if (runStatus === 'completed') {
+    if (runStatus === 'completed' || runStatus === 'completed_with_warnings') {
       await completePipelineRun(runId, {
         scan_payload: resultPayload.merge_scan_results || resultPayload.load_account_state,
         decision_payload: decisionPayload,
         telegram_payload: resultPayload.telegram_delivery ? { delivered: true } : undefined
       });
+      // For completed_with_warnings, override the status set by completePipelineRun
+      if (runStatus === 'completed_with_warnings') {
+        await supabase
+          .from('pipeline_runs')
+          .update({
+            status: 'completed_with_warnings',
+            current_step: 'completed_with_warnings',
+            error_message: `${failedScanTasks.length} scan_account task(s) failed: ${failedScanTasks.map((t: any) => t.account_handle || '?').join(', ')}`
+          })
+          .eq('id', runId);
+      }
     } else if (runStatus === 'failed') {
       const failedTask = tasks.find((t: any) => t.status === 'failed');
       await failPipelineRun(runId, new Error(failedTask ? (failedTask as any).error_message : 'Tasks failed'), failedTask ? (failedTask as any).task_type : undefined);
