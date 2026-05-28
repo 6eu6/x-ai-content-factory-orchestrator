@@ -2,8 +2,10 @@ import { runBackground } from '../../../../lib/background';
 import { optionalEnv } from '../../../../lib/env';
 import { supabaseAdmin } from '../../../../lib/supabase';
 import { assertTelegramChat, extractHandles, extractTweetUrl, htmlEscape, MAIN_KEYBOARD, sendTelegramMessage } from '../../../../lib/telegram';
+import { runDailyPipeline } from '../../../../lib/daily-runner';
+import { logPublishedDecision } from '../../../../lib/published-decision-logger';
 
-const VERSION = 'telegram-webhook-v4-unified-gated';
+const VERSION = 'telegram-webhook-v5-direct-pipeline';
 
 export async function POST(req: Request) {
   try {
@@ -52,34 +54,48 @@ async function handleMessage(chatId: string, userId: string, username: string, t
       return;
     }
 
+    // ═══ 🧠 تشغيل كامل — run shared pipeline directly (NO HTTP self-fetch) ═══
     if (text === '🧠 تشغيل كامل') {
-      await sendReply(chatId, '⏳ جاري تشغيل المسار الموحّد: crawl → English gate → decision engine → Telegram.');
-      const result = await callInternalJson('/api/daily-run?source=telegram-unified');
-      if (!result.ok) {
-        await sendReply(chatId, `❌ فشل التشغيل: ${htmlEscape(result.error || 'unknown error')}`);
-        return;
+      // Immediate status so the user knows the run started
+      await sendReply(chatId, '⏳ بدأ التشغيل الموحّد...');
+
+      try {
+        const result = await runDailyPipeline({
+          source: 'telegram-unified',
+          notifyTelegram: true   // pipeline will deliver recommendations to Telegram itself
+        });
+
+        if (!result.ok) {
+          await sendReply(chatId, `❌ فشل التشغيل: ${htmlEscape(result.error || 'unknown error')}`);
+          return;
+        }
+
+        // Summary confirmation (recommendations were already sent by the pipeline)
+        await sendReply(chatId, `✅ انتهى التشغيل الموحّد.\nالنسخة: ${htmlEscape(result.version || 'unknown')}\nمختار: ${result.decision.selected}\nمؤجل: ${result.decision.held}\nبوابة النشر: ${result.publishGate.accepted} صالح / ${result.publishGate.rejected} مرفوض`);
+      } catch (pipelineErr: any) {
+        await sendReply(chatId, `❌ فشل التشغيل: ${htmlEscape(pipelineErr.message || 'unknown error')}`);
       }
-      await sendReply(chatId, `✅ انتهى التشغيل الموحّد.\nالنسخة: ${htmlEscape(result.version || 'unknown')}\nمختار: ${result.decision?.selected ?? 0}\nمؤجل: ${result.decision?.held ?? 0}\nبوابة النشر: ${result.decision?.publish_gate?.accepted ?? 0} صالح / ${result.decision?.publish_gate?.rejected ?? 0} مرفوض`);
       return;
     }
 
+    // ═══ نشرت — log published decision directly (NO HTTP self-fetch) ═══
     if (/^نشرت\s+/i.test(text)) {
       const parsed = parsePublishedCommand(text);
       if (!parsed.published_url) {
         await sendReply(chatId, '❌ الصيغة الصحيحة:\nنشرت 1 ثم رابط منشور X');
         return;
       }
-      const result = await callInternalJson('/api/log-published-decision', {
-        method: 'POST',
-        body: {
-          published_url: parsed.published_url,
-          recommendation_index: parsed.recommendation_index
-        }
+
+      const result = await logPublishedDecision({
+        published_url: parsed.published_url,
+        recommendation_index: parsed.recommendation_index
       });
+
       if (!result.ok) {
         await sendReply(chatId, `❌ فشل تسجيل المنشور: ${htmlEscape(result.error || 'unknown error')}`);
         return;
       }
+
       await sendReply(chatId, [
         '✅ <b>تم تسجيل المنشور</b>',
         '━━━━━━━━━━━━━━━━━━━━',
@@ -162,19 +178,6 @@ function parsePublishedCommand(text: string): { recommendation_index: number | n
   const recommendationIndex = indexed ? Number(indexed[1]) : null;
   const urlPart = indexed ? indexed[2] : after;
   return { recommendation_index: recommendationIndex, published_url: extractTweetUrl(urlPart) };
-}
-
-async function callInternalJson(path: string, init?: { method?: string; body?: any }) {
-  const secret = optionalEnv('ORCHESTRATOR_SECRET');
-  if (!secret) return { ok: false, error: 'Missing ORCHESTRATOR_SECRET' };
-  const res = await fetch(`${publicBaseUrl()}${path}`, {
-    method: init?.method || 'GET',
-    headers: { 'content-type': 'application/json', 'x-orchestrator-secret': secret },
-    body: init?.body ? JSON.stringify(init.body) : undefined
-  });
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok) return { ok: false, error: json.error || `HTTP ${res.status}` };
-  return json;
 }
 
 function publicBaseUrl(): string {
