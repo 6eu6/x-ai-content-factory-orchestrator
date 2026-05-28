@@ -1,24 +1,10 @@
 import { runBackground } from '../../../../lib/background';
 import { optionalEnv } from '../../../../lib/env';
 import { supabaseAdmin } from '../../../../lib/supabase';
-import { assertTelegramChat, extractHandle, extractHandles, extractTweetUrl, htmlEscape, MAIN_KEYBOARD, sendTelegramMessage, shortText } from '../../../../lib/telegram';
-import { scanXAccounts, scanSingleTweet, generateProactiveContent } from '../../../../lib/content-engine-v3';
+import { assertTelegramChat, extractHandles, extractTweetUrl, htmlEscape, MAIN_KEYBOARD, sendTelegramMessage } from '../../../../lib/telegram';
 
-/**
- * Telegram Webhook Handler v3.1 — تحليل حقيقي بالذكاء الاصطناعي
- *
- * 3 أزرار فقط:
- * 🧠 تشغيل كامل — زحف + عقل + محتوى + تسليم
- * 📊 تقرير الأداء — فحص الحساب
- * 🔄 تصفير البيانات — مسح كل شيء ما عدا العقل
- *
- * + إضافة حساب / إضافة تغريدة
- *
- * القواعد:
- * - لا يرسل وسائط (صور/فيديو) لتلقرام — فقط يحللها ويتعلم منها
- * - التحليل العميق يستخدم AI حقيقي (مو hardcoded)
- * - التشخيص في server logs فقط (ما يعرض للمستخدم)
- */
+const VERSION = 'telegram-webhook-v4-unified-gated';
+
 export async function POST(req: Request) {
   try {
     const secret = optionalEnv('TELEGRAM_WEBHOOK_SECRET');
@@ -33,713 +19,171 @@ export async function POST(req: Request) {
     const username = String(message?.from?.username || '');
     const text = String(message?.text || '').trim();
 
-    if (!chatId || !text) return Response.json({ ok: true, ignored: true });
+    if (!chatId || !text) return Response.json({ ok: true, ignored: true, version: VERSION });
     assertTelegramChat(chatId);
 
-    // ═══ رد فوري — المعالجة في الخلفية ═══
     runBackground(handleMessage(chatId, userId, username, text));
-    return Response.json({ ok: true });
+    return Response.json({ ok: true, version: VERSION });
   } catch (err: any) {
-    return Response.json({ ok: false, error: err.message }, { status: 500 });
+    return Response.json({ ok: false, version: VERSION, error: err.message }, { status: 500 });
   }
 }
 
-export async function GET() { return Response.json({ ok: true, endpoint: 'telegram-webhook-v3.1' }); }
-
-// ═══ معالجة الرسائل ═══
+export async function GET() {
+  return Response.json({ ok: true, endpoint: VERSION });
+}
 
 async function handleMessage(chatId: string, userId: string, username: string, text: string) {
   try {
     const supabase = supabaseAdmin();
-
-    // حفظ حالة المحادثة
     await supabase.from('telegram_bot_state').upsert({
-      chat_id: chatId, user_id: userId, username,
-      last_message: text, updated_at: new Date().toISOString()
+      chat_id: chatId,
+      user_id: userId,
+      username,
+      last_message: text,
+      updated_at: new Date().toISOString()
     }, { onConflict: 'chat_id' });
 
     const { data: state } = await supabase.from('telegram_bot_state').select('*').eq('chat_id', chatId).maybeSingle();
 
-    // ═══ الأوامر الأساسية ═══
     if (text === '/start' || text === 'القائمة' || text === 'Menu') {
       await clearFlow(supabase, chatId);
-      await sendReply(chatId, 'جاهز. اختر من الأزرار:');
+      await sendReply(chatId, 'جاهز. الواجهة عربية، لكن محتوى X والتوصيات English-only. استخدم زر 🧠 تشغيل كامل.');
       return;
     }
 
-    // ═══ إضافة حساب ═══
+    if (text === '🧠 تشغيل كامل') {
+      await sendReply(chatId, '⏳ جاري تشغيل المسار الموحّد: crawl → English gate → decision engine → Telegram.');
+      const result = await callInternalJson('/api/daily-run?source=telegram-unified');
+      if (!result.ok) {
+        await sendReply(chatId, `❌ فشل التشغيل: ${htmlEscape(result.error || 'unknown error')}`);
+        return;
+      }
+      await sendReply(chatId, `✅ انتهى التشغيل الموحّد.\nالنسخة: ${htmlEscape(result.version || 'unknown')}\nمختار: ${result.decision?.selected ?? 0}\nمؤجل: ${result.decision?.held ?? 0}\nبوابة النشر: ${result.decision?.publish_gate?.accepted ?? 0} صالح / ${result.decision?.publish_gate?.rejected ?? 0} مرفوض`);
+      return;
+    }
+
+    if (/^نشرت\s+/i.test(text)) {
+      const parsed = parsePublishedCommand(text);
+      if (!parsed.published_url) {
+        await sendReply(chatId, '❌ الصيغة الصحيحة:\nنشرت 1 ثم رابط منشور X');
+        return;
+      }
+      const result = await callInternalJson('/api/log-published-decision', {
+        method: 'POST',
+        body: {
+          published_url: parsed.published_url,
+          recommendation_index: parsed.recommendation_index
+        }
+      });
+      if (!result.ok) {
+        await sendReply(chatId, `❌ فشل تسجيل المنشور: ${htmlEscape(result.error || 'unknown error')}`);
+        return;
+      }
+      await sendReply(chatId, [
+        '✅ <b>تم تسجيل المنشور</b>',
+        '━━━━━━━━━━━━━━━━━━━━',
+        `🔗 ${htmlEscape(parsed.published_url)}`,
+        parsed.recommendation_index ? `📋 توصية رقم: ${parsed.recommendation_index}` : '',
+        result.recommendation_linked ? '🔗 مربوط بالتوصية: نعم' : '🔗 مربوط بآخر قرار: نعم',
+        result.content_type ? `📝 النوع: ${htmlEscape(result.content_type)}` : '',
+        result.decision_score !== undefined ? `نقاط: ${result.decision_score}` : '',
+        result.brain_rules_count !== undefined ? `🧠 قواعد: ${result.brain_rules_count}` : '',
+        '',
+        '<i>سيتم فحص الأداء لاحقًا.</i>'
+      ].filter(Boolean).join('\n'));
+      return;
+    }
+
     if (text === '➕ إضافة حساب') {
       await setFlow(supabase, chatId, 'awaiting_account');
-      await sendReply(chatId, 'أرسل يوزر X أو أكثر مفصولة بمسافة أو فاصلة.\nمثال: emollick @naval paulg\nأو: @emollick, @sama, elonmusk');
+      await sendReply(chatId, 'أرسل حسابات X للتعلم فقط. مثال:\nemollick naval sama');
       return;
     }
 
     if (state?.current_flow === 'awaiting_account') {
       await clearFlow(supabase, chatId);
-      const handles = extractHandles(text);
-      if (!handles.length) { await sendReply(chatId, 'أرسل يوزر صحيح مثل: emollick أو @emollick\nتقدر ترسل عدة يوزرات: naval emollick paulg'); return; }
-
-      const results: string[] = [];
-      const maxHandles = 10; // حد أقصى للحماية
-
-      for (const handle of handles.slice(0, maxHandles)) {
-        // حفظ في قاعدة البيانات — بدون active (العمود غير موجود)
+      const handles = extractHandles(text).slice(0, 10);
+      if (!handles.length) {
+        await sendReply(chatId, 'أرسل يوزر صحيح مثل: emollick أو @naval');
+        return;
+      }
+      for (const handle of handles) {
         try {
-          await supabase.from('accounts').upsert({ handle, tier: 2, notes: 'Added from Telegram' }, { onConflict: 'handle' });
+          await supabase.from('accounts').upsert({ handle, tier: 2, notes: 'Added from Telegram unified webhook' }, { onConflict: 'handle' });
         } catch {
           try { await supabase.from('accounts').upsert({ handle }, { onConflict: 'handle' }); } catch {}
         }
-
-        // جلب معلومات الحساب
-        let info = '';
-        try {
-          const { getXUserByUsername } = await import('../../../../lib/x');
-          const snapshot = await getXUserByUsername(handle);
-          if (snapshot) {
-            info = ` ✅ (${snapshot.followers_count ?? '?'} متابع, ${snapshot.tweet_count ?? '?'} تغريدة)`;
-            try {
-              await supabase.from('accounts').update({
-                notes: `Followers: ${snapshot.followers_count}, Added: ${new Date().toISOString()}`
-              }).eq('handle', handle);
-            } catch {}
-          }
-        } catch { info = ` ⚠️ (لم أجلب المعلومات)`; }
-
-        results.push(`• @${htmlEscape(handle)}${info}`);
       }
-
-      const skippedCount = handles.length > maxHandles ? handles.length - maxHandles : 0;
-      let msg = `<b>تمت إضافة ${results.length} حساب تعلم:</b>\n━━━━━━━━━━━━━━━━━━━━\n${results.join('\n')}`;
-      if (skippedCount > 0) msg += `\n\n⚠️ تم تجاهل ${skippedCount} يوزر (الحد الأقصى ${maxHandles})`;
-      msg += `\n\nشغّل 🧠 تشغيل كامل لبدء التحليل.`;
-      await sendReply(chatId, msg);
+      await sendReply(chatId, `✅ تمت إضافة ${handles.length} حساب تعلم:\n${handles.map(h => `• @${htmlEscape(h)}`).join('\n')}\n\nاضغط 🧠 تشغيل كامل لتشغيل المسار الموحّد.`);
       return;
     }
 
-    // ═══ قائمة الحسابات ═══
     if (text === '📋 قائمة الحسابات') {
-      try {
-        const { data: accounts, error } = await supabase
-          .from('accounts')
-          .select('handle, tier, notes, last_checked, followers, category')  // ← فقط الأعمدة الموجودة!
-          .order('tier', { ascending: true });
-
-        if (error || !accounts?.length) {
-          await sendReply(chatId, 'ℹ️ لا توجد حسابات مضافة حالياً.\nأضف حسابات عبر زر ➕ إضافة حساب.');
-          return;
-        }
-
-        const tierLabels: Record<number, string> = { 1: '⭐', 2: '✅', 3: '📌' };
-        const lines: string[] = [];
-        lines.push(`📋 <b>قائمة الحسابات (${accounts.length})</b>`);
-        lines.push('━━━━━━━━━━━━━━━━━━━━');
-
-        for (const a of accounts) {
-          const icon = tierLabels[a.tier] || '📌';
-          const notesInfo = a.notes ? ` | ${htmlEscape(a.notes.slice(0, 40))}` : '';
-          const lastScan = a.last_checked ? ` | فحص: ${a.last_checked.slice(0, 10)}` : '';
-          const followerInfo = a.followers ? ` | ${a.followers} متابع` : '';
-          const catInfo = a.category ? ` | ${htmlEscape(a.category.slice(0, 25))}` : '';
-          lines.push(`${icon} @${htmlEscape(a.handle)}${followerInfo}${catInfo}${notesInfo}${lastScan}`);
-        }
-
-        lines.push('━━━━━━━━━━━━━━━━━━━━');
-        lines.push(`⭐ = Tier 1 | ✅ = Tier 2 | 📌 = Tier 3`);
-        lines.push(`<i>شغّل 🧠 تشغيل كامل لزحف هذه الحسابات.</i>`);
-
-        await sendReply(chatId, lines.join('\n'));
-      } catch (e: any) {
-        await sendReply(chatId, `❌ فشل جلب الحسابات: ${htmlEscape(e.message || '')}`);
-      }
-      return;
-    }
-
-    // ═══ إضافة تغريدة ═══
-    if (text === '🔗 إضافة تغريدة') {
-      await setFlow(supabase, chatId, 'awaiting_tweet');
-      await sendReply(chatId, 'أرسل رابط تغريدة X مثل: https://x.com/user/status/123');
-      return;
-    }
-
-    if (state?.current_flow === 'awaiting_tweet') {
-      await clearFlow(supabase, chatId);
-      const tweetUrl = extractTweetUrl(text);
-      if (!tweetUrl) { await sendReply(chatId, 'أرسل رابط تغريدة X صحيح'); return; }
-
-      await sendReply(chatId, `⏳ جاري التحليل العميق بالذكاء الاصطناعي...`);
-
-      const result = await scanSingleTweet(tweetUrl);
-      if (!result.ok) { await sendReply(chatId, `❌ فشل التحليل: ${htmlEscape(result.error || '')}`); return; }
-
-      const a = result.analysis;
-      const m = result.media || [];
-      const deep = result.deepAnalysis;
-
-      // ═══ عرض التحليل — بدون إرسال وسائط، بدون تشخيص ═══
-      let msg = `✅ <b>تم التحليل العميق</b>\n`;
-      msg += `━━━━━━━━━━━━━━━━━━━━\n`;
-      msg += `المؤلف: @${htmlEscape(a.username || '')}\n`;
-      msg += `التفاعل: ${a.engagement_score ?? 0}\n`;
-      msg += `لكل 1K متابع: ${a.engagement_per_1k_followers ?? 0}\n`;
-      msg += `النوع: ${a.tweet_type || 'original'}\n`;
-      msg += `الوسائط: ${m.length > 0 ? m.map(x => x.type === 'photo' ? '📷' : x.type === 'video' ? '🎬' : '🎞️').join(' ') : 'لا يوجد'}\n`;
-      if (a.time_label) msg += `الوقت: ${htmlEscape(a.time_label)}\n`;
-      msg += `━━━━━━━━━━━━━━━━━━━━\n`;
-      msg += `<i>${htmlEscape(shortText(a.text || '', 200))}</i>\n`;
-      msg += `━━━━━━━━━━━━━━━━━━━━\n`;
-
-      // التحليل العميق الحقيقي من AI — بالانجليزي لأن المحتوى انجليزي
-      if (deep) {
-        msg += `\n🔥 <b>Why it went viral:</b>\n${htmlEscape(deep.viralReason.slice(0, 400))}\n`;
-        msg += `\n✍️ <b>Style pattern:</b>\n${htmlEscape(deep.stylePattern.slice(0, 250))}\n`;
-        msg += `\n🎬 <b>Media impact:</b>\n${htmlEscape(deep.mediaImpact.slice(0, 200))}\n`;
-        msg += `\n⏰ <b>Timing insight:</b>\n${htmlEscape(deep.timingInsight.slice(0, 200))}\n`;
-        msg += `\n📝 <b>Tweet type insight:</b>\n${htmlEscape(deep.tweetTypeInsight.slice(0, 200))}\n`;
-        msg += `\n📊 <b>Engagement quality:</b>\n${htmlEscape(deep.engagementQuality.slice(0, 200))}\n`;
-        msg += `\n🎯 <b>Transferable adaptation:</b>\n${htmlEscape(deep.adaptation.slice(0, 250))}\n`;
-      }
-
-      msg += `\n<i>✅ تم تخزين التحليل + أنماط الانتشار + الأسلوب + التوقيت + النوع في العقل.</i>`;
-
-      // لا نرسل أي وسائط (صور/فيديو) لتلقرام — فقط التحليل
-      await sendReply(chatId, msg);
-      return;
-    }
-
-    // ═══ اقتراح محتوى ═══
-    if (text === '✍️ اقتراح محتوى') {
-      await setFlow(supabase, chatId, 'awaiting_content_type');
-      await sendReply(chatId, 'اختر نوع المحتوى:\n\n1️⃣ تغريدة واحدة\n2️⃣ ثريد (3-5 تغريدات)\n3️⃣ مقال قصير\n\nأرسل الرقم أو الاسم.');
-      return;
-    }
-
-    if (state?.current_flow === 'awaiting_content_type') {
-      await clearFlow(supabase, chatId);
-      const typeMap: Record<string, 'tweet' | 'thread' | 'article'> = {
-        '1': 'tweet', '2': 'thread', '3': 'article',
-        'تغريدة': 'tweet', 'ثريد': 'thread', 'مقال': 'article',
-        'واحد': 'tweet', 'تغريدات': 'thread',
-      };
-      const contentType = typeMap[text.trim().toLowerCase()] || 'thread';
-
-      await sendReply(chatId, `⏳ جاري توليد ${contentType === 'tweet' ? 'تغريدة' : contentType === 'thread' ? 'ثريد' : 'مقال'} من العقل...`);
-
-      const result = await generateProactiveContent(contentType);
-      if (!result.ok) {
-        await sendReply(chatId, `❌ ${result.error}`);
+      const { data: accounts } = await supabase.from('accounts').select('handle, tier, last_checked').order('tier', { ascending: true }).limit(50);
+      if (!accounts?.length) {
+        await sendReply(chatId, 'ℹ️ لا توجد حسابات. استخدم ➕ إضافة حساب.');
         return;
       }
-
-      const lines: string[] = [];
-      const typeLabel = contentType === 'tweet' ? '📝 تغريدة' : contentType === 'thread' ? '🧵 ثريد' : '📄 مقال';
-      lines.push(`${typeLabel} <b>مقترح من العقل</b>`);
-      lines.push(`━━━━━━━━━━━━━━━━━━━━`);
-      lines.push(result.content!.split('---').map((t: string, i: number) => {
-        if (contentType === 'thread') return `${i + 1}/ ${t.trim()}`;
-        return t.trim();
-      }).join('\n\n'));
-      lines.push(`━━━━━━━━━━━━━━━━━━━━`);
-      lines.push(`🧠 مفاهيم مستخدمة: ${result.concepts_used} | أنماط: ${result.patterns_used}`);
-      lines.push(`<i>انسخ المحتوى وانشره يدوياً على X</i>`);
-
-      await sendReply(chatId, lines.join('\n'));
+      await sendReply(chatId, `📋 <b>قائمة الحسابات (${accounts.length})</b>\n━━━━━━━━━━━━━━━━━━━━\n${accounts.map((a: any) => `• @${htmlEscape(a.handle)} | tier ${a.tier || '-'}`).join('\n')}`);
       return;
     }
 
-    // ═══ تشغيل كامل ═══
-    if (text === '🧠 تشغيل كامل') {
-      await sendReply(chatId, '⏳ جاري الزحف والتحليل العميق... سأرسل النتائج عند الانتهاء.');
-
-      const scanResult = await scanXAccounts(5, 10);
-
-      // سجّل التشخيص في server logs
-      if (scanResult.debug_log?.length) {
-        console.log('[scanXAccounts] Debug log:', scanResult.debug_log.join('\n'));
-      }
-
-      // تسليم النتائج لتلقرام
-      await deliverScanResults(chatId, scanResult);
-      return;
-    }
-
-    // ═══ محتويات العقل ═══
     if (text === '🧩 محتويات العقل') {
-      await sendReply(chatId, '⏳ جاري استرجاع محتويات العقل...');
-      try {
-        const summary = await getBrainSummary(supabase);
-        const viewerUrl = `${optionalEnv('PUBLIC_BASE_URL') || optionalEnv('VERCEL_URL', 'https://x-ai-content-factory-orchestrator.vercel.app')}/api/brain-viewer`;
-        await sendReply(chatId, `${summary}\n\n🔗 <a href="${viewerUrl}">عرض تفصيلي في المتصفح</a>\n📊 <a href="${viewerUrl}?format=json">بيانات خام JSON</a>`);
-      } catch (e: any) {
-        await sendReply(chatId, `❌ فشل الاسترجاع: ${htmlEscape(e.message || '')}`);
-      }
+      await sendReply(chatId, `🧩 ملخص العقل في المتصفح:\n<a href="${publicBaseUrl()}/api/brain-viewer">عرض تفصيلي</a>`);
       return;
     }
 
-    // ═══ تقرير الأداء ═══
-    if (text === '📊 تقرير الأداء') {
-      await sendReply(chatId, '⏳ جاري فحص الحساب وتحليل الأداء...');
-
-      try {
-        const username = optionalEnv('X_USERNAME', '30piq');
-
-        // ═══ خطوة 1: جلب التغريدات ═══
-        let tweets: any[] = [];
-        try {
-          const { getXUserTimeline, scoreXTweet } = await import('../../../../lib/x');
-          tweets = await getXUserTimeline(username, 10, true);
-        } catch (fetchErr: any) {
-          await sendReply(chatId, `❌ فشل جلب التغريدات: ${htmlEscape(fetchErr.message || 'خطأ في الاتصال بـ X')}`);
-          return;
-        }
-
-        if (!tweets.length) {
-          await sendReply(chatId, 'ℹ️ لم يتم العثور على تغريدات في حسابك. انشر محتوى أول ثم أعد الفحص.');
-          return;
-        }
-
-        // ═══ خطوة 2: تحليل سريع بدون AI (مقاييس فقط) ═══
-        const { scoreXTweet } = await import('../../../../lib/x');
-        const analyses: any[] = [];
-
-        for (const tweet of tweets) {
-          const m = tweet.public_metrics || {};
-          const views = m.view_count || 0;
-          const likes = m.like_count || 0;
-          const replies = m.reply_count || 0;
-          const retweets = m.retweet_count || 0;
-          const quotes = m.quote_count || 0;
-          const bookmarks = m.bookmark_count || 0;
-
-          const engagementScore = scoreXTweet(tweet);
-          const viewAdjustedScore = views > 0 ? (engagementScore / views) * 1000 : 0;
-
-          let verdict = 'average';
-          if (viewAdjustedScore > 50 || (likes > 5 && bookmarks > 2)) verdict = 'high_performer';
-          if (viewAdjustedScore < 5 && views > 100) verdict = 'underperformer';
-
-          analyses.push({
-            text_preview: (tweet.text || '').slice(0, 200),
-            tweet_url: `https://x.com/${username}/status/${tweet.id}`,
-            performance_score: Math.round(viewAdjustedScore * 100) / 100,
-            verdict,
-            metrics: { views, likes, replies, retweets, quotes, bookmarks },
-            success_factors: [],
-            failure_factors: []
-          });
-        }
-
-        // ═══ خطوة 3: تحليل AI (محاولة — لو فشل نكمل بدونها) ═══
-        try {
-          const { callModel, parseModelJson } = await import('../../../../lib/model-router');
-          const analysisContext = analyses.map(a => ({
-            text: a.text_preview,
-            verdict: a.verdict,
-            score: a.performance_score,
-            metrics: a.metrics
-          }));
-
-          const aiResponse = await callModel('performance_analysis', [
-            {
-              role: 'system',
-              content: 'You are an X/Twitter growth analyst. Analyze tweet performance briefly. Output valid JSON array only.'
-            },
-            {
-              role: 'user',
-              content: `Analyze these tweets from @${username}. For each, give success/failure factors:\n${JSON.stringify(analysisContext, null, 2)}\n\nReturn JSON: [{"text_preview":"...","success_factors":["..."],"failure_factors":["..."]}]`
-            }
-          ]);
-
-          const parsed = parseModelJson(aiResponse);
-          if (Array.isArray(parsed)) {
-            for (let i = 0; i < analyses.length && i < parsed.length; i++) {
-              analyses[i].success_factors = parsed[i]?.success_factors || [];
-              analyses[i].failure_factors = parsed[i]?.failure_factors || [];
-            }
-          }
-        } catch (aiErr: any) {
-          console.log('[Performance Report] AI analysis failed, continuing without it:', aiErr.message);
-        }
-
-        // ═══ خطوة 4: عرض النتائج ═══
-        const winners = analyses.filter((a: any) => a.verdict === 'high_performer');
-        const losers = analyses.filter((a: any) => a.verdict === 'underperformer');
-        const avg = analyses.length > 0
-          ? (analyses.reduce((s: number, a: any) => s + a.performance_score, 0) / analyses.length).toFixed(2)
-          : '0';
-
-        const lines: string[] = [];
-        lines.push(`📊 <b>تقرير الأداء</b> — @${username}`);
-        lines.push('━━━━━━━━━━━━━━━━━━━━');
-        lines.push(`📝 تغريدات مُفحوصة: ${tweets.length}`);
-        lines.push(`✅ ناجحة: ${winners.length} | ⚠️ عادية: ${tweets.length - winners.length - losers.length} | ❌ ضعيفة: ${losers.length}`);
-        lines.push(`📈 متوسط الأداء: ${avg}`);
-        lines.push('━━━━━━━━━━━━━━━━━━━━');
-
-        if (winners.length > 0) {
-          lines.push('\n🏆 <b>التغريدات الناجحة:</b>');
-          for (const w of winners.slice(0, 3)) {
-            lines.push(`  📌 ${htmlEscape(shortText(w.text_preview, 80))}`);
-            if (w.success_factors?.length) lines.push(`     ✦ ${htmlEscape(w.success_factors[0].slice(0, 80))}`);
-            lines.push(`     نقاط: ${w.performance_score} | ❤️ ${w.metrics.likes} 🔁 ${w.metrics.retweets} 🔖 ${w.metrics.bookmarks}`);
-          }
-        }
-
-        if (losers.length > 0) {
-          lines.push('\n📉 <b>التغريدات الضعيفة:</b>');
-          for (const l of losers.slice(0, 3)) {
-            lines.push(`  📌 ${htmlEscape(shortText(l.text_preview, 80))}`);
-            if (l.failure_factors?.length) lines.push(`     ✦ ${htmlEscape(l.failure_factors[0].slice(0, 80))}`);
-            lines.push(`     نقاط: ${l.performance_score} | ❤️ ${l.metrics.likes} 🔁 ${l.metrics.retweets} 🔖 ${l.metrics.bookmarks}`);
-          }
-        }
-
-        lines.push('\n━━━━━━━━━━━━━━━━━━━━');
-        lines.push(`<i>تم التحليل. شغّل 🧠 تشغيل كامل لتعلم العقل من النتائج.</i>`);
-
-        await sendReply(chatId, lines.join('\n'));
-
-        // ═══ خطوة 5: تحديثات التعلم في الخلفية (بدون انتظار) ═══
-        try {
-          const { scanAccountPerformance } = await import('../../../../lib/performance-feedback');
-          // هذا يشغّل التحليل الكامل في الخلفية — لو فشل ما يأثر على التقرير المعروض
-          scanAccountPerformance(10, username).catch(() => {});
-        } catch {}
-
-      } catch (e: any) {
-        console.error('[Performance Report] Fatal error:', e.message);
-        await sendReply(chatId, `❌ فشل الفحص: ${htmlEscape(e.message || 'خطأ غير معروف')}`);
-      }
+    if (['📊 تقرير الأداء', '✍️ اقتراح محتوى', '🔗 إضافة تغريدة'].includes(text)) {
+      await sendReply(chatId, 'هذا الزر موقوف مؤقتًا في النسخة الموحدة حتى لا يختلط مع مسار النشر. استخدم 🧠 تشغيل كامل فقط.');
       return;
     }
 
-    // ═══ سجل منشور ═══
     if (text === '✅ سجل منشور') {
-      await setFlow(supabase, chatId, 'awaiting_published_url');
-      await sendReply(chatId, 'أرسل رابط المنشور على X:\nمثال: https://x.com/30piq/status/123\n\nأو اكتب:\nنشرت https://x.com/30piq/status/123');
+      await sendReply(chatId, 'اكتب مباشرة: نشرت 1 ثم رابط منشور X');
       return;
     }
 
-    // Handle "نشرت [number] URL" or "نشرت URL" pattern (no flow needed)
-    if (/^نشرت\s+/i.test(text)) {
-      const afterNashart = text.replace(/^نشرت\s+/i, '').trim();
-      // Check if there's a recommendation index: "نشرت 1 https://x.com/..."
-      const indexedMatch = afterNashart.match(/^(\d+)\s+(https?:\/\/\S+)/i);
-      let recommendationIndex: number | null = null;
-      let urlPart = afterNashart;
-
-      if (indexedMatch) {
-        recommendationIndex = Number(indexedMatch[1]);
-        urlPart = indexedMatch[2];
-      }
-
-      const publishedUrl = extractTweetUrl(urlPart);
-      if (!publishedUrl) {
-        await sendReply(chatId, '❌ لم أتعرف على رابط X. أرسل الرابط بعد كلمة "نشرت".\nمثال: نشرت 1 https://x.com/30piq/status/123\nأو: نشرت https://x.com/30piq/status/123');
-        return;
-      }
-      await handleLogPublished(chatId, publishedUrl, supabase, recommendationIndex);
-      return;
-    }
-
-    if (state?.current_flow === 'awaiting_published_url') {
-      await clearFlow(supabase, chatId);
-      const publishedUrl = extractTweetUrl(text);
-      if (!publishedUrl) {
-        await sendReply(chatId, '❌ أرسل رابط تغريدة X صحيح.\nمثال: https://x.com/30piq/status/123');
-        return;
-      }
-      await handleLogPublished(chatId, publishedUrl, supabase);
-      return;
-    }
-
-    // ═══ تصفير البيانات ═══
     if (text === '🔄 تصفير البيانات') {
-      await setFlow(supabase, chatId, 'awaiting_reset');
-      await sendReply(chatId, '⚠️ <b>تأكيد تصفير البيانات</b>\n\nيتم حذف:\n• المهام والمحتوى المولّد\n• سجلات التسليم والجلسات\n• نتائج البحث والاتجاهات\n\n<b>يُحافظ عليه (العقل):</b>\n✅ قواعد خوارزمية X\n✅ أنماط الأسلوب\n✅ الحسابات المُضافة\n✅ قواعد التعلم\n\nأرسل <b>نعم</b> للتأكيد.');
+      await sendReply(chatId, 'زر التصفير موقوف في النسخة الموحدة للحماية. أي تصفير يتم يدويًا فقط بعد مراجعة.');
       return;
     }
 
-    if (state?.current_flow === 'awaiting_reset') {
-      await clearFlow(supabase, chatId);
-      if (['نعم', 'اي', 'أي', 'اه', 'آه', 'yes', '١'].includes(text.trim().toLowerCase())) {
-        await resetOperationalData(supabase, chatId);
-      } else {
-        await sendReply(chatId, 'تم الإلغاء. لم يتم حذف شيء.');
-      }
-      return;
-    }
-
-    // ═══ أمر غير معروف ═══
-    await sendReply(chatId, 'استخدم الأزرار في لوحة التحكم.');
+    await sendReply(chatId, 'استخدم الأزرار. للتشغيل: 🧠 تشغيل كامل. بعد النشر: نشرت 1 الرابط');
   } catch (err: any) {
-    console.error('Telegram handler error:', err.message);
+    console.error('[telegram unified] error:', err.message);
+    await sendReply(chatId, `❌ خطأ: ${htmlEscape(err.message || 'unknown error')}`);
   }
 }
 
-// ═══ تسليم نتائج الزحف ═══
-
-async function deliverScanResults(chatId: string, result: any) {
-  const lines: string[] = [];
-
-  // 1. ملخص الزحف
-  lines.push(`🧠 <b>نتيجة التشغيل الكامل</b>`);
-  lines.push(`━━━━━━━━━━━━━━━━━━━━`);
-  lines.push(`📊 حسابات مزحوفة: ${result.accounts_scanned}`);
-  lines.push(`📝 تغريدات محللة: ${result.tweets_analyzed}`);
-  lines.push(`🔥 تغريدات فيروسية: ${result.viral_tweets_found}`);
-  lines.push(`🎬 وسائط مكتشفة: ${result.media_downloaded}`);
-  lines.push(`🧠 تحديثات العقل: ${result.brain_updates.algorithm_rules} قاعدة + ${result.brain_updates.style_patterns} نمط`);
-  lines.push(`━━━━━━━━━━━━━━━━━━━━`);
-
-  // لو كل شيء صفر — اعرض نصائح للتصحيح
-  if (result.tweets_analyzed === 0 && result.accounts_scanned === 0) {
-    lines.push('');
-    lines.push('⚠️ <b>لم يتم العثور على بيانات</b>');
-    lines.push('تأكد من:');
-    lines.push('1. إضافة حسابات عبر زر ➕ إضافة حساب');
-    lines.push('2. إضافة تغريدات عبر زر 🔗 إضافة تغريدة');
-    lines.push('3. التحقق من اتصال Supabase');
-
-    // أضف معلومات تشخيصية مختصرة لو متوفرة
-    const debugLog = result.debug_log || [];
-    if (debugLog.length > 0) {
-      const relevantErrors = debugLog.filter(l => l.includes('error') || l.includes('exception') || l.includes('FAILED'));
-      if (relevantErrors.length > 0) {
-        lines.push('');
-        lines.push('<b>🔧 أخطاء:</b>');
-        for (const err of relevantErrors.slice(0, 3)) {
-          lines.push(`• ${htmlEscape(err.slice(0, 100))}`);
-        }
-      }
-    }
-  }
-
-  const opps = result.opportunities || [];
-
-  if (!opps.length && result.tweets_analyzed > 0) {
-    lines.push('');
-    lines.push('ℹ️ لم تُكتشف فرص تفاعل حالياً.');
-    lines.push('أضف المزيد من الحسابات عبر زر "➕ إضافة حساب".');
-    await sendReply(chatId, lines.join('\n'));
-    return;
-  }
-
-  // 2. فرص التفاعل
-  if (opps.length) {
-    lines.push('');
-    lines.push(`<b>📋 فرص التفاعل (${opps.length})</b>`);
-    lines.push('━━━━━━━━━━━━━━━━━━━━');
-
-    for (let i = 0; i < Math.min(opps.length, 5); i++) {
-      const opp = opps[i];
-      const typeLabel = opp.type === 'quote' ? '📌 اقتباس' : opp.type === 'reply' ? '↩️ رد' : opp.type === 'thread' ? '🧵 ثريد' : '📰 مقال';
-      const shieldIcon = opp.shield_passed ? '✅' : '⚠️';
-      const recNum = i + 1;
-
-      lines.push(`\n<b>Rec #${recNum}</b> ${typeLabel} ${shieldIcon}`);
-      if (opp.source_tweet_url) lines.push(`🔗 ${opp.source_tweet_url}`);
-      lines.push(`<i>${htmlEscape(shortText(opp.crafted_text, 280))}</i>`);
-      if (opp.why) lines.push(`💡 ${opp.why}`);
-      if (opp.shield_issues?.length) lines.push(`⚠️ ${opp.shield_issues.join(', ')}`);
-    }
-
-    lines.push('');
-    lines.push('━━━━━━━━━━━━━━━━━━━━');
-    lines.push('<i>انسخ المحتوى وانشره يدوياً على X</i>');
-    lines.push(`<i>بعد النشر أرسل: نشرت 1 https://x.com/...</i>`);
-  }
-
-  await sendReply(chatId, lines.join('\n'));
+function parsePublishedCommand(text: string): { recommendation_index: number | null; published_url: string | null } {
+  const after = text.replace(/^نشرت\s+/i, '').trim();
+  const indexed = after.match(/^(\d+)\s+(https?:\/\/\S+)/i);
+  const recommendationIndex = indexed ? Number(indexed[1]) : null;
+  const urlPart = indexed ? indexed[2] : after;
+  return { recommendation_index: recommendationIndex, published_url: extractTweetUrl(urlPart) };
 }
 
-// ═══ ملخص محتويات العقل (قصير لتلقرام — التفاصيل في رابط المتصفح) ═══
-
-async function getBrainSummary(supabase: any): Promise<string> {
-  const lines: string[] = [];
-  lines.push('🧩 <b>ملخص العقل</b>');
-  lines.push('━━━━━━━━━━━━━━━━━━━━');
-
-  // إحصائيات سريعة
-  const { count: algoCount } = await supabase
-    .from('x_algorithm_learning_rules')
-    .select('*', { count: 'exact', head: true })
-    .eq('status', 'active');
-
-  const { count: styleCount } = await supabase
-    .from('viral_style_patterns')
-    .select('*', { count: 'exact', head: true })
-    .eq('status', 'active');
-
-  const { count: sysCount } = await supabase
-    .from('system_learning_rules')
-    .select('*', { count: 'exact', head: true })
-    .eq('status', 'active');
-
-  const { count: mcpCount } = await supabase
-    .from('mcp_opportunity_map')
-    .select('*', { count: 'exact', head: true })
-    .eq('status', 'active');
-
-  const { count: antiCount } = await supabase
-    .from('x_algorithm_learning_rules')
-    .select('*', { count: 'exact', head: true })
-    .eq('status', 'anti_pattern');
-
-  const totalAlgo = algoCount || 0;
-  const totalStyle = styleCount || 0;
-  const totalSys = sysCount || 0;
-  const totalMcp = mcpCount || 0;
-  const totalAnti = antiCount || 0;
-
-  lines.push(`📊 القواعد الخوارزمية: ${totalAlgo}`);
-  lines.push(`✍️ أنماط الأسلوب: ${totalStyle}`);
-  lines.push(`⚙️ قواعد النظام السببية: ${totalSys}`);
-  lines.push(`🛠️ فرص MCP: ${totalMcp}`);
-  lines.push(`🚫 أنماط مضادة: ${totalAnti}`);
-  lines.push(`━━━━━━━━━━━━━━━━━━━━`);
-
-  // أعلى 3 قواعد فقط
-  if (totalAlgo > 0) {
-    const { data: topRules } = await supabase
-      .from('x_algorithm_learning_rules')
-      .select('rule_type, rule, confidence_score')
-      .eq('status', 'active')
-      .order('confidence_score', { ascending: false })
-      .limit(3);
-
-    lines.push('\n🏆 <b>أعلى القواعد:</b>');
-    for (const r of (topRules || [])) {
-      const conf = Number(r.confidence_score || 0).toFixed(1);
-      lines.push(`  ${conf}⭐ ${htmlEscape(String(r.rule || '').slice(0, 80))}`);
-    }
-  }
-
-  // أعلى 3 أنماط
-  if (totalStyle > 0) {
-    const { data: topPatterns } = await supabase
-      .from('viral_style_patterns')
-      .select('pattern_name, confidence_score')
-      .eq('status', 'active')
-      .order('confidence_score', { ascending: false })
-      .limit(3);
-
-    lines.push('\n✍️ <b>أعلى الأنماط:</b>');
-    for (const p of (topPatterns || [])) {
-      const conf = Number(p.confidence_score || 0).toFixed(1);
-      lines.push(`  ${conf}⭐ ${htmlEscape(String(p.pattern_name || '').slice(0, 60))}`);
-    }
-  }
-
-  if (totalAlgo === 0 && totalStyle === 0) {
-    lines.push('');
-    lines.push('⚠️ <b>العقل فارغ!</b>');
-    lines.push('شغّل 🧠 تشغيل كامل أو أضف تغريدات لتعليم العقل.');
-  }
-
-  return lines.join('\n');
+async function callInternalJson(path: string, init?: { method?: string; body?: any }) {
+  const secret = optionalEnv('ORCHESTRATOR_SECRET');
+  if (!secret) return { ok: false, error: 'Missing ORCHESTRATOR_SECRET' };
+  const res = await fetch(`${publicBaseUrl()}${path}`, {
+    method: init?.method || 'GET',
+    headers: { 'content-type': 'application/json', 'x-orchestrator-secret': secret },
+    body: init?.body ? JSON.stringify(init.body) : undefined
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) return { ok: false, error: json.error || `HTTP ${res.status}` };
+  return json;
 }
 
-// ═══ تسجيل منشور ═══
-
-async function handleLogPublished(chatId: string, publishedUrl: string, supabase: any, recommendationIndex: number | null = null) {
-  try {
-    const username = optionalEnv('X_USERNAME', '30piq');
-
-    // Extract handle from URL
-    const handleMatch = publishedUrl.match(/(?:x|twitter)\.com\/([^\s/]+)/i);
-    const accountHandle = handleMatch ? handleMatch[1] : username;
-
-    // Find latest decision_run with selected_count > 0 within 72h
-    const seventyTwoHoursAgo = new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString();
-    let linked = false;
-    let decisionRunId: string | null = null;
-    let decisionScore: number | null = null;
-    let brainRulesUsed: any[] = [];
-    let contentType: string | null = null;
-    let sourceTweetUrl: string | null = null;
-    let runShortId: string | null = null;
-
-    try {
-      const { data: recentRuns } = await supabase
-        .from('decision_runs')
-        .select('id, selected_count, decision_score, brain_rules_used, selected_payload')
-        .gt('selected_count', 0)
-        .gte('created_at', seventyTwoHoursAgo)
-        .order('created_at', { ascending: false })
-        .limit(1);
-
-      if (recentRuns && recentRuns.length > 0) {
-        decisionRunId = recentRuns[0].id;
-        decisionScore = recentRuns[0].decision_score || null;
-        brainRulesUsed = Array.isArray(recentRuns[0].brain_rules_used) ? recentRuns[0].brain_rules_used : [];
-        runShortId = String(decisionRunId).slice(0, 8);
-        linked = true;
-
-        // If recommendation_index provided, extract specific recommendation data
-        if (recommendationIndex && recommendationIndex >= 1) {
-          const selectedPayload = Array.isArray(recentRuns[0].selected_payload) ? recentRuns[0].selected_payload : [];
-          const rec = selectedPayload[recommendationIndex - 1];
-          if (rec) {
-            contentType = rec.content_type || null;
-            sourceTweetUrl = rec.source_tweet_url || null;
-            if (rec.decision_score) decisionScore = rec.decision_score;
-            if (Array.isArray(rec.brain_rules_used) && rec.brain_rules_used.length > 0) {
-              brainRulesUsed = rec.brain_rules_used;
-            }
-          }
-        }
-      }
-    } catch {}
-
-    // Insert
-    const insertData: Record<string, any> = {
-      decision_run_id: decisionRunId,
-      account_handle: accountHandle,
-      published_url: publishedUrl,
-      status: 'published',
-      decision_score: decisionScore,
-      brain_rules_used: brainRulesUsed,
-      content_type: contentType,
-      source_tweet_url: sourceTweetUrl,
-      performance_checked_at: null,
-      performance_payload: {},
-      feedback_payload: {}
-    };
-
-    const { data: inserted, error } = await supabase
-      .from('published_decisions')
-      .insert(insertData)
-      .select('id')
-      .single();
-
-    if (error) {
-      if (error.message?.includes('unique') || error.message?.includes('duplicate')) {
-        await sendReply(chatId, '⚠️ هذا المنشور مسجل مسبقًا.');
-        return;
-      }
-      await sendReply(chatId, `❌ فشل التسجيل: ${htmlEscape(error.message)}`);
-      return;
-    }
-
-    let msg = `✅ <b>تم تسجيل المنشور</b>\n`;
-    msg += `━━━━━━━━━━━━━━━━━━━━\n`;
-    msg += `🔗 ${publishedUrl}\n`;
-    msg += `👤 @${htmlEscape(accountHandle)}\n`;
-    if (recommendationIndex) msg += `📋 توصية رقم: ${recommendationIndex}\n`;
-    if (contentType) msg += `📝 النوع: ${contentType}\n`;
-    msg += linked ? `🔗 مربوط بقرار: نعم` : `⚠️ لم يُربط بقرار`;
-    if (runShortId) msg += ` (${runShortId})`;
-    if (decisionScore !== null) msg += ` | نقاط: ${decisionScore}`;
-    if (brainRulesUsed.length > 0) msg += ` | 🧠 ${brainRulesUsed.length} قاعدة`;
-    msg += `\n\n<i>سيتم فحص الأداء لاحقًا.</i>`;
-
-    await sendReply(chatId, msg);
-  } catch (e: any) {
-    await sendReply(chatId, `❌ فشل التسجيل: ${htmlEscape(e.message || 'خطأ غير معروف')}`);
-  }
+function publicBaseUrl(): string {
+  const explicit = optionalEnv('PUBLIC_BASE_URL');
+  if (explicit) return explicit.replace(/\/$/, '');
+  const vercel = optionalEnv('VERCEL_URL');
+  if (vercel) return `https://${vercel.replace(/^https?:\/\//, '').replace(/\/$/, '')}`;
+  return 'https://x-ai-content-factory-orchestrator.vercel.app';
 }
-
-// ═══ مساعدات ═══
 
 async function sendReply(chatId: string, text: string) {
   await sendTelegramMessage(chatId, text, MAIN_KEYBOARD);
@@ -751,38 +195,4 @@ async function clearFlow(supabase: any, chatId: string) {
 
 async function setFlow(supabase: any, chatId: string, flow: string) {
   await supabase.from('telegram_bot_state').upsert({ chat_id: chatId, current_flow: flow, flow_payload: {}, updated_at: new Date().toISOString() }, { onConflict: 'chat_id' });
-}
-
-async function resetOperationalData(supabase: any, chatId: string) {
-  await sendTelegramMessage(chatId, '🔄 جاري التصفير...', MAIN_KEYBOARD);
-
-  const tablesToDelete = [
-    'action_queue', 'content_log', 'content_deliveries', 'session_logs',
-    'daily_checkins', 'content_opportunities', 'original_content_hypotheses',
-    'content_format_decisions', 'content_production_cards', 'learning_tweet_queue',
-    'learning_cycles', 'performance_scans', 'telegram_bot_state', 'account_state',
-    'viral_scan_runs', 'viral_tweet_analyses', 'raw_research_items', 'trends',
-    'creator_intel', 'discovered_items', 'repo_source_files', 'growth_learning_runs',
-    'requirement_status', 'target_plans',
-  ];
-
-  let deletedTotal = 0;
-  for (const table of tablesToDelete) {
-    try {
-      const { count } = await supabase.from(table).delete({ count: 'exact' }).neq('id', '00000000-0000-0000-0000-000000000000');
-      deletedTotal += count ?? 0;
-    } catch {}
-  }
-
-  // تحقق من العقل
-  const keptTables = ['x_algorithm_learning_rules', 'viral_style_patterns', 'viral_account_patterns', 'working_memory', 'system_learning_rules', 'model_routing_rules', 'accounts', 'repo_extracted_rules'];
-  let keptTotal = 0;
-  for (const table of keptTables) {
-    try {
-      const { count } = await supabase.from(table).select('*', { count: 'exact', head: true });
-      keptTotal += count ?? 0;
-    } catch {}
-  }
-
-  await sendReply(chatId, `✅ <b>تم التصفير</b>\n━━━━━━━━━━━━━━━━━━━━\nحُذف: ${deletedTotal} صف\n🧠 العقل محفوظ: ${keptTotal} صف\n\nشغّل 🧠 تشغيل كامل لبدء تجربة جديدة.`);
 }
