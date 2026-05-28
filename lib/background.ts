@@ -1,14 +1,15 @@
 import { waitUntil } from '@vercel/functions';
 
 /**
- * runBackground — تشغيل مهمة في الخلفية بشكل محمول بين البيئات
+ * runBackground — run a task in the background, portable across environments
  *
- * - على Vercel (serverless): تُستدعى waitUntil لإبقاء الدالة حيّة بعد
- *   إرجاع الرد حتى تكتمل المهمة الخلفية.
- * - على خادم دائم (Raspberry Pi / Node عادي): لا يوجد سياق طلب لـ waitUntil،
- *   فتُرمى استثناءً ونتجاهله — العملية تبقى حيّة أصلاً فتكتمل المهمة وحدها.
+ * - On Vercel (serverless): waitUntil is called to keep the function alive after
+ *   returning the response until the background task completes.
+ * - On a persistent server (Raspberry Pi / plain Node): there is no request context
+ *   for waitUntil, so it throws an exception which we ignore — the process stays
+ *   alive anyway so the task completes on its own.
  *
- * بهذا الشكل، نقل المشروع من Vercel إلى Pi لا يتطلب أي تعديل في نقاط الاستدعاء.
+ * This way, migrating the project from Vercel to Pi requires no changes at call sites.
  */
 export function runBackground(task: Promise<unknown>): void {
   const guarded = Promise.resolve(task).catch((err: unknown) => {
@@ -19,6 +20,6 @@ export function runBackground(task: Promise<unknown>): void {
   try {
     waitUntil(guarded);
   } catch {
-    // ليست بيئة Vercel — العملية الدائمة ستكمل الـ promise من تلقاء نفسها.
+    // Not a Vercel environment — the persistent process will complete the promise on its own.
   }
 }

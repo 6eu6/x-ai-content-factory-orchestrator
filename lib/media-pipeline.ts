@@ -4,13 +4,13 @@ import { optionalEnv } from './env';
 import { sendTelegramMessage, allowedChatId, htmlEscape, shortText } from './telegram';
 
 /**
- * Media Pipeline v2 — مسار توليد الوسائط
+ * Media Pipeline v2 — Media generation pipeline
  *
- * تحسينات:
- * 1. توليد صور فعلي عبر OpenRouter (دعم DALL-E 3, Flux, Stable Diffusion)
- * 2. إرسال الصور مباشرة لتليجرام
- * 3. وصف أدق للوسائط
- * 4. تسجيل في content_deliveries
+ * Improvements:
+ * 1. Actual image generation via OpenRouter (DALL-E 3, Flux, Stable Diffusion support)
+ * 2. Sending images directly to Telegram
+ * 3. More precise media descriptions
+ * 4. Logging in content_deliveries
  */
 
 export type MediaRequest = {
@@ -38,12 +38,12 @@ export type MediaItem = {
   slide_number?: number;
   layout_hint?: string;
   duration_seconds?: number;
-  image_url?: string;       // [جديد] URL الصورة المولّدة
-  image_base64?: string;    // [جديد] base64 الصورة المولّدة
+  image_url?: string;       // [new] Generated image URL
+  image_base64?: string;    // [new] Generated image base64
 };
 
 // ═══════════════════════════════════════════════════
-// نماذج توليد الصور المتاحة عبر OpenRouter
+// Available image generation models via OpenRouter
 // ═══════════════════════════════════════════════════
 const IMAGE_MODELS = [
   'openai/dall-e-3',
@@ -53,14 +53,14 @@ const IMAGE_MODELS = [
 ];
 
 /**
- * يولّد وصف دقيق لوسائط الكاروسيل (4-8 شرائح)
+ * Generates precise carousel media descriptions (4-8 slides)
  */
 async function generateCarouselPrompts(request: MediaRequest): Promise<MediaItem[]> {
   const content = request.text_content;
   const slides = content?.slides || [];
   const imagePrompts = content?.image_generation_prompts || [];
 
-  // لو في prompts جاهزة من content-type-engine، نستخدمها
+  // If there are ready prompts from content-type-engine, use them
   if (imagePrompts.length > 0) {
     return imagePrompts.map((prompt: string, i: number) => ({
       type: 'carousel_slide' as const,
@@ -71,7 +71,7 @@ async function generateCarouselPrompts(request: MediaRequest): Promise<MediaItem
     }));
   }
 
-  // لو ما في prompts جاهزة، نولّدها
+  // If no ready prompts, generate them
   try {
     const response = await callModel('media_description', [
       {
@@ -139,7 +139,7 @@ Return JSON array:
 }
 
 /**
- * يولّد وصف دقيق لفيديو قصير (15-60 ثانية)
+ * Generates precise short video description (15-60 seconds)
  */
 async function generateVideoMedia(request: MediaRequest): Promise<MediaItem[]> {
   const content = request.text_content;
@@ -218,7 +218,7 @@ Return JSON:
 }
 
 /**
- * يولّد وصف صورة مرافقة لتغريدة
+ * Generates an accompanying image description for a tweet
  */
 async function generateTweetImagePrompt(request: MediaRequest): Promise<MediaItem[]> {
   try {
@@ -269,7 +269,7 @@ Return JSON:
 }
 
 /**
- * يحسّن الـ prompt بإضافة تفاصيل الأسلوب والجودة
+ * Refines the prompt by adding style and quality details
  */
 function refineImagePrompt(prompt: string, styleHint?: string): string {
   const baseStyle = 'high quality, clean design, modern tech aesthetic, professional, sharp details';
@@ -278,7 +278,7 @@ function refineImagePrompt(prompt: string, styleHint?: string): string {
 }
 
 /**
- * المسار الرئيسي — يولّد وصف الوسائط حسب نوع المحتوى
+ * Main pipeline — generates media descriptions based on content type
  */
 export async function generateMediaPipeline(request: MediaRequest): Promise<MediaResult> {
   let mediaItems: MediaItem[] = [];
@@ -316,7 +316,7 @@ export async function generateMediaPipeline(request: MediaRequest): Promise<Medi
       };
   }
 
-  // سجّل في content_deliveries
+  // Log in content_deliveries
   try {
     const supabase = supabaseAdmin();
     await supabase.from('content_deliveries').insert({
@@ -342,19 +342,19 @@ export async function generateMediaPipeline(request: MediaRequest): Promise<Medi
 }
 
 /**
- * يولّد صورة عبر OpenRouter image model
- * يحاول DALL-E 3 أولاً، ثم Flux كبديل
+ * Generates an image via OpenRouter image model
+ * Tries DALL-E 3 first, then Flux as fallback
  */
 export async function generateImage(
   prompt: string,
   size: string = '1024x1024'
 ): Promise<{ ok: boolean; image_data?: string; image_url?: string; model_used?: string; error?: string }> {
-  // حاول توليد صورة عبر OpenRouter
+  // Try generating image via OpenRouter
   for (const model of IMAGE_MODELS) {
     try {
       const { client } = await getAIClientForTask('media_description');
 
-      // حاول images.generate
+      // Try images.generate
       const response = await client.images.generate({
         model,
         prompt,
@@ -370,12 +370,12 @@ export async function generateImage(
         return { ok: true, image_url: imageData.url, model_used: model };
       }
     } catch (e: any) {
-      // لو النموذج ما يدعم توليد صور، جرّب اللي بعده
+      // If the model doesn't support image generation, try the next one
       continue;
     }
   }
 
-  // كل النماذج فشلت — أرسل الـ prompt لتليجرام كوصف
+  // All models failed — send the prompt to Telegram as description
   try {
     const chatId = allowedChatId();
     if (chatId) {
@@ -393,7 +393,7 @@ export async function generateImage(
 }
 
 /**
- * [جديد] يولّد صورة ويرسلها لتليجرام مباشرة
+ * [new] Generates an image and sends it directly to Telegram
  */
 export async function generateAndDeliverImage(
   prompt: string,
@@ -403,7 +403,7 @@ export async function generateAndDeliverImage(
   const result = await generateImage(prompt, size);
   
   if (result.ok && result.image_url) {
-    // أرسل الصورة لتليجرام
+    // Send image to Telegram
     try {
       const chatId = allowedChatId();
       if (chatId) {
@@ -429,7 +429,7 @@ export async function generateAndDeliverImage(
 }
 
 /**
- * يقرر هل المحتوى يحتاج وسائط
+ * Decides whether content needs media
  */
 export function contentNeedsMedia(contentType: string): boolean {
   return ['carousel', 'video_script', 'single_tweet_with_image', 'single_tweet'].includes(contentType);

@@ -17,19 +17,19 @@ import { insertIfMissing } from './db-helpers';
 import { queryBrainForContent } from './brain-query';
 
 /**
- * Content Engine v3 — محرك محتوى مبني على الزحف لا على التوليد
+ * Content Engine v3 — Crawl-based content engine, not generation-based
  *
- * المبدأ: لا توليد AI للمحتوى (AI slop). بدل كذا:
- * 1. يزحف X ويحلل حسابات وتغريدات حقيقية
- * 2. يخزن الأنماط في العقل (قواعد صارمة)
- * 3. يكتشف فرص تفاعل حقيقية (رد، اقتباس، ثريد مبني على مصادر)
- * 4. يصيغ المحتوى بناءً على العقل فقط
- * 5. يحمل وسائط حقيقية من التغريدات (صور، فيديو، GIF) — للتحليل فقط، لا يرسلها
+ * Principle: No AI content generation (avoid AI slop). Instead:
+ * 1. Crawl X and analyze real accounts and tweets
+ * 2. Store patterns in the brain (strict rules)
+ * 3. Discover real engagement opportunities (reply, quote, source-based thread)
+ * 4. Craft content based on brain rules only
+ * 5. Load real media from tweets (photos, video, GIF) — for analysis only, never send
  *
- * v3.1: التحليل العميق يستخدم AI حقيقي (ليس hardcoded)
+ * v3.1: Deep analysis uses real AI (not hardcoded)
  */
 
-// ═══ أنواع المخرجات ═══
+// ═══ Output Types ═══
 
 export type ContentOpportunity = {
   type: 'quote' | 'reply' | 'thread' | 'article' | 'repo_tweet';
@@ -39,8 +39,8 @@ export type ContentOpportunity = {
   source_metrics: Record<string, number>;
   media_urls: MediaFromTweet[];
   crafted_text: string;
-  why: string;           // ليش هذي الفرصة مهمة
-  brain_rules_used: string[];  // قواعد العقل المستخدمة
+  why: string;           // Why this opportunity matters
+  brain_rules_used: string[];  // Brain rules used
   shield_passed: boolean;
   shield_issues: string[];
   // Phase 6: rule performance weight (optional, set by enrich-opportunities)
@@ -60,7 +60,9 @@ export type MediaFromTweet = {
 };
 
 export type ScanResult = {
-  accounts_scanned: number;
+  accounts_scanned: number;         // DEPRECATED: use actual_accounts_scanned
+  actual_accounts_scanned: number;  // Real accounts scanned from DB
+  manual_tweets_loaded: number;     // Manually loaded tweet analyses
   tweets_analyzed: number;
   viral_tweets_found: number;
   opportunities: ContentOpportunity[];
@@ -71,7 +73,7 @@ export type ScanResult = {
   };
   media_downloaded: number;
   light_mode?: boolean;
-  debug_log: string[];  // سجل تشخيصي للـ server logs فقط
+  debug_log: string[];  // Diagnostic log for server logs only
 };
 
 export type DeepAnalysis = {
@@ -82,16 +84,16 @@ export type DeepAnalysis = {
   timingInsight: string;
   tweetTypeInsight: string;
   engagementQuality: string;
-  // v3.2: حقول التحليل متعدد الزوايا
-  psychologicalTrigger: string;      // الآلية النفسية اللي فعّلت الانتشار
-  audienceProfile: string;            // من تفاعل وليش
-  conversationContext: string;        // سياق المحادثة/الردود
-  preciseConcept: string;             // المفهوم الدقيق القابل للنقل
-  conceptEvidence: string;            // الدليل الملموس من البيانات
-  confidenceLevel: 'high' | 'medium' | 'low'; // مستوى الثقة بناءً على كمية الأدلة
+  // v3.2: Multi-angle analysis fields
+  psychologicalTrigger: string;      // Psychological mechanism that triggered virality
+  audienceProfile: string;            // Who engaged and why
+  conversationContext: string;        // Conversation/replies context
+  preciseConcept: string;             // Transferable precise concept
+  conceptEvidence: string;            // Concrete evidence from data
+  confidenceLevel: 'high' | 'medium' | 'low'; // Confidence level based on evidence quantity
 };
 
-// ═══ الزحف والتحليل ═══
+// ═══ Crawling & Analysis ═══
 
 export type ScanOptions = {
   /** Light mode: skip deep AI analysis (callModel), only store basic metrics.
@@ -100,8 +102,8 @@ export type ScanOptions = {
 };
 
 /**
- * يزحف حسابات X المحفوظة ويحلل تغريداتها
- * + يحلل التغريدات المضافة يدوياً
+ * Crawls saved X accounts and analyzes their tweets
+ * + Analyzes manually added tweets
  */
 export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10, options: ScanOptions = {}): Promise<ScanResult> {
   const supabase = supabaseAdmin();
@@ -109,11 +111,11 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10, opti
   let brainUpdates = { algorithmRules: 0, stylePatterns: 0, mcpOpportunities: 0 };
   const lightMode = options.lightMode === true;
 
-  // 1. جلب الحسابات المحفوظة — استعلام ذكي يفضّل غير المفحوصة والأعلى أولوية
+  // 1. Fetch saved accounts — smart query prefers unchecked and highest priority
   let accounts: any[] = [];
 
-  // محاولة 1: smart query — يفضّل الحسابات اللي ما فُحصت (last_checked=null)
-  // ثم الأقدم فحصًا، ثم الأعلى أولوية حسب tier
+  // Attempt 1: smart query — prefers unchecked accounts (last_checked=null)
+  // then oldest checked, then highest priority by tier
   try {
     const { data, error } = await supabase
       .from('accounts')
@@ -136,7 +138,7 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10, opti
     console.error(`[scanXAccounts] smart query exception:`, e.message);
   }
 
-  // محاولة 2: fallback — لو فشل smart query (أعمدة ناقصة)، جرب handle فقط
+  // Attempt 2: fallback — if smart query fails (missing columns), try handle only
   if (!accounts.length) {
     try {
       const { data, error } = await supabase
@@ -157,7 +159,7 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10, opti
 
   console.log(`[scanXAccounts] Found ${accounts.length} accounts to scan`);
 
-  // 1.5. جلب التغريدات المضافة يدوياً (من viral_tweet_analyses)
+  // 1.5. Load manually added tweets
   let manualTweetsCount = 0;
   let allAnalyzed: any[] = [];
   let allMedia: MediaFromTweet[] = [];
@@ -178,11 +180,11 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10, opti
       manualTweetsCount = manualTweets.length;
       for (const t of manualTweets) {
         totalAnalyzed++;
-        // media_type مو موجود في الجدول — نستخرج الوسائط من analysis_payload أو metrics
+        // media_type not in table — extract media from analysis_payload or metrics
         const tweetMedia: MediaFromTweet[] = [];
         const payload = t.analysis_payload || {};
         if (payload.media_impact && payload.media_impact !== 'text_only') {
-          tweetMedia.push({ type: 'photo', url: '', alt_text: '' });  // تقديري
+          tweetMedia.push({ type: 'photo', url: '', alt_text: '' });  // Estimated
         }
 
         if (t.engagement_score > 20 || t.engagement_per_1k_followers > 5) {
@@ -216,7 +218,7 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10, opti
     console.error(`[scanXAccounts] Failed to load manual tweets: ${e.message}`);
   }
 
-  // 2. زحف كل حساب
+  // 2. Crawl each account
   for (const account of accounts.slice(0, maxAccounts)) {
     try {
       const handle = account.handle || account.username;
@@ -235,7 +237,7 @@ export async function scanXAccounts(maxAccounts = 5, tweetsPerAccount = 10, opti
         const score = scoreXTweet(tweet);
         const media = extractMediaFromTweet(tweet);
 
-        // ═══ تحليل AI عميق لكل تغريدة فيروسية ═══
+        // ═══ Deep AI analysis for each viral tweet ═══
         // Light mode: skip deep AI analysis — just store metrics
         let deepAnalysis: any = null;
         if (score > 15 && !lightMode) {
@@ -281,7 +283,7 @@ JSON format: {"viral_reason":"...","style_pattern":"...","media_impact":"...","t
           debugLog.push(`[scan] @${handle}: lightMode — skipped deep analysis (score ${score})`);
         }
 
-        // خزّن في viral_tweet_analyses — كل التغريدات مو بس الفيروسية
+        // Store in viral_tweet_analyses — all tweets not just viral ones
         const isViral = score > 20 || analysis.engagement_per_1k_followers > 5;
         if (isViral) viralFound++;
 
@@ -297,7 +299,7 @@ JSON format: {"viral_reason":"...","style_pattern":"...","media_impact":"...","t
             metrics: analysis.metrics
           };
 
-          // خزّن التحليل العميق في analysis_payload
+          // Store deep analysis in analysis_payload
           if (deepAnalysis) {
             upsertData.analysis_payload = deepAnalysis;
             upsertData.hook_formula = deepAnalysis.hook_formula || null;
@@ -321,7 +323,7 @@ JSON format: {"viral_reason":"...","style_pattern":"...","media_impact":"...","t
             deepAnalysis
           });
         } else {
-          // حتى التغريدات العادية خذها للتحليل
+          // Even normal tweets go to analysis
           allAnalyzed.push({
             ...analysis,
             score,
@@ -333,11 +335,11 @@ JSON format: {"viral_reason":"...","style_pattern":"...","media_impact":"...","t
 
         allMedia.push(...media);
 
-        // ═══ تعلم مفاهيم من كل تغريدة فيروسية فوراً ═══
+        // ═══ Learn concepts from each viral tweet immediately ═══
         // Light mode: skip brain learning from individual tweets (kept for daily-run)
         if (isViral && deepAnalysis && !lightMode) {
           try {
-            // خزّن سبب الانتشار كقاعدة
+            // Store viral reason as rule
             await insertIfMissing(supabase, 'x_algorithm_learning_rules',
               { rule_type: 'viral_pattern', rule: `@${handle}: ${deepAnalysis.viral_reason}` },
               {
@@ -355,7 +357,7 @@ JSON format: {"viral_reason":"...","style_pattern":"...","media_impact":"...","t
             );
             brainUpdates.algorithmRules++;
 
-            // خزّن النمط النفسي
+            // Store psychological pattern
             if (deepAnalysis.psychological_trigger) {
               await insertIfMissing(supabase, 'x_algorithm_learning_rules',
                 { rule_type: 'psychological_trigger', rule: deepAnalysis.psychological_trigger },
@@ -374,7 +376,7 @@ JSON format: {"viral_reason":"...","style_pattern":"...","media_impact":"...","t
               brainUpdates.algorithmRules++;
             }
 
-            // خزّن النمط الأسلوبي
+            // Store style pattern
             if (deepAnalysis.style_pattern || deepAnalysis.adaptation) {
               try {
                 await insertIfMissing(supabase, 'viral_style_patterns',
@@ -404,14 +406,14 @@ JSON format: {"viral_reason":"...","style_pattern":"...","media_impact":"...","t
         }
       }
 
-      // حدّث حالة الحساب — فقط الأعمدة الموجودة فعلاً في الجدول
-      // الجدول فيه: handle, tier, category, followers, avg_engagement, our_reply_count, last_reply_date, last_checked, notes, created_at
-      // مافيه: last_scanned_at, updated_at, active, username — لا ترسلها!
+      // Update account state — only columns that actually exist in the table
+      // Table has: handle, tier, category, followers, avg_engagement, our_reply_count, last_reply_date, last_checked, notes, created_at
+      // Does not have: last_scanned_at, updated_at, active, username — do not send them!
       try {
         const snapshot = await getXUserByUsername(handle);
         await supabase.from('accounts').update({
           notes: `Followers: ${snapshot.followers_count}, Scanned: ${new Date().toISOString()}`,
-          last_checked: new Date().toISOString(),  // ← العمود الصحيح في DB
+          last_checked: new Date().toISOString(),  // ← Correct column in DB
           followers: snapshot.followers_count || null
         }).eq('handle', handle);
       } catch (updErr: any) {
@@ -425,9 +427,9 @@ JSON format: {"viral_reason":"...","style_pattern":"...","media_impact":"...","t
     }
   }
 
-  // 3. علّم العقل من البيانات المزحوفة — باستخدام التحليل العميق المخزّن
+  // 3. Brain learning from crawled data
   try {
-    // جلب قواعد الانتشار المخزّنة من التحليلات السابقة (من التغريدات اللي أُضيفت يدوياً)
+    // Fetch stored viral rules from previous analyses (from manually added tweets)
     const { data: existingViralRules } = await supabase
       .from('x_algorithm_learning_rules')
       .select('rule_type, rule, evidence')
@@ -436,7 +438,7 @@ JSON format: {"viral_reason":"...","style_pattern":"...","media_impact":"...","t
       .order('confidence_score', { ascending: false })
       .limit(30);
 
-    // جلب أنماط الأسلوب المخزّنة
+    // Fetch stored style patterns
     const { data: existingStylePatterns } = await supabase
       .from('viral_style_patterns')
       .select('pattern_name, pattern_description, adaptation_for_30piq')
@@ -444,9 +446,9 @@ JSON format: {"viral_reason":"...","style_pattern":"...","media_impact":"...","t
       .order('confidence_score', { ascending: false })
       .limit(30);
 
-    // بناء عناصر تعليمية غنية — تشمل التحليل العميق + المقاييس
+    // Build rich learning items — including deep analysis + metrics
     const crawlerItems = allAnalyzed.map(a => {
-      // ابحث عن قاعدة الانتشار المرتبطة بهذي التغريدة
+      // Find related viral rule
       const relatedRule = (existingViralRules || []).find((r: any) =>
         r.evidence?.includes(a.username) || r.evidence?.includes(a.tweet_id)
       );
@@ -454,7 +456,7 @@ JSON format: {"viral_reason":"...","style_pattern":"...","media_impact":"...","t
         p.pattern_name?.includes(a.username) || p.evidence?.includes(a.username)
       );
 
-      // بناء ملخص غني يشمل التحليل العميق
+      // Build rich summary including deep analysis
       const mediaDesc = a.media?.length > 0
         ? `Contains ${a.media.map((m: MediaFromTweet) => m.type).join('+')}`
         : 'Text only';
@@ -480,8 +482,8 @@ JSON format: {"viral_reason":"...","style_pattern":"...","media_impact":"...","t
         items: crawlerItems,
         mode: 'production'
       });
-      // ═══ أضف للعداد الموجود بدل ما تمسحه ═══
-      // قبل كان brainUpdates = { ...learned } وده يمسح الأنماط اللي أضيفت مباشرة
+      // ═══ Add to existing counter instead of replacing ═══
+      // Previously brainUpdates = { ...learned } which would erase directly-added patterns
       brainUpdates.algorithmRules += learned.algorithmRules;
       brainUpdates.stylePatterns += learned.stylePatterns;
       brainUpdates.mcpOpportunities += learned.mcpOpportunities;
@@ -491,11 +493,11 @@ JSON format: {"viral_reason":"...","style_pattern":"...","media_impact":"...","t
     console.error('Brain learning failed:', e.message);
   }
 
-  // 3.5. تعليم مفاهيمي: اجمع أنماط مشتركة بين التغريدات واكتشف مفاهيم عامة
+  // 3.5. Concept learning: find shared patterns across tweets and discover general concepts
   // Light mode: skip batch concept extraction (AI-heavy, kept for daily-run)
   if (!lightMode) try {
     if (allAnalyzed.length >= 2) {
-      // اجمع كل نصوص التغريدات والتحليلات مع بعض عشان AI يكتشف مفاهيم مشتركة
+      // Collect all tweet texts and analyses together so AI can discover shared concepts
       const tweetsForConcept = allAnalyzed
         .filter(a => (a.score || 0) > 20)
         .slice(0, 15)
@@ -559,7 +561,7 @@ ${tweetsForConcept.map((t, i) => `${i + 1}. @${t.handle} (engagement: ${t.score}
             );
             brainUpdates.algorithmRules++;
 
-            // خزّن كمان كنمط أسلوبي
+            // Also store as style pattern
             if (concept.adaptation) {
               try {
                 await insertIfMissing(supabase, 'viral_style_patterns',
@@ -568,7 +570,7 @@ ${tweetsForConcept.map((t, i) => `${i + 1}. @${t.handle} (engagement: ${t.score}
                     pattern_name: concept.name.slice(0, 100),
                     pattern_description: concept.description,
                     adaptation_for_30piq: concept.adaptation,
-                    pattern_type: 'structure',  // ← مطلوب NOT NULL!
+                    pattern_type: 'structure',  // ← Required NOT NULL!
                     why_it_works: `Shared concept from ${tweetsForConcept.length} viral tweets`,
                     source_handles: [],
                     source_tweet_urls: [],
@@ -597,7 +599,7 @@ ${tweetsForConcept.map((t, i) => `${i + 1}. @${t.handle} (engagement: ${t.score}
     debugLog.push('[brain-concepts] lightMode — skipped batch concept extraction');
   }
 
-  // 3.5. علّم العقل أنماط الوسائط
+  // 3.5. Brain learning of media patterns
   try {
     const accountMediaStats: Record<string, { total: number; withMedia: number; types: Set<string> }> = {};
     for (const a of allAnalyzed) {
@@ -638,7 +640,7 @@ ${tweetsForConcept.map((t, i) => `${i + 1}. @${t.handle} (engagement: ${t.score}
     console.error('Media pattern learning failed:', e.message);
   }
 
-  // 4. اكتشف فرص المحتوى
+  // 4. Discover content opportunities
   // Light mode: skip opportunity discovery (calls callModel for crafting) — just return raw data
   let opportunities: ContentOpportunity[] = [];
   if (lightMode) {
@@ -647,7 +649,7 @@ ${tweetsForConcept.map((t, i) => `${i + 1}. @${t.handle} (engagement: ${t.score}
     opportunities = await discoverOpportunities(allAnalyzed, allMedia);
   }
 
-  // 5. ═══ تحسين ذاتي: ارقب العقل وعلّق القواعد الضعيفة ═══
+  // 5. ═══ Self-improvement: monitor brain and suspend weak rules ═══
   // Light mode: skip self-improvement (DB-heavy, kept for daily-run)
   if (!lightMode) try {
     const selfImprovement = await selfImproveBrain(supabase, debugLog);
@@ -661,7 +663,9 @@ ${tweetsForConcept.map((t, i) => `${i + 1}. @${t.handle} (engagement: ${t.score}
   }
 
   return {
-    accounts_scanned: accounts.length + manualTweetsCount,
+    accounts_scanned: accounts.length,  // backward compat
+    actual_accounts_scanned: accounts.length,
+    manual_tweets_loaded: manualTweetsCount,
     tweets_analyzed: totalAnalyzed,
     viral_tweets_found: viralFound,
     opportunities,
@@ -676,11 +680,11 @@ ${tweetsForConcept.map((t, i) => `${i + 1}. @${t.handle} (engagement: ${t.score}
   };
 }
 
-// ═══ استخراج الوسائط ═══
+// ═══ Media Extraction ═══
 
 /**
- * يستخرج الوسائط من تغريدة X (صور، فيديو، GIF)
- * إصدار 2 — استكشاف عميق 7 طبقات
+ * Extracts media from an X tweet (photos, video, GIF)
+ * Version 2 — 7-layer deep exploration
  */
 function extractMediaFromTweet(tweet: any, fullApiResponse?: any): MediaFromTweet[] {
   const media: MediaFromTweet[] = [];
@@ -693,7 +697,7 @@ function extractMediaFromTweet(tweet: any, fullApiResponse?: any): MediaFromTwee
     media.push({ type, url, alt_text });
   }
 
-  // ═══ 1. المسارات المباشرة ═══
+  // ═══ 1. Direct paths ═══
   if (Array.isArray(raw.photos)) {
     for (const p of raw.photos) {
       const url = typeof p === 'string' ? p : (p.media_url_https || p.url || p.media_url || p.imageUrl || '');
@@ -713,7 +717,7 @@ function extractMediaFromTweet(tweet: any, fullApiResponse?: any): MediaFromTwee
   if (raw.imageUrl) addMedia('photo', raw.imageUrl);
   if (raw.image && typeof raw.image === 'string') addMedia('photo', raw.image);
 
-  // ═══ 2. مصفوفات الوسائط الموحدة ═══
+  // ═══ 2. Unified media arrays ═══
   const sources: any[] = [];
   if (Array.isArray(raw.media)) sources.push(...raw.media);
   if (Array.isArray(raw.mediaDetails)) sources.push(...raw.mediaDetails);
@@ -736,7 +740,7 @@ function extractMediaFromTweet(tweet: any, fullApiResponse?: any): MediaFromTwee
     }
   }
 
-  // ═══ 3. فحص includes.media (صيغة Twitter API v2) ═══
+  // ═══ 3. Check includes.media (Twitter API v2 format) ═══
   if (fullApiResponse) {
     const includesMedia = fullApiResponse?.includes?.media || fullApiResponse?.data?.includes?.media;
     if (Array.isArray(includesMedia)) {
@@ -755,7 +759,7 @@ function extractMediaFromTweet(tweet: any, fullApiResponse?: any): MediaFromTwee
     }
   }
 
-  // ═══ 4. فحص entities.urls ═══
+  // ═══ 4. Check entities.urls ═══
   const urlSources: any[] = [];
   if (Array.isArray(raw.entities?.urls)) urlSources.push(...raw.entities.urls);
   if (Array.isArray(raw.extended_entities?.urls)) urlSources.push(...raw.extended_entities.urls);
@@ -766,7 +770,7 @@ function extractMediaFromTweet(tweet: any, fullApiResponse?: any): MediaFromTwee
     if (/twimg\.com\/media/i.test(expandedUrl)) addMedia('photo', expandedUrl);
   }
 
-  // ═══ 5. فحص روابط t.co ═══
+  // ═══ 5. Check t.co links ═══
   const tweetText = raw.text || raw.full_text || raw.content || '';
   const tcoMatches = tweetText.match(/https?:\/\/t\.co\/\S+/g) || [];
   for (const tcoUrl of tcoMatches) {
@@ -775,7 +779,7 @@ function extractMediaFromTweet(tweet: any, fullApiResponse?: any): MediaFromTwee
     if (expanded && /twimg\.com/i.test(expanded)) addMedia('photo', expanded);
   }
 
-  // ═══ 6. فحص صيغ TwitterAPI.io إضافية ═══
+  // ═══ 6. Check additional TwitterAPI.io formats ═══
   if (Array.isArray(raw.mallizedUrls)) {
     for (const u of raw.mallizedUrls) {
       if (u?.media_url_https) addMedia('photo', u.media_url_https);
@@ -789,7 +793,7 @@ function extractMediaFromTweet(tweet: any, fullApiResponse?: any): MediaFromTwee
     for (const v of raw.videoUrls) { if (typeof v === 'string' && v) addMedia('video', v); }
   }
 
-  // ═══ 7. استكشاف عميق ═══
+  // ═══ 7. Deep exploration ═══
   if (media.length === 0) {
     deepScanForMedia(raw, addMedia, '', 0);
   }
@@ -798,7 +802,7 @@ function extractMediaFromTweet(tweet: any, fullApiResponse?: any): MediaFromTwee
 }
 
 /**
- * فحص عميق متكرر — يبحث عن أي كائن وسائط في أي مكان في الشجرة
+ * Recursive deep scan — searches for any media object anywhere in the tree
  */
 function deepScanForMedia(obj: any, addMedia: (type: 'photo' | 'video' | 'animated_gif', url: string, alt?: string) => void, path: string, depth: number) {
   if (!obj || typeof obj !== 'object' || depth > 8) return;
@@ -834,11 +838,11 @@ function deepScanForMedia(obj: any, addMedia: (type: 'photo' | 'video' | 'animat
   } catch {}
 }
 
-// ═══ جلب سياق المحادثة ═══
+// ═══ Fetch Conversation Context ═══
 
 /**
- * يجلب ردود وتفاعلات التغريدة من TwitterAPI.io
- * هذا يعطي العقل فهم أعمق: شنو قال الناس، كيف تفاعلوا، أيش السبب الحقيقي
+ * Fetches replies and interactions for a tweet from TwitterAPI.io
+ * This gives the brain deeper understanding: what people said, how they reacted, the real reason
  */
 async function fetchConversationContext(
   tweetId: string,
@@ -857,7 +861,7 @@ async function fetchConversationContext(
       .filter(t => t.length > 5)
       .slice(0, 8);
 
-    // خلاصة سريعة: شنو الأغلبية تقول
+    // Quick summary: what the majority says
     const themes = replyTexts.slice(0, 5).map(t => t.slice(0, 100)).join(' | ');
     const topReplierInsight = `Top reply themes: ${themes}`;
 
@@ -868,16 +872,16 @@ async function fetchConversationContext(
   }
 }
 
-// ═══ التحليل العميق متعدد الزوايا ═══
+// ═══ Multi-angle Deep Analysis ═══
 
 /**
- * تحليل عميق متعدد الزوايا — v3.2
+ * Deep multi-angle analysis — v3.2
  *
- * الفرق عن v3.1:
- * - v3.1: باص واحد، 7 حقول عامة، بدون سياق محادثة
- * - v3.2: جلب سياق المحادثة + تحليل من 5 زوايا + استخراج مفهوم دقيق
- *         + تقييم ثقة بناءً على كمية الأدلة
- *         + كل النتائج بالإنجليزية (لغة المحتوى)
+ * Difference from v3.1:
+ * - v3.1: Single pass, 7 generic fields, no conversation context
+ * - v3.2: Fetches conversation context + 5-angle analysis + precise concept extraction
+ *         + confidence assessment based on evidence quantity
+ *         + All results in English (content language)
  */
 async function deepAnalyzeWithAI(
   tweetText: string,
@@ -907,7 +911,7 @@ async function deepAnalyzeWithAI(
     ? `Contains ${media.map(m => m.type).join(' + ')}`
     : 'Text only, no media';
 
-  // ═══ جلب سياق المحادثة (ردود الناس) ═══
+  // ═══ Fetch conversation context (people's replies) ═══
   let conversationData = { replies: [] as string[], topReplierInsight: '' };
   if (tweetId && (metrics.reply_count || 0) > 5) {
     conversationData = await fetchConversationContext(tweetId, username);
@@ -929,7 +933,7 @@ async function deepAnalyzeWithAI(
     ? `\n\nSample of real replies people wrote:\n${conversationData.replies.slice(0, 5).map((r, i) => `  ${i + 1}. "${r.slice(0, 120)}"`).join('\n')}\n\nThese replies reveal WHY people engaged — study them for the actual trigger.`
     : '';
 
-  // ═══ المفاهيم الموجودة في العقل — عشان ما يكررها ويضيف عليها ═══
+  // ═══ Existing concepts in the brain — so it doesn't repeat and builds on them ═══
   const existingConceptsSummary = existingBrainRules.length > 0
     ? `\n\nExisting concepts already in the brain (do NOT repeat these — find NEW insights):\n${existingBrainRules.slice(0, 8).map(r => `- [${r.rule_type}] ${String(r.rule).slice(0, 100)}`).join('\n')}`
     : '';
@@ -1080,19 +1084,19 @@ Give a deep, multi-angle analysis with evidence. Every claim must reference spec
   }
 }
 
-// ═══ نظام التعلم الحقيقي — دمج وتطوير المفاهيم ═══
+// ═══ Real Learning System — Merging & Developing Concepts ═══
 
 /**
- * upsertBrainConcept — العقل يتعلم فعليًا
+ * upsertBrainConcept — Brain actually learns
  *
- * الفرق عن insertIfMissing:
- * - insertIfMissing: يتخطى لو المفهوم موجود → تخزين فقط
- * - upsertBrainConcept: يدمج الأدلة + يزيد الثقة + يحدّث القاعدة → تعلم حقيقي
+ * Difference from insertIfMissing:
+ * - insertIfMissing: skips if concept exists → storage only
+ * - upsertBrainConcept: merges evidence + increases confidence + updates rule → real learning
  *
- * آلية التعلم:
- * 1. لو المفهوم جديد → يضيفه بالثقة الأولية
- * 2. لو المفهوم موجود ومتطابق → يزيد الثقة + يضيف دليل جديد
- * 3. لو المفهوم موجود لكن مختلف شوي → يوسّع القاعدة
+ * Learning mechanism:
+ * 1. If concept is new → add with initial confidence
+ * 2. If concept exists and matches → increase confidence + add new evidence
+ * 3. If concept exists but slightly different → expand the rule
  */
 async function upsertBrainConcept(
   supabase: any,
@@ -1102,7 +1106,7 @@ async function upsertBrainConcept(
   newEvidence: string
 ): Promise<'inserted' | 'reinforced' | 'failed'> {
   try {
-    // ابحث عن مفهوم مشابه
+    // Find similar concept
     let query = supabase.from(table).select('*').limit(1);
     for (const [key, val] of Object.entries(matchKey)) {
       query = val == null ? query.is(key, null) : query.eq(key, val);
@@ -1110,26 +1114,26 @@ async function upsertBrainConcept(
     const existing = await query.maybeSingle();
 
     if (!existing.data?.id) {
-      // مفهوم جديد — أضفه
+      // New concept — add it
       const inserted = await supabase.from(table).insert(payload).select('id').single();
       if (inserted.error) throw inserted.error;
       console.log(`[brain-learn] NEW concept: ${String(matchKey[Object.keys(matchKey)[0]]).slice(0, 60)}`);
       return 'inserted';
     }
 
-    // ═══ مفهوم موجود — علّم عليه (دمج + تطوير) ═══
+    // ═══ Existing concept — learn from it (merge + develop) ═══
     const existingData = existing.data;
     const currentConfidence = Number(existingData.confidence_score) || 5;
 
-    // زِد الثقة (لكن مو أكثر من 10)
+    // Increase confidence (max 10)
     const newConfidence = Math.min(10, currentConfidence + 0.5);
 
-    // حدّث حسب نوع الجدول — كل جدول له أعمدة مختلفة
+    // Update based on table type — each table has different columns
     if (table === 'viral_style_patterns') {
-      // viral_style_patterns مافيه evidence أو source_type
-      // حدّث الثقة + source_handles لو موجودة
+      // viral_style_patterns has no evidence or source_type
+      // Update confidence + source_handles if present
       const existingHandles: string[] = Array.isArray(existingData.source_handles) ? existingData.source_handles : [];
-      // حاول تستخلص handle من الدليل الجديد
+      // Try to extract handle from new evidence
       const handleMatch = newEvidence.match(/@(\w+)/);
       const newHandle = handleMatch ? handleMatch[1] : null;
       const updatedHandles = newHandle && !existingHandles.includes(newHandle)
@@ -1148,7 +1152,7 @@ async function upsertBrainConcept(
 
       if (updateResult.error) throw updateResult.error;
     } else {
-      // x_algorithm_learning_rules فيه evidence
+      // x_algorithm_learning_rules has evidence
       const existingEvidence = existingData.evidence || '';
       const updatedEvidence = existingEvidence.length > 800
         ? `${existingEvidence.slice(0, 400)} | +${newEvidence.slice(0, 300)}`
@@ -1175,7 +1179,7 @@ async function upsertBrainConcept(
   }
 }
 
-// ═══ فرص التفاعل ═══
+// ═══ Engagement Opportunities ═══
 
 async function discoverOpportunities(
   analyzed: any[],
@@ -1206,7 +1210,7 @@ async function discoverOpportunities(
     const tweetMedia = tweet.media || [];
     const rulesUsed: string[] = [];
 
-    // ═══ عتبات مخفّضة — حتى التغريدات المتوسطة تنتج فرص ═══
+    // ═══ Lowered thresholds — even medium tweets produce opportunities ═══
     if (tweet.has_question || tweet.score > 10) {
       const crafted = await craftEngagement('quote', tweet, algoRules || [], stylePatterns || [], rulesUsed);
       if (crafted) {
@@ -1219,7 +1223,7 @@ async function discoverOpportunities(
           source_metrics: tweet.metrics || {},
           media_urls: tweetMedia,
           crafted_text: crafted,
-          why: tweet.has_question ? 'سؤال يثير نقاش' : `تفاعل (${tweet.score})`,
+          why: tweet.has_question ? 'Question sparks discussion' : `High engagement (${tweet.score})`,
           brain_rules_used: rulesUsed,
           shield_passed: shieldResult.safe,
           shield_issues: shieldResult.reasons
@@ -1239,7 +1243,7 @@ async function discoverOpportunities(
           source_metrics: tweet.metrics || {},
           media_urls: tweetMedia,
           crafted_text: crafted,
-          why: 'تغريدة قيمة تستحق إضافة رد مفيد',
+          why: 'Valuable tweet worth adding a useful reply',
           brain_rules_used: rulesUsed,
           shield_passed: shieldResult.safe,
           shield_issues: shieldResult.reasons
@@ -1248,15 +1252,15 @@ async function discoverOpportunities(
     }
   }
 
-  // ═══ ثريد دائم من العقل — حتى لو مافيه تغريدات كافية ═══
-  // دايماً جرّب تصنع ثريد من أنماط العقل
+  // ═══ Persistent thread from brain — even if not enough tweets ═══
+  // Always try to craft a thread from brain patterns
   const threadCrafted = await craftThreadFromBrain(algoRules || [], stylePatterns || []);
   if (threadCrafted) {
     const shieldResult = quickShieldCheck(threadCrafted.text);
     opportunities.push({
       type: threadCrafted.type,
       source_tweet_url: '',
-      source_text: 'مبني على أنماط العقل',
+      source_text: 'Built from brain patterns',
       source_author: 'brain',
       source_metrics: {},
       media_urls: [],
@@ -1279,11 +1283,11 @@ async function craftEngagement(
   rulesUsed: string[]
 ): Promise<string | null> {
   try {
-    // ═══ استرجاع ذكي من العقل مع تعليمات تطبيق دقيقة ═══
+    // ═══ Smart retrieval from brain with precise application instructions ═══
     const brainQuery = await queryBrainForContent(type === 'reply' ? 'reply' : 'quote', 6, 3);
     const brainContext = brainQuery.compiled_prompt_context;
 
-    // لو العقل فيه مفاهيم، استخدمها؛ لو فارغ، استخدم القواعد القديمة
+    // If brain has concepts, use them; if empty, use legacy rules
     const hasBrainLearning = brainQuery.concepts.length > 0 || brainQuery.patterns.length > 0;
     const fallbackRules = algoRules.slice(0, 5).map(r => `- ${r.rule} (evidence: ${(r.evidence || '').slice(0, 80)})`).join('\n');
     const fallbackPatterns = stylePatterns.slice(0, 5).map(p => `- ${p.pattern_name}: ${p.pattern_description}`).join('\n');
@@ -1295,36 +1299,36 @@ async function craftEngagement(
     const response = await callModel('content_crafting' as TaskType, [
       {
         role: 'system',
-        content: `أنت تكتب لتغريدات X لحساب @${optionalEnv('X_USERNAME', '30piq')}.
+        content: `Write for X account @${optionalEnv('X_USERNAME', '30piq')}.
 
-قواعد صارمة:
-1. لا تستخدم أي كلمات AI slop (delve, crucial, leverage, game-changer, unlock, etc.)
-2. لا هاشتاقات
-3. لا أرقام بدون مصدر
-4. لا قوائم مرقمة أو نقط متطابقة
-5. صوت طبيعي — كأنك صديق ذكي يتكلم، مو آلة محتوى
-6. أقل من 240 حرف
-7. لا تكرر نفس الفكرة بطريقة مختلفة
-8. أضف عنصر شخصي أو مرجع محدد
+Strict rules:
+1. No AI slop words (delve, crucial, leverage, game-changer, unlock, etc.)
+2. No hashtags
+3. No numbers without source
+4. No identical numbered or bullet lists
+5. Natural voice — like a smart friend talking, not a content machine
+6. Under 240 characters
+7. No repeating the same idea in different words
+8. Add a personal element or specific reference
 
 ${learningContext}
 
 IMPORTANT: When you write, you MUST follow the APPLICATION INSTRUCTION for each concept. Each concept tells you HOW to apply it — read the "HOW TO APPLY" instruction and follow it precisely. Do not just reference the concept — embody it in your writing technique.
 
-اكتب نص واحد فقط. بدون شرح أو ملاحظات.`
+Return final text only. No explanation or notes.`
       },
       {
         role: 'user',
         content: type === 'quote'
-          ? `اكتب نص اقتباس لهذي التغريدة:\n\n"${tweet.text?.slice(0, 300)}"\n\nالاقتباس يضيف قيمة أو زاوية مختلفة.`
-          : `اكتب رد مفيد لهذي التغريدة:\n\n"${tweet.text?.slice(0, 300)}"\n\nالرد يضيف معلومة أو تجربة أو سؤال متابع.`
+          ? `Write a quote tweet for this:\n\n"${tweet.text?.slice(0, 300)}"\n\nThe quote must add value or a different angle.`
+          : `Write a useful reply to this tweet:\n\n"${tweet.text?.slice(0, 300)}"\n\nThe reply must add information, experience, or a follow-up question.`
       }
     ]);
 
     const text = String(response || '').trim();
     if (text.length < 10 || text.length > 280) return null;
 
-    // سجّل إيش استخدم من المفاهيم
+    // Log which concepts were used
     if (hasBrainLearning) {
       for (const c of brainQuery.concepts.slice(0, 3)) {
         rulesUsed.push(c.concept_type || 'unknown');
@@ -1346,11 +1350,11 @@ async function craftThreadFromBrain(
   stylePatterns: any[]
 ): Promise<{ type: 'thread' | 'article'; text: string; why: string; rules: string[] } | null> {
   try {
-    // ═══ استرجاع ذكي من العقل ═══
+    // ═══ Smart retrieval from brain ═══
     const brainQuery = await queryBrainForContent('thread', 6, 5);
     const hasBrainLearning = brainQuery.concepts.length > 0 || brainQuery.patterns.length > 0;
 
-    // fallback لو العقل فارغ
+    // Fallback if brain is empty
     const fallbackPatterns = stylePatterns.slice(0, 5);
     const fallbackRules = algoRules.slice(0, 5);
 
@@ -1365,34 +1369,34 @@ async function craftThreadFromBrain(
     } else {
       topPatterns = fallbackPatterns;
       topRules = fallbackRules;
-      learningContext = `أنماط ناجحة لتستلهم منها:\n${topPatterns.map(p => `- ${p.pattern_name}: ${p.pattern_description}`).join('\n')}\n\nقواعد الخوارزمية:\n${topRules.map(r => `- ${r.rule}`).join('\n')}`;
+      learningContext = `Successful patterns for inspiration:\n${topPatterns.map(p => `- ${p.pattern_name}: ${p.pattern_description}`).join('\n')}\n\nAlgorithm rules:\n${topRules.map(r => `- ${r.rule}`).join('\n')}`;
     }
 
     const response = await callModel('content_crafting' as TaskType, [
       {
         role: 'system',
-        content: `أنت تكتب لحساب @${optionalEnv('X_USERNAME', '30piq')}.
+        content: `Write for X account @${optionalEnv('X_USERNAME', '30piq')}.
 
-قواعد صارمة:
-1. لا AI slop (delve, crucial, leverage, game-changer, unlock, etc.)
-2. لا هاشتاقات
-3. لا أرقام بدون مصدر
-4. صوت طبيعي — صديق ذكي مو آلة محتوى
-5. كل تغريدة في الثرد مستقلة وقوية لحالها
-6. التغريدة الأولى = هوك قوي (سؤال أو حقيقة صادمة أو رأي مثير)
-7. لا تكرار
+Strict rules:
+1. No AI slop (delve, crucial, leverage, game-changer, unlock, etc.)
+2. No hashtags
+3. No numbers without source
+4. Natural voice — smart friend, not a content machine
+5. Each tweet in the thread must be standalone-strong
+6. First tweet = strong hook (question, shocking fact, or bold opinion)
+7. No repetition
 
 ${learningContext}
 
 CRITICAL: You MUST follow the APPLICATION INSTRUCTION for each concept. Each concept tells you exactly HOW to apply it — follow the "HOW TO APPLY" instruction precisely. Do not just reference the concept — embody it in your writing technique and thread structure.
 
-اكتب ثريد من 3-5 تغريدات. افصل بين كل تغريدة بسطر فيه "---" فقط.`
+Write a thread of 3-5 tweets. Separate each tweet with a line containing only "---".`
       },
       {
         role: 'user',
         content: hasBrainLearning
-          ? `اكتب ثريد مبني على مفاهيم العقل المتعلمة. كل مفهوم فيه تعليمة تطبيق — اتبعها بدقة.`
-          : `اكتب ثريد عن واحد من هذي المواضيع بناءً على أنماط العقل:\n${topPatterns.map(p => p.pattern_name).join('، ')}`
+          ? `Write a thread based on the brain's learned concepts. Each concept has an application instruction — follow it precisely.`
+          : `Write a thread about one of these topics based on brain patterns:\n${topPatterns.map(p => p.pattern_name).join(', ')}`
       }
     ]);
 
@@ -1406,7 +1410,7 @@ CRITICAL: You MUST follow the APPLICATION INSTRUCTION for each concept. Each con
     return {
       type: 'thread',
       text,
-      why: `مبني على ${brainQuery.concepts.length || topRules.length} مفاهيم و${brainQuery.patterns.length || topPatterns.length} أنماط من العقل`,
+      why: `Built from ${brainQuery.concepts.length || topRules.length} concepts and ${brainQuery.patterns.length || topPatterns.length} brain patterns`,
       rules: usedRules
     };
   } catch {
@@ -1414,11 +1418,11 @@ CRITICAL: You MUST follow the APPLICATION INSTRUCTION for each concept. Each con
   }
 }
 
-// ═══ تحليل تغريدة واحدة ═══
+// ═══ Single Tweet Analysis ═══
 
 /**
- * يزحف تغريدة واحدة بالمعرف (للإضافة اليدوية)
- * يستخدم AI للتحليل العميق — ليس قوالب hardcoded
+ * Crawls a single tweet by ID (for manual addition)
+ * Uses AI for deep analysis — not hardcoded templates
  */
 export async function scanSingleTweet(tweetUrl: string): Promise<{
   ok: boolean;
@@ -1430,18 +1434,18 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
 }> {
   try {
     const match = tweetUrl.match(/\/status\/(\d+)/);
-    if (!match) return { ok: false, error: 'رابط التغريدة غير صحيح' };
+    if (!match) return { ok: false, error: 'Invalid tweet URL' };
 
     const tweetId = match[1];
     const base = twitterApiBase();
     const json = await fetchTwitterApiJson(`${base}/twitter/tweets?tweet_ids=${tweetId}`);
     const tweets = extractTweets(json);
 
-    if (!tweets.length) return { ok: false, error: 'لم يتم العثور على التغريدة' };
+    if (!tweets.length) return { ok: false, error: 'Tweet not found' };
 
     const raw = tweets[0];
 
-    // تشخيص في server logs فقط
+    // Diagnostic in server logs only
     const rawKeys = Object.keys(raw || {});
     const mediaRelatedKeys = rawKeys.filter(k => /media|photo|video|image|gif|attach|entity/i.test(k));
     console.log(`[scanSingleTweet] Raw keys: ${rawKeys.join(', ')}`);
@@ -1524,11 +1528,11 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
     const score = scoreXTweet(normalized);
     const media = extractMediaFromTweet(normalized, json);
 
-    // خزّن التحليل
+    // Store the analysis
     const supabase = supabaseAdmin();
 
     // ═══ Deep analysis with AI — English, no hardcoded niche, full metadata ═══
-    // جلب المفاهيم الموجودة في العقل عشان التحليل ما يكررها
+    // Fetch existing concepts from brain so analysis doesn't repeat them
     const { data: existingRules } = await supabase
       .from('x_algorithm_learning_rules')
       .select('rule_type, rule, evidence')
@@ -1555,8 +1559,8 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
       await supabase.from('viral_tweet_analyses').upsert({
         tweet_id: analysis.tweet_id,
         tweet_url: analysis.tweet_url,
-        creator_handle: username,       // ← الاسم الصحيح (مو username)
-        tweet_text: analysis.text.slice(0, 500),  // ← الاسم الصحيح (مو text)
+        creator_handle: username,       // ← Correct name (not username)
+        tweet_text: analysis.text.slice(0, 500),  // ← Correct field name (not text)
         engagement_score: score,
         engagement_per_1k_followers: analysis.engagement_per_1k_followers,
         tweet_type: tweetType,
@@ -1566,13 +1570,13 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
       console.error('[scanSingleTweet] upsert error:', dbErr.message);
     }
 
-    // ═══ خزّن التحليل العميق في العقل — v3.2: تعلم حقيقي ═══
+    // ═══ Store deep analysis in brain — v3.2: real learning ═══
     try {
       const confidenceBase = deepAnalysis.confidenceLevel === 'high' ? 7 : deepAnalysis.confidenceLevel === 'medium' ? 5 : 3;
       const scoreBoost = Math.min(3, Math.round(score / 100));
       const baseConfidence = Math.min(10, confidenceBase + scoreBoost);
 
-      // 1. المفهوم الدقيق — أهم شيء يتعلمه العقل
+      // 1. Precise concept — most important thing the brain learns
       if (deepAnalysis.preciseConcept && deepAnalysis.preciseConcept !== 'No concept extracted') {
         await upsertBrainConcept(supabase, 'x_algorithm_learning_rules',
           { rule_type: 'precise_concept', rule: deepAnalysis.preciseConcept },
@@ -1592,7 +1596,7 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
         );
       }
 
-      // 2. الآلية النفسية — كيف فعّل الناس
+      // 2. Psychological mechanism — how it activated people
       if (deepAnalysis.psychologicalTrigger && deepAnalysis.psychologicalTrigger !== 'Unidentified trigger') {
         await upsertBrainConcept(supabase, 'x_algorithm_learning_rules',
           { rule_type: 'psychological_trigger', rule: deepAnalysis.psychologicalTrigger },
@@ -1612,7 +1616,7 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
         );
       }
 
-      // 3. نمط الانتشار
+      // 3. Viral pattern
       if (deepAnalysis.viralReason) {
         await upsertBrainConcept(supabase, 'x_algorithm_learning_rules',
           { rule_type: 'viral_pattern', rule: deepAnalysis.viralReason },
@@ -1632,13 +1636,13 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
         );
       }
 
-      // 4. نمط أسلوبي — كيف كُتبت
+      // 4. Style pattern — how it was written
       if (deepAnalysis.stylePattern) {
         await upsertBrainConcept(supabase, 'viral_style_patterns',
           { pattern_name: deepAnalysis.stylePattern.slice(0, 100) },
           {
             pattern_name: deepAnalysis.stylePattern.slice(0, 100),
-            pattern_type: deepAnalysis.psychologicalTrigger ? 'hook' : 'structure',  // ← مطلوب NOT NULL!
+            pattern_type: deepAnalysis.psychologicalTrigger ? 'hook' : 'structure',  // ← Required NOT NULL!
             pattern_description: `${deepAnalysis.stylePattern}. Trigger: ${deepAnalysis.psychologicalTrigger}`,
             adaptation_for_30piq: deepAnalysis.adaptation || '',
             why_it_works: deepAnalysis.viralReason || '',
@@ -1653,7 +1657,7 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
         );
       }
 
-      // 5. قاعدة وسائط
+      // 5. Media rule
       if (media.length > 0 && deepAnalysis.mediaImpact) {
         const mediaRule = `${media.map(m => m.type).join('+')}: ${deepAnalysis.mediaImpact}`;
         await upsertBrainConcept(supabase, 'x_algorithm_learning_rules',
@@ -1674,7 +1678,7 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
         );
       }
 
-      // 6. سياق المحادثة (إن وُجد)
+      // 6. Conversation context (if any)
       if (deepAnalysis.conversationContext && deepAnalysis.conversationContext !== 'No reply data available') {
         await upsertBrainConcept(supabase, 'x_algorithm_learning_rules',
           { rule_type: 'conversation_context', rule: deepAnalysis.conversationContext.slice(0, 200) },
@@ -1704,17 +1708,17 @@ export async function scanSingleTweet(tweetUrl: string): Promise<{
       deepAnalysis
     };
   } catch (e: any) {
-    return { ok: false, error: e.message || 'خطأ غير معروف' };
+    return { ok: false, error: e.message || 'Unknown error' };
   }
 }
 
-// ═══ تحسين ذاتي: العقل يراقب نفسه ويحسّن قواعده ═══
+// ═══ Self-improvement: Brain monitors itself and refines its rules ═══
 
 /**
- * يحلل قواعد العقل وأنماطه، يعزّز القوي ويضعّف الضعيف
- * - القواعد اللي لها evidence من تغريدات حقيقية تزيد ثقتها
- * - القواعد المكررة أو العامة تنخفض ثقتها
- * - القواعد اللي ثقتها تحت 3 تنقل لأرشيف
+ * Analyzes brain rules and patterns, strengthens strong ones and weakens weak ones
+ * - Rules with evidence from real tweets increase confidence
+ * - Duplicate or generic rules decrease confidence
+ * - Rules with confidence below 3 are moved to archive
  */
 async function selfImproveBrain(supabase: any, debugLog: string[]): Promise<{
   strengthened: number;
@@ -1725,7 +1729,7 @@ async function selfImproveBrain(supabase: any, debugLog: string[]): Promise<{
   let weakened = 0;
   let pruned = 0;
 
-  // 1. عزّز القواعد اللي لها evidence حقيقي (من real_time_crawl أو تحليل تغريدات)
+  // 1. Strengthen rules with real evidence (from real_time_crawl or tweet analysis)
   try {
     const { data: realEvidence } = await supabase
       .from('x_algorithm_learning_rules')
@@ -1746,7 +1750,7 @@ async function selfImproveBrain(supabase: any, debugLog: string[]): Promise<{
     }
   } catch {}
 
-  // 2. ابحث عن القواعد المكررة وضعّفها
+  // 2. Find duplicate rules and weaken them
   try {
     const { data: allRules } = await supabase
       .from('x_algorithm_learning_rules')
@@ -1756,7 +1760,7 @@ async function selfImproveBrain(supabase: any, debugLog: string[]): Promise<{
     if (allRules?.length) {
       const seen = new Map<string, string[]>();
       for (const rule of allRules) {
-        // بص على أول 60 حرف كمفتاح تكرار
+        // Look at first 60 chars as duplication key
         const key = `${rule.rule_type}:${(rule.rule || '').slice(0, 60).toLowerCase().trim()}`;
         if (!seen.has(key)) seen.set(key, []);
         seen.get(key)!.push(rule.id);
@@ -1764,7 +1768,7 @@ async function selfImproveBrain(supabase: any, debugLog: string[]): Promise<{
 
       for (const [key, ids] of seen) {
         if (ids.length > 1) {
-          // أبقي الأولى كاملة، والباقي خفض ثقتها
+          // Keep first one intact, lower confidence of duplicates
           for (let i = 1; i < ids.length; i++) {
             await supabase.from('x_algorithm_learning_rules')
               .update({
@@ -1780,7 +1784,7 @@ async function selfImproveBrain(supabase: any, debugLog: string[]): Promise<{
     }
   } catch {}
 
-  // 3. أرشف القواعد الضعيفة جداً (ثقة أقل من 3 ومو من تحليل حقيقي)
+  // 3. Archive very weak rules (confidence below 3 and not from real analysis)
   try {
     const { count: prunedCount } = await supabase
       .from('x_algorithm_learning_rules')
@@ -1792,7 +1796,7 @@ async function selfImproveBrain(supabase: any, debugLog: string[]): Promise<{
     pruned = prunedCount || 0;
   } catch {}
 
-  // 4. عزّز أنماط الأسلوب اللي لها source_handles حقيقي
+  // 4. Strengthen style patterns with real source_handles
   try {
     const { data: sourcedPatterns } = await supabase
       .from('viral_style_patterns')
@@ -1804,7 +1808,7 @@ async function selfImproveBrain(supabase: any, debugLog: string[]): Promise<{
       for (const pattern of sourcedPatterns) {
         const handles = pattern.source_handles;
         if (Array.isArray(handles) && handles.length > 0) {
-          const boost = Math.min(handles.length, 3); // كل مصدر يزيد 1 (حد 3)
+          const boost = Math.min(handles.length, 3); // Each source adds 1 (max 3)
           const newScore = Math.min(10, (pattern.confidence_score || 5) + boost);
           if (newScore > pattern.confidence_score) {
             await supabase.from('viral_style_patterns')
@@ -1821,8 +1825,8 @@ async function selfImproveBrain(supabase: any, debugLog: string[]): Promise<{
 }
 
 /**
- * توليد محتوى استباقي — مو رد على تغريدة، بل محتوى أصلي من العقل
- * يستخدم كل ما تعلمه العقل لصنع ثريد أو مقال أو تغريدة
+ * Proactive content generation — not a reply to a tweet, but original content from the brain
+ * Uses everything the brain has learned to craft a thread, article, or tweet
  */
 export async function generateProactiveContent(type: 'tweet' | 'thread' | 'article' = 'thread'): Promise<{
   ok: boolean;
@@ -1837,7 +1841,7 @@ export async function generateProactiveContent(type: 'tweet' | 'thread' | 'artic
     const hasLearning = brainQuery.concepts.length > 0 || brainQuery.patterns.length > 0;
 
     if (!hasLearning) {
-      return { ok: false, error: 'العقل فارغ — شغّل 🧠 تشغيل كامل أولًا' };
+      return { ok: false, error: 'Brain is empty — run full scan first' };
     }
 
     const username = optionalEnv('X_USERNAME', '30piq');
@@ -1878,7 +1882,7 @@ Write ONLY the content. No explanations or notes.`
     ]);
 
     const content = String(response || '').trim();
-    if (content.length < 20) return { ok: false, error: 'المحتوى المولّد قصير جداً' };
+    if (content.length < 20) return { ok: false, error: 'Generated content is too short' };
 
     return {
       ok: true,
@@ -1888,6 +1892,6 @@ Write ONLY the content. No explanations or notes.`
       patterns_used: brainQuery.patterns.length
     };
   } catch (e: any) {
-    return { ok: false, error: e.message || 'خطأ في التوليد' };
+    return { ok: false, error: e.message || 'Generation error' };
   }
 }

@@ -4,8 +4,8 @@ import { Pool } from 'pg';
 /**
  * GET /api/db-setup
  *
- * يفحص كل الجداول المطلوبة ويعطي حالة كل واحد
- * + يعطي تعليمات واضحة لو في جدول ناقص
+ * Checks all required tables and reports the status of each
+ * + Provides clear instructions if a table is missing
  */
 export async function GET(req: Request) {
   try {
@@ -142,7 +142,7 @@ function assertAuthorized(req: Request): void {
 /**
  * POST /api/db-setup
  *
- * يشغّل alignment migration مباشرة على Supabase
+ * Runs alignment migration directly on Supabase
  * Body: { action: 'run_alignment' }
  */
 export async function POST(req: Request) {

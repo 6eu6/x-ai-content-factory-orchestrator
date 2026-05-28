@@ -4,8 +4,8 @@ import { shieldCheck } from '../../../lib/account-shield';
 /**
  * POST /api/shield-check
  * 
- * يفحص أي محتوى قبل التسليم:
- * - Slop detection (كلمات وأنماط AI)
+ * Checks content before delivery:
+ * - Slop detection (AI words and patterns)
  * - Low-follower safety rules
  * - Algorithm violation check
  * - Originality gate

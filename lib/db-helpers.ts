@@ -1,5 +1,5 @@
 /**
- * مساعدات قاعدة البيانات — وظائف مشتركة
+ * Database helpers — shared utility functions
  */
 export async function insertIfMissing(supabase: any, table: string, where: Record<string, any>, payload: Record<string, any>) {
   let query = supabase.from(table).select('id').limit(1);

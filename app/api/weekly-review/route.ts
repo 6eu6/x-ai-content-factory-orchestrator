@@ -28,7 +28,7 @@ async function run(req: Request) {
     const followersEnd = account.data?.followers_count ?? null;
     const netFollowers = (followersEnd != null && followersStart != null) ? followersEnd - followersStart : null;
 
-    // توليد دروس واستراتيجية بالذكاء الاصطناعي
+    // Generate lessons and strategy using AI
     let lessonsLearned = ['Compare planned actions against published URLs.', 'Use top-performing content as next week seed.'];
     let nextWeekStrategy = `Completed actions: ${completedActions}. Pending actions: ${pendingActions}.`;
     try {

@@ -3,6 +3,8 @@ import { scanXAccounts } from '../../../lib/content-engine-v3';
 import { decideTelegramOpportunities, stageFromFollowerCount } from '../../../lib/decision-engine';
 import { supabaseAdmin } from '../../../lib/supabase';
 import { enrichOpportunitiesWithRulePerformance } from '../../../lib/enrich-opportunities-with-rule-performance';
+import { filterPublishableOpportunities } from '../../../lib/content-policy';
+import type { ContentOpportunity } from '../../../lib/content-engine-v3';
 
 // ═══ Error sanitization — never leak secrets ═══
 
@@ -171,12 +173,20 @@ export async function GET(req: Request) {
     }
     timings.enrichment_ms = Date.now() - enrichStart;
 
-    // ═══ 4. Decision ═══
-    const decisionStart = Date.now();
-    const decision = decideTelegramOpportunities(scanResult.opportunities || [], stage);
-    timings.decision_ms = Date.now() - decisionStart;
+    // ═══ 4. Publish gate — filter out non-publishable content BEFORE decision ═══
+    const publishGate = filterPublishableOpportunities(scanResult.opportunities || []);
 
-    // ═══ 5. Log to Supabase ═══
+    // ═══ 5. Decision — only on gated publishable opportunities ═══
+    const decisionStart = Date.now();
+    const decision = decideTelegramOpportunities(publishGate.accepted as ContentOpportunity[] || [], stage);
+    timings.decision_ms = Date.now() - decisionStart;
+    (decision as any)._publishGate = {
+      accepted: publishGate.accepted.length,
+      rejected: publishGate.rejected.length,
+      reasons: publishGate.rejected.slice(0, 5).map(r => r.reason)
+    };
+
+    // ═══ 6. Log to Supabase ═══
     const supabase = supabaseAdmin();
     try {
       await supabase.from('decision_runs').insert({
@@ -185,12 +195,13 @@ export async function GET(req: Request) {
         raw_opportunities: scanResult.opportunities?.length || 0,
         selected_count: notify ? decision.selected.length : 0,
         held_count: decision.held.length + (notify ? 0 : decision.selected.length),
-        budget: decision.budget,
+        budget: { ...decision.budget, publish_gate: (decision as any)._publishGate },
         selected_payload: notify ? decision.selected.slice(0, 5).map((o: any) => ({
           type: o.type,
           score: o.decision_score?.final_score,
           source_tweet_url: o.source_tweet_url,
           source_author: o.source_author,
+          crafted_text: (o.crafted_text || '').slice(0, 280),
           brain_rules_used: (o.brain_rules_used || []).slice(0, 20),
           shield_passed: o.shield_passed ?? null
         })) : [],
@@ -225,21 +236,26 @@ export async function GET(req: Request) {
         account_limit: accountLimit,
         tweets_per_account: tweetsPerAccount,
         accounts_scanned: scanResult.accounts_scanned,
+        actual_accounts_scanned: scanResult.actual_accounts_scanned ?? scanResult.accounts_scanned,
+        manual_tweets_loaded: scanResult.manual_tweets_loaded ?? 0,
         tweets_analyzed: scanResult.tweets_analyzed,
         viral_found: scanResult.viral_tweets_found,
         raw_opportunities: scanResult.opportunities?.length || 0,
+        gate_accepted: publishGate.accepted.length,
+        gate_rejected: publishGate.rejected.length,
         brain_updates: scanResult.brain_updates,
         media_downloaded: scanResult.media_downloaded,
         light_mode: scanResult.light_mode || true,
         debug_log: (scanResult.debug_log || []).slice(0, 20)
       },
       decision: {
-        evaluated: scanResult.opportunities?.length || 0,
+        evaluated: publishGate.accepted.length || 0,
         selected_if_notify: decision.selected.length,
         held: decision.held.length,
         min_final_score: decision.budget.min_final_score,
         delivery: notify ? 'telegram_delivery_requested' : 'silent_learning_only',
-        rule_performance: rulePerformanceStats
+        rule_performance: rulePerformanceStats,
+        publish_gate: (decision as any)._publishGate
       }
     });
   } catch (err: any) {

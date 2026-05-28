@@ -1,35 +1,35 @@
 import { supabaseAdmin } from './supabase';
 
 /**
- * Brain Query System v1.0 — استرجاع ذكي للمفاهيم مع تعليمات تطبيق دقيقة
+ * Brain Query System v1.0 — Smart concept retrieval with precise application instructions
  *
- * المشكلة اللي كان يحلها:
- * - المحتوى كان ياخذ المفاهيم كـ JSON خام بدون تعليمات واضحة
- * - النموذج ما كان يعرف إيش يسوي مع كل مفهوم
- * - ما كان يربط المفهوم بنوع المحتوى المناسب
+ * Problem it solves:
+ * - Content was getting concepts as raw JSON without clear instructions
+ * - The model didn't know what to do with each concept
+ * - It didn't link concepts to the appropriate content type
  *
- * الحل:
- * - كل مفهوم يجي مع APPLICATION INSTRUCTION — تعليمة واضحة كيف ينطبق
- * - المفاهيم تتكون حسب نوع المحتوى (tweet, thread, reply, quote, article)
- * - كل نوع محتوى ياخذ المفاهيم الأنسب له + تعليمات التطبيق
+ * Solution:
+ * - Each concept comes with an APPLICATION INSTRUCTION — a clear directive on how to apply it
+ * - Concepts are composed based on content type (tweet, thread, reply, quote, article)
+ * - Each content type gets the most suitable concepts + application instructions
  */
 
-// ═══ أنواع المحتوى ═══
+// ═══ Content types ═══
 
 export type ContentType = 'single_tweet' | 'thread' | 'reply' | 'quote' | 'article';
 
-// ═══ هيكل المفهوم مع تعليمات التطبيق ═══
+// ═══ Concept structure with application instructions ═══
 
 export type BrainConcept = {
   id: number;
   concept_type: string;        // precise_concept, psychological_trigger, viral_pattern, etc.
-  concept_text: string;        // نص المفهوم
-  evidence: string;            // الأدلة الداعمة
-  confidence: number;          // درجة الثقة
-  applies_to: string;          // أين ينطبق (content_strategy, engagement_crafting, etc.)
-  source_type: string;         // مصدر المفهوم
-  application_instruction: string;  // 🆕 تعليمة التطبيق — كيف ينطبق بدقة
-  relevance_to_task: string;   // 🆕 لما هذا المفهوم مهم لهالمهمة بالذات
+  concept_text: string;        // Concept text
+  evidence: string;            // Supporting evidence
+  confidence: number;          // Confidence level
+  applies_to: string;          // Where it applies (content_strategy, engagement_crafting, etc.)
+  source_type: string;         // Concept source
+  application_instruction: string;  // 🆕 Application instruction — how to apply precisely
+  relevance_to_task: string;   // 🆕 Why this concept matters for this specific task
 };
 
 export type StylePattern = {
@@ -40,7 +40,7 @@ export type StylePattern = {
   why_it_works: string;
   adaptation: string;
   confidence: number;
-  application_instruction: string;  // 🆕 كيف تستخدم النمط
+  application_instruction: string;  // 🆕 How to use the pattern
 };
 
 export type BrainQueryResult = {
@@ -48,10 +48,10 @@ export type BrainQueryResult = {
   patterns: StylePattern[];
   total_rules: number;
   total_patterns: number;
-  compiled_prompt_context: string;  // 🆕 سياق جاهز للبرومبت — مرتب ومنظم
+  compiled_prompt_context: string;  // 🆕 Ready-made prompt context — organized and structured
 };
 
-// ═══ خريطة التطبيق — كل نوع مفهوم + نوع محتوى = تعليمة ═══
+// ═══ Application map — each concept type + content type = instruction ═══
 
 const APPLICATION_MAP: Record<string, Record<ContentType, string>> = {
   precise_concept: {
@@ -129,14 +129,14 @@ const STYLE_APPLICATION_MAP: Record<string, Record<ContentType, string>> = {
   }
 };
 
-// ═══ الوظيفة الأساسية — استرجاع ذكي ═══
+// ═══ Core function — smart retrieval ═══
 
 /**
- * queryBrainForContent — يرجع المفاهيم مع تعليمات تطبيق دقيقة
+ * queryBrainForContent — returns concepts with precise application instructions
  *
- * @param contentType نوع المحتوى اللي نبنيه
- * @param maxConcepts عدد المفاهيم الأقصى (default 8)
- * @param maxPatterns عدد الأنماط الأسلوبية الأقصى (default 5)
+ * @param contentType The content type being built
+ * @param maxConcepts Maximum number of concepts (default 8)
+ * @param maxPatterns Maximum number of style patterns (default 5)
  */
 export async function queryBrainForContent(
   contentType: ContentType,
@@ -145,7 +145,7 @@ export async function queryBrainForContent(
 ): Promise<BrainQueryResult> {
   const supabase = supabaseAdmin();
 
-  // 1. جلب القواعد الخوارزمية — الأعلى ثقة
+  // 1. Fetch algorithm rules — highest confidence
   const { data: algoRules } = await supabase
     .from('x_algorithm_learning_rules')
     .select('id, rule_type, rule, evidence, confidence_score, applies_to, source_type, status')
@@ -153,7 +153,7 @@ export async function queryBrainForContent(
     .order('confidence_score', { ascending: false })
     .limit(30);
 
-  // 2. جلب أنماط الأسلوب
+  // 2. Fetch style patterns
   const { data: stylePatterns } = await supabase
     .from('viral_style_patterns')
     .select('id, pattern_name, pattern_type, pattern_description, why_it_works, adaptation_for_30piq, confidence_score, status')
@@ -161,17 +161,17 @@ export async function queryBrainForContent(
     .order('confidence_score', { ascending: false })
     .limit(15);
 
-  // 3. تحويل القواعد لمفاهيم مع تعليمات تطبيق
+  // 3. Convert rules to concepts with application instructions
   const concepts: BrainConcept[] = (algoRules || [])
     .filter(r => {
-      // فلترة حسب نوع المحتوى
+      // Filter by content type
       const appliesTo = String(r.applies_to || '');
       if (contentType === 'single_tweet') return appliesTo.includes('content_strategy') || appliesTo.includes('engagement_crafting') || appliesTo.includes('viral_mechanics');
       if (contentType === 'thread') return appliesTo.includes('content_strategy') || appliesTo.includes('viral_mechanics');
       if (contentType === 'reply') return appliesTo.includes('engagement_crafting') || appliesTo.includes('reply_strategy');
       if (contentType === 'quote') return appliesTo.includes('engagement_crafting') || appliesTo.includes('content_strategy');
       if (contentType === 'article') return appliesTo.includes('content_strategy') || appliesTo.includes('viral_mechanics');
-      return true; // لو ما عندنا فلتر، خلّي الكل
+      return true; // If no filter, allow all
     })
     .slice(0, maxConcepts)
     .map(r => {
@@ -192,7 +192,7 @@ export async function queryBrainForContent(
       };
     });
 
-  // 4. تحويل الأنماط الأسلوبية مع تعليمات تطبيق
+  // 4. Convert style patterns with application instructions
   const patterns: StylePattern[] = (stylePatterns || [])
     .slice(0, maxPatterns)
     .map(p => {
@@ -212,7 +212,7 @@ export async function queryBrainForContent(
       };
     });
 
-  // 5. بناء السياق الجاهز للبرومبت — منظّم وواضح
+  // 5. Build ready-made prompt context — organized and clear
   const compiledPromptContext = buildPromptContext(concepts, patterns, contentType);
 
   return {
@@ -224,7 +224,7 @@ export async function queryBrainForContent(
   };
 }
 
-// ═══ بناء السياق الجاهز ═══
+// ═══ Build ready-made context ═══
 
 function buildPromptContext(concepts: BrainConcept[], patterns: StylePattern[], contentType: ContentType): string {
   const lines: string[] = [];
@@ -236,7 +236,7 @@ function buildPromptContext(concepts: BrainConcept[], patterns: StylePattern[], 
     lines.push('LEARNED CONCEPTS (apply each one using its APPLICATION INSTRUCTION):');
     lines.push('');
 
-    // رتّب حسب الثقة
+    // Sort by confidence
     const sorted = [...concepts].sort((a, b) => b.confidence - a.confidence);
 
     for (let i = 0; i < sorted.length; i++) {
@@ -274,11 +274,11 @@ function buildPromptContext(concepts: BrainConcept[], patterns: StylePattern[], 
   return lines.join('\n');
 }
 
-// ═══ استرجاع سريع لأعلى المفاهيم (للاستخدام في content-engine-v3) ═══
+// ═══ Quick retrieval of top concepts (for use in content-engine-v3) ═══
 
 /**
- * getTopBrainRules — يرجع أعلى القواعد بدون تعليمات مفصلة
- * (متوافق مع الاستخدام الحالي في discoverOpportunities)
+ * getTopBrainRules — returns top rules without detailed instructions
+ * (compatible with current usage in discoverOpportunities)
  */
 export async function getTopBrainRules(limit: number = 10) {
   const supabase = supabaseAdmin();
@@ -292,7 +292,7 @@ export async function getTopBrainRules(limit: number = 10) {
 }
 
 /**
- * getTopStylePatterns — يرجع أعلى الأنماط
+ * getTopStylePatterns — returns top style patterns
  */
 export async function getTopStylePatterns(limit: number = 10) {
   const supabase = supabaseAdmin();
@@ -306,7 +306,7 @@ export async function getTopStylePatterns(limit: number = 10) {
 }
 
 /**
- * getBrainStats — يرجع إحصائيات العقل
+ * getBrainStats — returns brain statistics
  */
 export async function getBrainStats() {
   const supabase = supabaseAdmin();

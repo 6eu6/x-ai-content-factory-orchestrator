@@ -30,9 +30,9 @@ const GENERIC_PATTERNS = [
 ];
 
 /**
- * أنماط أول شخص خطرة — فقط اللي تمثل ادعاءات غير موثقة
- * الاستخدام العادي مثل "I think" أو "my approach" مسموح
- * مُعرّفة في lib/constants.ts
+ * Dangerous first-person patterns — only those representing unsourced claims
+ * Normal usage like "I think" or "my approach" is allowed
+ * Defined in lib/constants.ts
  */
 // FIRST_PERSON_CLAIM_PATTERNS is imported from constants.ts
 
@@ -49,8 +49,8 @@ export function evaluateContentQuality(item: any): QualityResult {
   if (text.length > 240) reasons.push('over_240_chars');
   if (/#/.test(text)) reasons.push('has_hashtag');
 
-  // فحص أول شخص — فقط الأنماط اللي تمثل ادعاءات غير موثقة
-  // الاستخدام العادي مثل "I think" أو "my approach" لا يُرفض
+  // First-person check — only patterns representing unsourced claims
+  // Normal usage like "I think" or "my approach" is not rejected
   const hasFirstPersonClaim = FIRST_PERSON_CLAIM_PATTERNS.some(p => p.test(text));
   if (hasFirstPersonClaim && !hasSource(text, item)) reasons.push('first_person_unverified_claim');
 

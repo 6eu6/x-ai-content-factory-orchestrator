@@ -1,13 +1,13 @@
 import { supabaseAdmin } from '../../../lib/supabase';
 
 /**
- * Brain Viewer API — صفحة ويب تعرض محتويات العقل بتنسيق جميل
+ * Brain Viewer API — Web page that displays brain contents in a formatted view
  *
- * بدل ما نرسل كل شيء في تلقرام (اللي يفشل بسبب الحد الأقصى للرسالة),
- * نرسل رابط لهالصفحة.
+ * Instead of sending everything to Telegram (which fails due to message size limits),
+ * we send a link to this page.
  *
  * GET /api/brain-viewer
- * GET /api/brain-viewer?format=json — بيانات خام JSON
+ * GET /api/brain-viewer?format=json — Raw JSON data
  */
 export async function GET(req: Request) {
   try {
@@ -16,9 +16,9 @@ export async function GET(req: Request) {
 
     const supabase = supabaseAdmin();
 
-    // ═══ جلب كل البيانات ═══
+    // ═══ Fetch all data ═══
 
-    // 1. القواعد الخوارزمية
+    // 1. Algorithm rules
     const { data: algoRules } = await supabase
       .from('x_algorithm_learning_rules')
       .select('*')
@@ -26,7 +26,7 @@ export async function GET(req: Request) {
       .order('confidence_score', { ascending: false })
       .limit(100);
 
-    // 2. أنماط الأسلوب
+    // 2. Style patterns
     const { data: stylePatterns } = await supabase
       .from('viral_style_patterns')
       .select('*')
@@ -34,7 +34,7 @@ export async function GET(req: Request) {
       .order('confidence_score', { ascending: false })
       .limit(50);
 
-    // 3. فرص MCP
+    // 3. MCP opportunities
     const { data: mcpOpps } = await supabase
       .from('mcp_opportunity_map')
       .select('*')
@@ -42,7 +42,7 @@ export async function GET(req: Request) {
       .order('confidence_score', { ascending: false })
       .limit(20);
 
-    // 4. قواعد النظام
+    // 4. System rules
     const { data: sysRules } = await supabase
       .from('system_learning_rules')
       .select('*')
@@ -80,7 +80,7 @@ export async function GET(req: Request) {
       return Response.json(data);
     }
 
-    // ═══ HTML format — صفحة ويب جميلة ═══
+    // ═══ HTML format — Nice web page ═══
     const html = buildBrainHtml(data);
     return new Response(html, {
       headers: { 'content-type': 'text/html; charset=utf-8' }
@@ -90,7 +90,7 @@ export async function GET(req: Request) {
   }
 }
 
-// ═══ بناء صفحة HTML ═══
+// ═══ Build HTML page ═══
 
 function buildBrainHtml(data: any): string {
   const algoRules: any[] = data.algorithm_rules;
@@ -100,7 +100,7 @@ function buildBrainHtml(data: any): string {
   const workingMemory: any[] = data.working_memory;
   const antiPatterns: any[] = data.anti_patterns;
 
-  // تجميع القواعد حسب النوع
+  // Group rules by type
   const byType: Record<string, any[]> = {};
   for (const r of algoRules) {
     const t = r.rule_type || 'unknown';

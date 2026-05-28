@@ -3,9 +3,9 @@ import { supabaseAdmin } from '../../../lib/supabase';
 /**
  * GET /api/health
  *
- * فحص صحة النظام — بدون حاجة لسر
- * يفحص اتصال Supabase ويظهر حالة الجداول الأساسية
- * + يختبر الأعمدة المهمة اللي الكود يحتاجها
+ * System health check — no secret required
+ * Checks Supabase connection and shows status of key tables
+ * + Tests critical columns that the code depends on
  */
 export async function GET() {
   const checks: Record<string, { ok: boolean; detail?: string }> = {};

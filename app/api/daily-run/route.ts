@@ -120,6 +120,8 @@ async function run(req: Request) {
         account_limit: accountLimit,
         tweets_per_account: tweetsPerAccount,
         accounts_scanned: scanResult.accounts_scanned,
+        actual_accounts_scanned: scanResult.actual_accounts_scanned ?? scanResult.accounts_scanned,
+        manual_tweets_loaded: scanResult.manual_tweets_loaded ?? 0,
         tweets_analyzed: scanResult.tweets_analyzed,
         viral_found: scanResult.viral_tweets_found,
         raw_opportunities: scanResult.opportunities?.length || 0,
@@ -144,7 +146,7 @@ async function deliverToTelegram(chatId: string, result: any, username: string, 
   lines.push(`الحساب: @${username} | المتابعون: ${followers || 0}`);
   lines.push(`المرحلة: <b>${decision.stage}</b>`);
   lines.push(`━━━━━━━━━━━━━━━━━━━━`);
-  lines.push(`📊 زحف: ${result.accounts_scanned} حساب | ${result.tweets_analyzed} تغريدة | خام: ${result.opportunities?.length || 0}`);
+  lines.push(`📊 زحف: ${result.actual_accounts_scanned ?? result.accounts_scanned} حساب | ${result.manual_tweets_loaded ?? 0} تغريدة يدوية | ${result.tweets_analyzed} محللة | خام: ${result.opportunities?.length || 0}`);
   lines.push(`🧠 عقل: +${result.brain_updates.algorithm_rules} قاعدة +${result.brain_updates.style_patterns} نمط`);
   lines.push(`🛡️ بوابة النشر: ${gate.accepted} صالح | ${gate.rejected} مرفوض`);
   lines.push(`🎯 القرار: ${decision.selected.length} مرسل | ${decision.held.length} مؤجل | الحد الأدنى: ${decision.budget.min_final_score}`);

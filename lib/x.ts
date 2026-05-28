@@ -115,7 +115,7 @@ function normalizeTwitterApiTweet(t: any) {
       bookmark_count: Number(t.bookmarkCount || t.bookmarks || 0),
       view_count: Number(t.viewCount || t.views || 0)
     },
-    // دمج entities + extendedEntities (TwitterAPI.io يرسل الوسائط في extendedEntities)
+    // Merge entities + extendedEntities (TwitterAPI.io sends media in extendedEntities)
     entities: t.entities || t.extendedEntities || {},
     extended_entities: t.extendedEntities || t.extended_entities || t.entities || {},
     is_reply: Boolean(t.isReply || t.in_reply_to_status_id),

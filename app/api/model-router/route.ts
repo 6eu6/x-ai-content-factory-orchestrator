@@ -4,14 +4,14 @@ import { getDefaultRouting, clearRoutingCache, TaskType } from '../../../lib/mod
 
 /**
  * GET /api/model-router
- * يرجع كل قواعد التوجيه (من Supabase + الافتراضية)
+ * Returns all routing rules (from Supabase + defaults)
  *
  * POST /api/model-router
- * يضيف أو يحدّث قاعدة توجيه
+ * Adds or updates a routing rule
  * Body: { task_type, model_id, temperature?, max_tokens?, top_p?, response_format?, description?, active?, provider? }
  *
  * DELETE /api/model-router?task_type=xxx
- * يحذف قاعدة توجيه (يعطلها)
+ * Deletes a routing rule (deactivates it)
  */
 export async function GET(req: Request) {
   try {

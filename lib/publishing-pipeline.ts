@@ -6,13 +6,13 @@ import { contentNeedsMedia, generateMediaPipeline, generateAndDeliverImage } fro
 import { ContentType } from './content-type-engine';
 
 /**
- * Publishing Pipeline v2 — مسار تسليم المحتوى المنسق لتليجرام
+ * Publishing Pipeline v2 — Formatted content delivery pipeline to Telegram
  *
- * تحسينات:
- * 1. تنسيق أفضل لكل نوع محتوى
- * 2. إرسال صور مولّدة لتليجرام
- * 3. تشغيل ماسح الأداء تلقائياً بعد التسليم
- * 4. تسجيل أفضل في content_deliveries
+ * Improvements:
+ * 1. Better formatting for each content type
+ * 2. Sending generated images to Telegram
+ * 3. Auto-running performance scanner after delivery
+ * 4. Better logging in content_deliveries
  */
 
 export type PublishableItem = {
@@ -41,7 +41,7 @@ export type DailyPublishPack = {
 };
 
 /**
- * ينسّق محتوى واحد حسب نوعه لتليجرام
+ * Formats a single content item for Telegram based on its type
  */
 function formatContentForTelegram(item: PublishableItem): string {
   const c = item.content;
@@ -62,7 +62,7 @@ function formatContentForTelegram(item: PublishableItem): string {
       if (c.originality_element) lines.push(`🔑 <b>Originality:</b> ${htmlEscape(shortText(c.originality_element, 150))}`);
       if (c.reply_trigger) lines.push(`💬 <b>Reply trigger:</b> ${htmlEscape(shortText(c.reply_trigger, 100))}`);
       if (c.bookmark_trigger) lines.push(`🔖 <b>Bookmark trigger:</b> ${htmlEscape(shortText(c.bookmark_trigger, 100))}`);
-      // [جديد] اقتراح إعادة كتابة من Shield
+      // [new] Shield rewrite suggestion
       if (item.shield_result?.ai_rewrite) {
         lines.push(`\n✏️ <b>Suggested rewrite:</b>\n<i>${htmlEscape(shortText(item.shield_result.ai_rewrite, 280))}</i>`);
       }
@@ -168,7 +168,7 @@ function formatContentType(type: ContentType): string {
 }
 
 /**
- * فحص Shield لكل المحتوى
+ * Shield check for all content
  */
 async function shieldCheckAll(items: PublishableItem[]): Promise<PublishableItem[]> {
   const results: PublishableItem[] = [];
@@ -187,7 +187,7 @@ async function shieldCheckAll(items: PublishableItem[]): Promise<PublishableItem
         mechanic_used: item.content?.mechanic_used,
         reply_trigger: item.content?.reply_trigger,
         bookmark_trigger: item.content?.bookmark_trigger,
-        deep_check: true  // [جديد] فحص AI عميق
+        deep_check: true  // [new] Deep AI check
       });
 
       const status: PublishableItem['status'] =
@@ -232,7 +232,7 @@ function extractTextFromContent(content: any, type: ContentType): string {
 }
 
 /**
- * توليد وصف الوسائط للمحتوى اللي يحتاجها
+ * Generate media descriptions for content that needs it
  */
 async function generateMediaForItems(items: PublishableItem[]): Promise<PublishableItem[]> {
   const results: PublishableItem[] = [];
@@ -247,7 +247,7 @@ async function generateMediaForItems(items: PublishableItem[]): Promise<Publisha
           style_hint: 'dark minimal tech'
         });
 
-        // [جديد] حاول توليد صورة فعلية للكاروسيل والتغريدة مع صورة
+        // [new] Try generating actual image for carousel and tweet with image
         if (item.content_type === 'carousel' || item.content_type === 'single_tweet') {
           for (const mediaItem of mediaResult.media_items.slice(0, 3)) {
             try {
@@ -279,8 +279,8 @@ async function generateMediaForItems(items: PublishableItem[]): Promise<Publisha
 }
 
 /**
- * يجهز حزمة المحتوى اليومية ويسلمها لتليجرام
- * النشر يدوي — المستخدم يقرر
+ * Prepares the daily content pack and delivers it to Telegram
+ * Publishing is manual — the user decides
  */
 export async function prepareAndDeliverDailyPack(
   diverseContent: Array<{
@@ -294,7 +294,7 @@ export async function prepareAndDeliverDailyPack(
   const username = optionalEnv('X_USERNAME', '30piq');
   const packDate = new Date().toISOString().slice(0, 10);
 
-  // ═══ 1. حوّل كل عنصر لـ PublishableItem ═══
+  // ═══ 1. Convert each item to PublishableItem ═══
   let items: PublishableItem[] = diverseContent.map(item => ({
     content_type: item.content_type,
     content: item.content,
@@ -302,7 +302,7 @@ export async function prepareAndDeliverDailyPack(
     status: 'needs_review' as const
   }));
 
-  // أضف المحتوى القديم (backward compatible)
+  // Add legacy content (backward compatible)
   if (contentPack?.single_tweets) {
     for (const tweet of contentPack.single_tweets) {
       items.push({
@@ -336,13 +336,13 @@ export async function prepareAndDeliverDailyPack(
     }
   }
 
-  // ═══ 2. Shield فحص (مع فحص AI عميق) ═══
+  // ═══ 2. Shield check (with deep AI check) ═══
   items = await shieldCheckAll(items);
 
-  // ═══ 3. توليد وصف الوسائط ═══
+  // ═══ 3. Generate media descriptions ═══
   items = await generateMediaForItems(items);
 
-  // ═══ 4. إرسال لتليجرام ═══
+  // ═══ 4. Send to Telegram ═══
   const chatId = allowedChatId();
   let deliverySuccess = false;
 
@@ -362,14 +362,14 @@ export async function prepareAndDeliverDailyPack(
         `<i>المحتوى بالأسفل — انسخه وانشر يدوياً</i>`
       );
 
-      // أرسل كل عنصر بروسالة منفصلة — لكن اجمع العناصر القصيرة
+      // Send each item as a separate message — but combine short items
       let combinedMessage = '';
       for (const item of items) {
         if (item.status === 'blocked') continue;
         const formatted = formatContentForTelegram(item);
-        // لو الرسالة طويلة، أرسلها لحالها. لو قصيرة، اجمعها
+        // If the message is long, send it alone. If short, combine it
         if (formatted.length > 800) {
-          // أرسل أي رسالة مجمعة قبلها
+          // Send any combined message before it
           if (combinedMessage) {
             try { await sendTelegramMessage(chatId, combinedMessage); } catch {}
             combinedMessage = '';
@@ -377,7 +377,7 @@ export async function prepareAndDeliverDailyPack(
           try { await sendTelegramMessage(chatId, formatted); } catch {}
         } else {
           if (combinedMessage.length + formatted.length + 2 > 3500) {
-            // وصلنا للحد — أرسل اللي جمعناه
+            // Reached limit — send what we've accumulated
             try { await sendTelegramMessage(chatId, combinedMessage); } catch {}
             combinedMessage = formatted;
           } else {
@@ -385,12 +385,12 @@ export async function prepareAndDeliverDailyPack(
           }
         }
       }
-      // أرسل أي رسالة متبقية
+      // Send any remaining message
       if (combinedMessage) {
         try { await sendTelegramMessage(chatId, combinedMessage); } catch {}
       }
 
-      // رسالة الختام
+      // Closing message
       await sendTelegramMessage(chatId,
         `━━━━━━━━━━━━━━━━━━━━\n` +
         `🛡 <b>ملخص الحماية:</b> ${readyCount} اجتاز، ${reviewCount} يحتاج مراجعة، ${blockedCount} محظور\n` +
@@ -403,7 +403,7 @@ export async function prepareAndDeliverDailyPack(
     } catch {}
   }
 
-  // ═══ 5. تسجيل التسليم في قاعدة البيانات ═══
+  // ═══ 5. Log delivery in database ═══
   for (const item of items) {
     try {
       const supabase = supabaseAdmin();
@@ -431,16 +431,16 @@ export async function prepareAndDeliverDailyPack(
     } catch {}
   }
 
-  // ═══ 6. تجهيز الحزمة النهائية ═══
+  // ═══ 6. Prepare final pack ═══
   const readyCount = items.filter(i => i.status === 'ready').length;
   const blockedCount = items.filter(i => i.status === 'blocked').length;
   const reviewCount = items.filter(i => i.status === 'needs_review').length;
 
   const recommendations: string[] = [];
-  if (readyCount > 0) recommendations.push(`${readyCount} عناصر جاهزة للنشر. انسخ من تلجرام وانشر يدوياً.`);
-  if (reviewCount > 0) recommendations.push(`${reviewCount} عناصر تحتاج مراجعة. راجع اقتراحات الحماية وعدّل قبل النشر.`);
-  if (blockedCount > 0) recommendations.push(`${blockedCount} عناصر محظورة. لا تنشرها بدون تعديل كبير.`);
-  recommendations.push('بعد النشر، شغّل مسح الأداء لقياس النتائج وتحديث التعلم.');
+  if (readyCount > 0) recommendations.push(`${readyCount} items ready to publish. Copy from Telegram and publish manually.`);
+  if (reviewCount > 0) recommendations.push(`${reviewCount} items need review. Check shield suggestions and edit before publishing.`);
+  if (blockedCount > 0) recommendations.push(`${blockedCount} items blocked. Do not publish without major edits.`);
+  recommendations.push('After publishing, run performance scan to measure results and update learning.');
 
   return {
     pack_date: packDate,

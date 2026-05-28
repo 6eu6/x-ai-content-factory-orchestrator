@@ -138,7 +138,7 @@ viralTweets=${JSON.stringify(viralTweets.data || [])}
 viralPatterns=${JSON.stringify(viralPatterns.data || [])}
 recentContent=${JSON.stringify(recentContent.data || [])}`;
 
-    // ═══ يستخدم model-router — يختار النموذج حسب نوع المهمة ═══
+    // ═══ Uses model-router — selects model based on task type ═══
     const response = await callModel('content_generation', [
       { role: 'system', content: 'Produce structured content cards from decisions. Facts need source URLs. Return JSON only.' },
       { role: 'user', content: prompt }

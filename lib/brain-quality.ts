@@ -1,15 +1,15 @@
 /**
- * Brain Quality Evaluator v1.0 — تقييم جودة القواعد والأنماط بدون لمس قاعدة البيانات
+ * Brain Quality Evaluator v1.0 — Evaluates rules and patterns quality without touching the database
  *
- * يقيم:
- * - هل القاعدة عامة جدًا؟
- * - هل فيها دليل؟
- * - هل فيها آلية محددة؟
- * - هل فيها مصدر؟
- * - هل قديمة؟
- * - هل تصلح تبقى active؟
- * - هل الأفضل تتحول watch؟
- * - هل ضعيفة جدًا وتستحق archived؟
+ * Evaluates:
+ * - Is the rule too generic?
+ * - Does it have evidence?
+ * - Does it have a specific mechanic?
+ * - Does it have a source?
+ * - Is it outdated?
+ * - Should it remain active?
+ * - Should it be moved to watch?
+ * - Is it too weak and deserves archived?
  */
 
 export type QualityVerdict = {
@@ -18,18 +18,18 @@ export type QualityVerdict = {
   reasons: string[];
 };
 
-// ═══ معايير التقييم ═══
+// ═══ Evaluation criteria ═══
 
-/** أقل طول مقبول لنص القاعدة قبل اعتبارها عامة جدًا */
+/** Minimum acceptable length for rule text before considering it too generic */
 const MIN_RULE_LENGTH = 30;
 
-/** أقل طول مقبول لنص النمط قبل اعتباره غير مكتمل */
+/** Minimum acceptable length for pattern text before considering it incomplete */
 const MIN_PATTERN_LENGTH = 30;
 
-/** أقل طول مقبول للدليل */
+/** Minimum acceptable length for evidence */
 const MIN_EVIDENCE_LENGTH = 15;
 
-/** علامات عامة — كلمات مفتاحية تدل أن القاعدة سطحية */
+/** Generic markers — keywords indicating the rule is shallow */
 const GENERIC_PHRASES = [
   'content that resonates',
   'engaging content',
@@ -62,22 +62,22 @@ const GENERIC_PHRASES = [
   'optimize your',
 ];
 
-/** أنماط خام — أسماء من مصادر بدون تحليل */
+/** Raw source patterns — names from sources without analysis */
 const RAW_SOURCE_PATTERN = /use this crawled item as a source-grounded pattern/i;
 const GITHUB_REPO_PATTERN = /^[a-z0-9_-]+\/[a-z0-9_-]+$/i;
 const URL_PATTERN = /https?:\/\//i;
 
-// ═══ منطق التقييم ═══
+// ═══ Evaluation logic ═══
 
 /**
- * evaluateBrainRule — يقيّم قاعدة خوارزمية واحدة
+ * evaluateBrainRule — evaluates a single algorithm rule
  *
- * @param rule صف من جدول x_algorithm_learning_rules
- * @returns حكم الجودة مع التوصية
+ * @param rule A row from x_algorithm_learning_rules table
+ * @returns Quality verdict with recommendation
  */
 export function evaluateBrainRule(rule: Record<string, any>): QualityVerdict {
   const reasons: string[] = [];
-  let score = 7.0; // نبدأ من 7 (محايد-إيجابي)
+  let score = 7.0; // Start from 7 (neutral-positive)
 
   const ruleText = String(rule.rule || '').trim();
   const evidence = String(rule.evidence || '').trim();
@@ -87,13 +87,13 @@ export function evaluateBrainRule(rule: Record<string, any>): QualityVerdict {
   const appliesTo = String(rule.applies_to || '');
   const status = String(rule.status || 'active');
 
-  // ── 1. طول النص: هل القاعدة عامة جدًا؟ ──
+  // ── 1. Text length: is the rule too generic? ──
   if (!ruleText || ruleText.length < MIN_RULE_LENGTH) {
     score -= 2.5;
     reasons.push(`Rule text too short (${ruleText.length} chars, minimum ${MIN_RULE_LENGTH})`);
   }
 
-  // ── 2. عبارات عامة ──
+  // ── 2. Generic phrases ──
   const lowerRule = ruleText.toLowerCase();
   const genericMatches = GENERIC_PHRASES.filter(p => lowerRule.includes(p));
   if (genericMatches.length >= 2) {
@@ -104,7 +104,7 @@ export function evaluateBrainRule(rule: Record<string, any>): QualityVerdict {
     reasons.push(`Contains generic phrase: ${genericMatches[0]}`);
   }
 
-  // ── 3. الدليل ──
+  // ── 3. Evidence ──
   if (!evidence || evidence.length < MIN_EVIDENCE_LENGTH) {
     score -= 1.5;
     reasons.push('Missing or weak evidence');
@@ -113,7 +113,7 @@ export function evaluateBrainRule(rule: Record<string, any>): QualityVerdict {
     reasons.push('Has substantial evidence');
   }
 
-  // ── 4. آلية محددة ──
+  // ── 4. Specific mechanic ──
   const hasMechanic =
     /specific|mechanic|trigger|pattern|formula|framework|technique|method|approach|when .* then|if .* then/i.test(ruleText);
   if (hasMechanic) {
@@ -124,7 +124,7 @@ export function evaluateBrainRule(rule: Record<string, any>): QualityVerdict {
     reasons.push('Lacks specific mechanic');
   }
 
-  // ── 5. نوع القاعدة ──
+  // ── 5. Rule type ──
   const strongTypes = ['precise_concept', 'psychological_trigger', 'viral_pattern', 'media_impact'];
   const weakTypes = ['conversation_context', 'general_observation'];
   if (strongTypes.includes(ruleType)) {
@@ -134,19 +134,19 @@ export function evaluateBrainRule(rule: Record<string, any>): QualityVerdict {
     reasons.push(`Weak rule type: ${ruleType}`);
   }
 
-  // ── 6. المصدر ──
+  // ── 6. Source ──
   if (!sourceType || sourceType === 'unknown') {
     score -= 0.5;
     reasons.push('No source type');
   }
 
-  // ─ـ 7. applies_to ──
+  // ── 7. applies_to ──
   if (!appliesTo) {
     score -= 0.3;
     reasons.push('Missing applies_to field');
   }
 
-  // ── 8. الثقة ──
+  // ── 8. Confidence ──
   if (confidence < 3) {
     score -= 1.5;
     reasons.push(`Very low confidence: ${confidence}`);
@@ -157,23 +157,23 @@ export function evaluateBrainRule(rule: Record<string, any>): QualityVerdict {
     score += 0.3;
   }
 
-  // ── 9. الحالة الحالية ──
+  // ── 9. Current status ──
   if (status === 'watch') {
-    // قاعدة watch ابدأ أقل شوي
+    // Watch rules start a bit lower
     score -= 0.5;
     reasons.push('Currently in watch status');
   }
 
-  // ── 10. قواعد بدون rule_type ──
+  // ── 10. Rules without rule_type ──
   if (!ruleType) {
     score -= 0.5;
     reasons.push('Missing rule_type');
   }
 
-  // ── حد النتيجة ──
+  // ── Score limit ──
   score = Math.max(0, Math.min(10, Math.round(score * 10) / 10));
 
-  // ── التوصية ──
+  // ── Recommendation ──
   let recommended_status: QualityVerdict['recommended_status'];
   if (score >= 5.5) {
     recommended_status = 'active';
@@ -187,10 +187,10 @@ export function evaluateBrainRule(rule: Record<string, any>): QualityVerdict {
 }
 
 /**
- * evaluateStylePattern — يقيّم نمط أسلوبي واحد
+ * evaluateStylePattern — evaluates a single style pattern
  *
- * @param pattern صف من جدول viral_style_patterns
- * @returns حكم الجودة مع التوصية
+ * @param pattern A row from viral_style_patterns table
+ * @returns Quality verdict with recommendation
  */
 export function evaluateStylePattern(pattern: Record<string, any>): QualityVerdict {
   const reasons: string[] = [];
@@ -204,19 +204,19 @@ export function evaluateStylePattern(pattern: Record<string, any>): QualityVerdi
   const confidence = Number(pattern.confidence_score ?? 5);
   const status = String(pattern.status || 'active');
 
-  // ── 1. اسم النمط ──
+  // ── 1. Pattern name ──
   if (!patternName || patternName.length < 5) {
     score -= 2.0;
     reasons.push('Pattern name too short or missing');
   }
 
-  // ── 2. اسم خام من مصدر ──
+  // ── 2. Raw source name ──
   if (RAW_SOURCE_PATTERN.test(patternName) || GITHUB_REPO_PATTERN.test(patternName) || URL_PATTERN.test(patternName)) {
     score -= 3.0;
     reasons.push('Raw source name — not a real style pattern');
   }
 
-  // ── 3. الوصف ──
+  // ── 3. Description ──
   if (!patternDescription || patternDescription.length < MIN_PATTERN_LENGTH) {
     score -= 2.0;
     reasons.push(`Pattern description too short (${patternDescription.length} chars, minimum ${MIN_PATTERN_LENGTH})`);
@@ -240,13 +240,13 @@ export function evaluateStylePattern(pattern: Record<string, any>): QualityVerdi
     reasons.push('Has "why it works" explanation');
   }
 
-  // ── 6. التكييف ──
+  // ── 6. Adaptation ──
   if (adaptation && adaptation.length > 20) {
     score += 0.5;
     reasons.push('Has adaptation guidance');
   }
 
-  // ── 7. نوع النمط ──
+  // ── 7. Pattern type ──
   const strongTypes = ['hook', 'structure', 'bookmark_trigger', 'reply_trigger'];
   if (!patternType) {
     score -= 0.5;
@@ -255,7 +255,7 @@ export function evaluateStylePattern(pattern: Record<string, any>): QualityVerdi
     score += 0.3;
   }
 
-  // ── 8. عبارات عامة ──
+  // ── 8. Generic phrases ──
   const lowerDesc = patternDescription.toLowerCase();
   const genericMatches = GENERIC_PHRASES.filter(p => lowerDesc.includes(p));
   if (genericMatches.length >= 2) {
@@ -263,7 +263,7 @@ export function evaluateStylePattern(pattern: Record<string, any>): QualityVerdi
     reasons.push(`Contains ${genericMatches.length} generic phrases in description`);
   }
 
-  // ── 9. الثقة ──
+  // ── 9. Confidence ──
   if (confidence < 3) {
     score -= 1.5;
     reasons.push(`Very low confidence: ${confidence}`);
@@ -274,16 +274,16 @@ export function evaluateStylePattern(pattern: Record<string, any>): QualityVerdi
     score += 0.3;
   }
 
-  // ── 10. الحالة الحالية ──
+  // ── 10. Current status ──
   if (status === 'watch') {
     score -= 0.5;
     reasons.push('Currently in watch status');
   }
 
-  // ── حد النتيجة ──
+  // ── Score limit ──
   score = Math.max(0, Math.min(10, Math.round(score * 10) / 10));
 
-  // ── التوصية ──
+  // ── Recommendation ──
   let recommended_status: QualityVerdict['recommended_status'];
   if (score >= 5.5) {
     recommended_status = 'active';

@@ -4,16 +4,16 @@ import { callModel, parseModelJson, TaskType } from './model-router';
 import { FIRST_PERSON_CLAIM_PATTERNS } from './constants';
 
 /**
- * Account Shield — طبقة حماية الحساب v2
+ * Account Shield — Account Protection Layer v2
  *
- * يفحص كل محتوى قبل التسليم للتأكد إنه:
- * 1. ما فيه أنماط AI مكتشفة (Slop Detection)
- * 2. متوافق مع قواعد الحساب الصغير (Low-Follower Rules)
- * 3. ما يخالف الخوارزمية المخزنة في الذاكرة
- * 4. فيه عنصر أصلي حقيقي (Originality Gate)
- * 5. أي ادعاء رقمي له مصدر (Claim Verification)
- * 6. [جديد] فحص AI عميق — يحلل الأسلوب والبنية
- * 7. [جديد] اقتراحات إعادة كتابة ذكية
+ * Checks all content before delivery to ensure:
+ * 1. No detected AI patterns (Slop Detection)
+ * 2. Compliant with low-follower account rules (Low-Follower Rules)
+ * 3. Does not violate algorithm rules stored in memory
+ * 4. Contains a genuine originality element (Originality Gate)
+ * 5. Any numeric claim has a source (Claim Verification)
+ * 6. [new] Deep AI check — analyzes style and structure
+ * 7. [new] Smart rewrite suggestions
  */
 
 export type ShieldResult = {
@@ -22,8 +22,8 @@ export type ShieldResult = {
   checks: ShieldCheck[];
   summary: string;
   suggestions: string[];
-  ai_rewrite?: string;     // [جديد] نسخة مُعاد كتابتها
-  ai_analysis?: string;    // [جديد] تحليل AI مفصّل
+  ai_rewrite?: string;     // [new] Rewritten version
+  ai_analysis?: string;    // [new] Detailed AI analysis
 };
 
 export type ShieldCheck = {
@@ -34,7 +34,7 @@ export type ShieldCheck = {
 };
 
 // ═══════════════════════════════════════════════════
-// كلمات وأنماط Slop المحظورة — من تحليل Banger Classifier
+// Forbidden Slop words and patterns — from Banger Classifier analysis
 // ═══════════════════════════════════════════════════
 const SLOP_FORBIDDEN_WORDS = [
   'delve', 'tapestry', 'crucial', 'synergy', 'leverage',
@@ -44,7 +44,7 @@ const SLOP_FORBIDDEN_WORDS = [
   'in this thread', "let's dive in", 'here\'s the thing',
   'a thread on', 'in today\'s fast-paced', 'unlocking',
   'everything you need to know',
-  // إضافة: المزيد من كلمات AI المكتشفة
+  // Addition: More detected AI words
   'it\'s worth noting', 'at the end of the day', 'the reality is',
   'needless to say', 'important to note', 'it goes without saying',
   'landscape', 'realm', 'robust', 'seamless', 'cutting-edge',
@@ -68,7 +68,7 @@ const SLOP_FORBIDDEN_PATTERNS = [
 ];
 
 // ═══════════════════════════════════════════════════
-// قواعد الحساب الصغير (أقل من 500 متابع)
+// Low-follower account rules (fewer than 500 followers)
 // ═══════════════════════════════════════════════════
 const LOW_FOLLOWER_RULES = {
   max_external_links: 0,
@@ -79,7 +79,7 @@ const LOW_FOLLOWER_RULES = {
 };
 
 // ═══════════════════════════════════════════════════
-// أنماط الادعاءات اللي تحتاج مصدر
+// Claim patterns that require a source
 // ═══════════════════════════════════════════════════
 const UNSOURCED_CLAIM_PATTERNS = [
   /studies show/i,
@@ -154,7 +154,7 @@ async function getAlgorithmRules(): Promise<string[]> {
 }
 
 /**
- * [جديد] فحص AI عميق — يحلل الأسلوب والبنية باستخدام نموذج
+ * [new] Deep AI check — analyzes style and structure using a model
  */
 async function aiDeepCheck(
   text: string,
@@ -216,7 +216,7 @@ Return JSON:
 }
 
 /**
- * الفحص الرئيسي — يفحص أي محتوى قبل التسليم
+ * Main check — inspects any content before delivery
  */
 export async function shieldCheck(
   content: {
@@ -227,7 +227,7 @@ export async function shieldCheck(
     mechanic_used?: string;
     reply_trigger?: string;
     bookmark_trigger?: string;
-    deep_check?: boolean;   // [جديد] فحص AI عميق
+    deep_check?: boolean;   // [new] Deep AI check
   }
 ): Promise<ShieldResult> {
   const checks: ShieldCheck[] = [];
@@ -304,8 +304,8 @@ export async function shieldCheck(
   }
 
   // ═══ 5. First-Person Claim Check ═══
-  // فقط الادعاءات غير الموثقة — الاستخدام العادي مثل "I think" أو "my approach" مسموح
-  // الأنماط مُعرّفة في lib/constants.ts
+  // Only unsourced claims — normal usage like "I think" or "my approach" is allowed
+  // Patterns are defined in lib/constants.ts
   const hasFirstPersonClaim = FIRST_PERSON_CLAIM_PATTERNS.some(p => p.test(text));
   if (hasFirstPersonClaim) {
     checks.push({
@@ -412,7 +412,7 @@ export async function shieldCheck(
     checks.push({ name: 'tweet_length', passed: true, severity: 'info', detail: `Length: ${text.length} chars` });
   }
 
-  // ═══ 11. [جديد] فحص AI عميق — لو طلب أو لو في warning ═══
+  // ═══ 11. [new] Deep AI check — if requested or if there are warnings ═══
   let aiAnalysis = '';
   let aiRewrite = '';
 
@@ -437,7 +437,7 @@ export async function shieldCheck(
     }
   }
 
-  // ═══ حساب النتيجة النهائية ═══
+  // ═══ Calculate final result ═══
   const blocked = checks.filter(c => c.severity === 'block');
   const warnings = checks.filter(c => c.severity === 'warn');
   const passed = blocked.length === 0;
@@ -460,7 +460,7 @@ export async function shieldCheck(
 }
 
 /**
- * فحص سريع بدون async — للـ quality gate الموجود
+ * Quick synchronous check — for the existing quality gate
  */
 export function quickShieldCheck(text: string, item?: any): { safe: boolean; reasons: string[] } {
   const reasons: string[] = [];
@@ -469,7 +469,7 @@ export function quickShieldCheck(text: string, item?: any): { safe: boolean; rea
   if (hasSlopPatterns(text).length) reasons.push('slop_forbidden_patterns');
   if (checkSymmetry(text) && text.split('\n').length >= 3) reasons.push('symmetric_structure');
   if (/#/.test(text)) reasons.push('has_hashtag');
-  // فقط ادعاءات أول شخص غير موثقة — الأنماط مُعرّفة في lib/constants.ts
+  // Only unsourced first-person claims — patterns are defined in lib/constants.ts
   if (FIRST_PERSON_CLAIM_PATTERNS.some(p => p.test(text))) reasons.push('first_person_unverified_claim');
   if (hasUnsourcedClaims(text).length) reasons.push('unsourced_numeric_claims');
   if (!item?.originality_element && !item?.mechanic_used) reasons.push('missing_originality');

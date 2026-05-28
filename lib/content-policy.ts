@@ -1,3 +1,18 @@
+/**
+ * Content Policy — Final publishability gate
+ *
+ * This gate runs AFTER account-shield checks. It validates that publishable content:
+ * - Is English-only (no Arabic)
+ * - Is not JSON/metadata/wrapper output
+ * - Is not AI conversation slop ("Here is...", "Sure...")
+ * - Has valid source URLs for reply/quote types
+ * - Has passed shield checks
+ * - Is not too short or too long
+ * - Is not instruction text instead of publishable text
+ *
+ * This gate does NOT replace account-shield. Both must pass.
+ */
+
 export type PublishPolicyRejection = {
   index: number;
   type?: string;
@@ -21,7 +36,10 @@ export const ENGLISH_ACCOUNT_CONTENT_POLICY = [
   'No hashtags, no decorative emojis, no inflated claims, no invented statistics.',
   'Write direct, specific, concise content. Avoid generic AI-style phrasing.',
   'Reject output that looks like JSON, metadata, explanations, or formatting wrappers.',
-  'Only publish recommendations that pass account shield and source validation.'
+  'Reject output that contains AI conversation patterns like "Here is", "Sure,", "Final tweet:", "Tweet:".',
+  'Reject output that contains markdown code fences or instruction text instead of publishable content.',
+  'Only publish recommendations that pass account shield and source validation.',
+  'This gate is the final publishability gate, not a replacement for account-shield.'
 ].join('\n');
 
 export function containsArabic(text: string): boolean {
@@ -36,12 +54,57 @@ export function isValidXStatusUrl(url: string): boolean {
   return VALID_X_STATUS_RE.test(String(url || '').trim());
 }
 
+/**
+ * Detects AI wrapper / slop patterns that indicate the text is not
+ * publishable content but rather an AI conversation artifact.
+ */
+export function isAISlopWrapper(text: string): { ok: boolean; reason?: string } {
+  const value = String(text || '').trim();
+  if (!value) return { ok: false, reason: 'empty' };
+
+  // "Here is" or "Here's" at start (case-insensitive)
+  if (/^here(?:\s+is|'s)\b/i.test(value)) {
+    return { ok: false, reason: 'ai_slop_here_is' };
+  }
+
+  // "Sure," or "Sure." at start
+  if (/^sure[,.]/i.test(value)) {
+    return { ok: false, reason: 'ai_slop_sure' };
+  }
+
+  // Prefix patterns: "Final tweet:", "Tweet:", "Reply:", "Quote:"
+  if (/\b(?:final\s+tweet|tweet|reply|quote)\s*:/i.test(value)) {
+    return { ok: false, reason: 'ai_slop_prefix_label' };
+  }
+
+  // Markdown code fences (``` at start)
+  if (/^```/.test(value)) {
+    return { ok: false, reason: 'ai_slop_code_fence' };
+  }
+
+  // Instruction-like text at start: "Write a", "Generate a", "Create a"
+  if (/^(?:write|generate|create)\s+a\b/i.test(value)) {
+    return { ok: false, reason: 'ai_slop_instruction' };
+  }
+
+  // Conversational AI patterns: "I can help" or "I'll write"
+  if (/i\s+(?:can\s+help|'ll\s+write)\b/i.test(value)) {
+    return { ok: false, reason: 'ai_slop_conversational' };
+  }
+
+  return { ok: true };
+}
+
 export function isEnglishPublishableText(text: string): { ok: boolean; reason?: string } {
   const value = String(text || '').trim();
   if (value.length < 10) return { ok: false, reason: 'too_short' };
   if (value.length > 1200) return { ok: false, reason: 'too_long' };
   if (containsArabic(value)) return { ok: false, reason: 'arabic_content_detected' };
   if (looksJsonish(value)) return { ok: false, reason: 'json_or_metadata_output' };
+
+  const slopCheck = isAISlopWrapper(value);
+  if (!slopCheck.ok) return { ok: false, reason: slopCheck.reason || 'ai_slop_wrapper' };
+
   return { ok: true };
 }
 

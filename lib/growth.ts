@@ -132,9 +132,9 @@ export function enrichGrowthOperatorPack(pack: any) {
 }
 
 /**
- * بناء مهام ذكية ديناميكية بدل المهام الثابتة
- * كل مهمة تحمل بيانات فعلية (أوقات، أعداد، أنواع) بدل نص عام
- * التعليمات بالعربي للمستخدم
+ * Build dynamic smart actions instead of static tasks
+ * Each action carries real data (times, counts, types) instead of generic text
+ * Instructions in English for system consistency
  */
 function buildSmartActions(
   tweets: any[],
@@ -146,23 +146,23 @@ function buildSmartActions(
 ): Array<{ action_type: string; instruction: string; priority: number }> {
   const actions: Array<{ action_type: string; instruction: string; priority: number }> = [];
 
-  // ═══ مهمة النشر ═══
+  // ═══ Publish task ═══
   if (tweets.length > 0) {
     const times = tweets.map((t, i) => `${t.best_time_utc || ['13:00','15:00','17:00'][i]}`).join(', ');
     actions.push({
       action_type: 'publish',
-      instruction: `انشر ${tweets.length} تغريد${tweets.length > 1 ? 'ات' : 'ة'} جاهزة. الأوقات المثالية (UTC): ${times}. انسخ النص من المحتوى المرسل في تلجرام.`,
+      instruction: `Publish ${tweets.length} ready tweet${tweets.length > 1 ? 's' : ''}. Best times (UTC): ${times}. Copy text from the content sent in Telegram.`,
       priority: 1
     });
   }
 
-  // ═══ مهمة التفاعل — ردود + اقتباسات في مهمة واحدة ═══
+  // ═══ Engagement task — replies + quotes in one task ═══
   const engageParts: string[] = [];
   if (replies.length > 0) {
-    engageParts.push(`استخدم ${replies.length} رد معّد على منشورات ذات صلة — رد فقط عندما يناسب الزاوية`);
+    engageParts.push(`Use ${replies.length} prepared reply on relevant posts — reply only when the angle fits`);
   }
   if (quotes.length > 0) {
-    engageParts.push(`انشر ${quotes.length} اقتباس فقط إذا كان المنشور المصدر ذو قيمة ويضيف رؤية مستقلة`);
+    engageParts.push(`Publish ${quotes.length} quote only if the source post is high-value and adds independent insight`);
   }
   if (engageParts.length > 0) {
     actions.push({
@@ -172,31 +172,31 @@ function buildSmartActions(
     });
   }
 
-  // ═══ مهام GitHub ═══
+  // ═══ GitHub tasks ═══
   if (githubNeeded) {
     const repoName = pack?.github_decision?.repo_name || '';
-    const assetType = pack?.github_decision?.asset_type || 'أصل';
+    const assetType = pack?.github_decision?.asset_type || 'asset';
     actions.push({
       action_type: 'create_asset',
-      instruction: `أنشئ ${assetType} على GitHub${repoName ? `: ${repoName}` : ''} كما هو موصوف. هذا يوفر طبقة إثبات للمحتوى.`,
+      instruction: `Create ${assetType} on GitHub${repoName ? `: ${repoName}` : ''} as described. This provides a proof layer for the content.`,
       priority: 4
     });
   }
 
-  // ═══ مهام المقال ═══
+  // ═══ Article tasks ═══
   if (articleNeeded) {
     const title = pack?.article_decision?.title || '';
     actions.push({
       action_type: 'create_asset',
-      instruction: `اكتب مقال X${title ? `: "${title}"` : ''} كما هو موصوف. تحقق من الموضوع بالمحتوى القصير أولاً.`,
+      instruction: `Write an X Article${title ? `: "${title}"` : ''} as described. Validate the topic with short-form content first.`,
       priority: 5
     });
   }
 
-  // ═══ مهمة التسجيل ═══
+  // ═══ Logging task ═══
   actions.push({
     action_type: 'log_results',
-    instruction: 'بعد النشر، شغّل "📊 مسح الأداء" لقياس النتائج وتحديث ذاكرة التعلم.',
+    instruction: 'After publishing, run performance scan to measure results and update learning memory.',
     priority: 6
   });
 

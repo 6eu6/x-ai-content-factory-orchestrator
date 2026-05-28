@@ -4,12 +4,12 @@ import { setTelegramWebhook, sendTelegramMessage, MAIN_KEYBOARD } from '../../..
 /**
  * GET /api/telegram/diagnose
  *
- * نقطة تشخيص عامة — تفحص حالة الـ webhook وتصلحه لو لازم
+ * General diagnostics endpoint — checks webhook status and fixes it if needed
  *
- * ?action=check       — فحص حالة الـ webhook فقط
- * ?action=fix         — إعادة ضبط الـ webhook للرابط الصحيح
- * ?action=stop_flood  — حذف الـ webhook مؤقتاً لإيقاف الرسائل المعلقة، ثم إعادته
- * ?action=refresh_kb  — إرسال الكيبورد الجديد للمستخدم (يحل مشكلة الأزرار القديمة)
+ * ?action=check       — Check webhook status only
+ * ?action=fix         — Reset webhook to the correct URL
+ * ?action=stop_flood  — Delete webhook temporarily to stop pending messages, then restore it
+ * ?action=refresh_kb  — Send the new keyboard to the user (fixes stale buttons)
  */
 export async function GET(req: Request) {
   try {
@@ -20,7 +20,7 @@ export async function GET(req: Request) {
     const expectedWebhookUrl = `${baseUrl.replace(/\/$/, '')}/api/telegram/webhook`;
     const webhookSecret = optionalEnv('TELEGRAM_WEBHOOK_SECRET');
 
-    // ═══ إرسال الكيبورد الجديد ═══
+    // ═══ Send new keyboard ═══
     if (action === 'refresh_kb') {
       const chatId = optionalEnv('TELEGRAM_ALLOWED_CHAT_ID');
       if (!chatId) return Response.json({ ok: false, error: 'TELEGRAM_ALLOWED_CHAT_ID not set' }, { status: 500 });
@@ -33,7 +33,7 @@ export async function GET(req: Request) {
       }
     }
 
-    // 1. جلب معلومات الـ webhook الحالية من Telegram
+    // 1. Fetch current webhook info from Telegram
     const infoRes = await fetch(`https://api.telegram.org/bot${token}/getWebhookInfo`);
     const infoData = await infoRes.json();
 
@@ -54,19 +54,19 @@ export async function GET(req: Request) {
       last_error_date: lastErrorDate ? new Date(lastErrorDate * 1000).toISOString() : 'none',
     };
 
-    // 2. إيقاف الفلود: حذف الـ webhook + تنظيف المعلقات + إعادة الـ webhook
+    // 2. Stop flood: delete webhook + clear pending + restore webhook
     if (action === 'stop_flood') {
-      // أ) حذف الـ webhook مؤقتاً
+      // a) Temporarily delete webhook
       const deleteRes = await fetch(`https://api.telegram.org/bot${token}/deleteWebhook?drop_pending_updates=true`, { method: 'GET' });
       const deleteData = await deleteRes.json();
       diagnosis.step1_delete_webhook = deleteData;
 
-      // ب) انتظار ثانية
+      // b) Wait one second
       await new Promise(r => setTimeout(r, 1000));
 
-      // ج) إعادة ضبط الـ webhook مع الـ secret
+      // c) Re-set webhook with secret
       if (!webhookSecret) {
-        diagnosis.fix_error = 'TELEGRAM_WEBHOOK_SECRET غير مضبوط';
+        diagnosis.fix_error = 'TELEGRAM_WEBHOOK_SECRET is not configured';
         diagnosis.ok = false;
         return Response.json(diagnosis, { status: 500 });
       }
@@ -76,20 +76,20 @@ export async function GET(req: Request) {
 
       if (fixResult?.ok || fixResult?.result?.url === expectedWebhookUrl) {
         diagnosis.fix_success = true;
-        diagnosis.message = `تم إيقاف الفلود بنجاح. حُذفت ${hasPendingUpdates} رسالة معلقة وأُعيد ضبط الـ webhook.`;
+        diagnosis.message = `Flood stopped successfully. Deleted ${hasPendingUpdates} pending messages and restored webhook.`;
       } else {
         diagnosis.fix_success = false;
         diagnosis.ok = false;
-        diagnosis.message = 'فشل إعادة ضبط الـ webhook بعد حذف المعلقات!';
+        diagnosis.message = 'Failed to restore webhook after clearing pending updates!';
       }
 
       return Response.json(diagnosis);
     }
 
-    // 3. لو الـ webhook ما يطابق أو طلب الإصلاح
+    // 3. If webhook doesn't match or fix was requested
     if (action === 'fix' || !diagnosis.webhook_matches || !currentUrl) {
       if (!webhookSecret) {
-        diagnosis.fix_error = 'لا يمكن إعادة ضبط الـ webhook لأن TELEGRAM_WEBHOOK_SECRET غير مضبوط';
+        diagnosis.fix_error = 'Cannot reset webhook because TELEGRAM_WEBHOOK_SECRET is not configured';
         diagnosis.ok = false;
         return Response.json(diagnosis, { status: 500 });
       }
@@ -109,11 +109,11 @@ export async function GET(req: Request) {
     }
 
     if (hasPendingUpdates > 0) {
-      diagnosis.warning = `يوجد ${hasPendingUpdates} رسالة معلقة — استخدم ?action=stop_flood لإيقافها`;
+      diagnosis.warning = `${hasPendingUpdates} pending messages — use ?action=stop_flood to clear them`;
     }
 
     if (lastErrorMessage) {
-      diagnosis.error_detail = `آخر خطأ: ${lastErrorMessage}`;
+      diagnosis.error_detail = `Last error: ${lastErrorMessage}`;
     }
 
     return Response.json(diagnosis);

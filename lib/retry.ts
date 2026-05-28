@@ -1,9 +1,9 @@
 /**
- * retry — إعادة محاولة مع تراجع أسي (exponential backoff)
+ * retry — retry with exponential backoff
  *
- * تُستخدم حول استدعاءات الشبكة العابرة للفشل (TwitterAPI.io، Telegram،
- * OpenRouter/النموذج المحلي، محركات البحث) حتى لا تنهار العملية كاملةً
- * بسبب خطأ مؤقت (rate limit، انقطاع شبكة، 5xx).
+ * Used around transient network calls (TwitterAPI.io, Telegram,
+ * OpenRouter/local model, search engines) so the entire process doesn't
+ * crash due to a temporary error (rate limit, network outage, 5xx).
  */
 
 export type RetryOptions = {
@@ -46,14 +46,14 @@ export async function withRetry<T>(fn: () => Promise<T>, opts: RetryOptions = {}
 
 const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
 
-/** يحدد إن كان الخطأ (من fetch أو OpenAI SDK) قابلاً لإعادة المحاولة */
+/** Determines whether the error (from fetch or OpenAI SDK) is retryable */
 export function isTransientError(err: unknown): boolean {
   const status = (err as { status?: number })?.status;
-  if (status === undefined) return true; // أخطاء شبكة بدون status code
+  if (status === undefined) return true; // Network errors without status code
   return RETRYABLE_STATUS.has(status);
 }
 
-/** fetch مع إعادة محاولة على أخطاء الشبكة و 429/5xx */
+/** fetch with retry on network errors and 429/5xx */
 export async function fetchWithRetry(
   url: string,
   init?: RequestInit,

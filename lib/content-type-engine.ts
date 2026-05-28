@@ -4,13 +4,13 @@ import { optionalEnv } from './env';
 import { queryBrainForContent } from './brain-query';
 
 /**
- * Content Type Engine v2 — محرك تنوع أنواع المحتوى
+ * Content Type Engine v2 — Content Type Diversity Engine
  *
- * تحسينات:
- * 1. تخطيط أذكى — يراعي الموسمية والوقت والأداء التاريخي
- * 2. برومبتات أفضل — صياغة طبيعية بدون AI slop
- * 3. تنوع إجباري — لا يكرر نفس النوع مرتين متتاليتين
- * 4. ربط بذاكرة التعلم — يستخدم القواعد والأنماط المخزنة
+ * Improvements:
+ * 1. Smarter planning — considers seasonality, timing, and historical performance
+ * 2. Better prompts — natural phrasing without AI slop
+ * 3. Forced variety — never repeats the same type twice in a row
+ * 4. Learning memory integration — uses stored rules and patterns
  */
 
 export type ContentType =
@@ -54,7 +54,7 @@ export type DailyContentItem = {
 };
 
 /**
- * يسجّل أي نوع أنتجنا آخر 48 ساعة ويقترح التنوع
+ * Logs content types produced in the last 48 hours and suggests variety
  */
 async function getRecentContentTypes(): Promise<ContentType[]> {
   try {
@@ -82,7 +82,7 @@ async function getRecentContentTypes(): Promise<ContentType[]> {
 }
 
 /**
- * يقيّم موضوع بـ 5 أبعاد ويقرر النوع الأنسب
+ * Scores a topic on 5 dimensions and decides the best content type
  */
 async function scoreTopic(topic: string, sourceInfo?: string): Promise<ContentScore> {
   try {
@@ -170,7 +170,7 @@ function parseContentType(raw: string): ContentType {
 }
 
 /**
- * يخطط محتوى اليوم — 4-6 أنواع متنوعة مع أوقات نشر مثالية
+ * Plans today's content — 4-6 diverse types with optimal posting times
  */
 export async function planDailyContent(
   topics: Array<{ topic: string; source?: string; heat_score?: number }>
@@ -181,22 +181,22 @@ export async function planDailyContent(
     typeCounts[t] = (typeCounts[t] || 0) + 1;
   }
 
-  // قيم كل موضوع
+  // Score each topic
   const scored: ContentScore[] = [];
   for (const item of topics.slice(0, 8)) {
     const score = await scoreTopic(item.topic, item.source);
     scored.push(score);
   }
 
-  // رتب حسب total score
+  // Sort by total score
   scored.sort((a, b) => b.total - a.total);
 
-  // اختر أنواع متنوعة — أولوية: فيديو > ثريد > كاروسيل > تغريدة
+  // Choose diverse types — priority: video > thread > carousel > tweet
   const desiredTypes: ContentType[] = ['video_script', 'thread', 'carousel', 'single_tweet', 'article'];
   const plannedItems: DailyContentItem[] = [];
   const typesPlanned: ContentType[] = [];
 
-  // أوقات النشر المثالية حسب النوع
+  // Optimal posting times by content type
   const bestTimes: Record<ContentType, string[]> = {
     single_tweet: ['13:00', '17:00', '20:00'],
     thread: ['09:00', '13:00', '15:00'],
@@ -211,7 +211,7 @@ export async function planDailyContent(
     if (plannedItems.length >= 5) break;
     if (score.total < 15) continue;
 
-    // لو النوع الموصى موجود كثير آخر 48 ساعة، جرب نوع ثاني
+    // If the recommended type was used too much in the last 48 hours, try another type
     let chosenType = score.recommended_type;
     if ((typeCounts[chosenType] || 0) >= 2) {
       for (const alt of desiredTypes) {
@@ -222,7 +222,7 @@ export async function planDailyContent(
       }
     }
 
-    // لا نكرر نفس النوع
+    // Don't repeat the same type
     if (typesPlanned.includes(chosenType) && typesPlanned.length < 4) {
       for (const alt of desiredTypes) {
         if (!typesPlanned.includes(alt)) {
@@ -232,13 +232,13 @@ export async function planDailyContent(
       }
     }
 
-    // تحقق من قواعد الحساب الصغير — لا روابط خارجية
+    // Check low-follower account rules — no external links
     const followerCount = await getFollowerCount();
     if (followerCount < 500) {
       if (chosenType === 'article') chosenType = 'thread';
     }
 
-    // حدد وقت النشر
+    // Determine posting time
     const times = bestTimes[chosenType] || ['15:00'];
     const slotIndex = plannedItems.length;
     const bestTime = times[Math.min(slotIndex, times.length - 1)];
@@ -257,7 +257,7 @@ export async function planDailyContent(
     typeCounts[chosenType] = (typeCounts[chosenType] || 0) + 1;
   }
 
-  // أضف رد + اقتباس دائماً
+  // Always add a reply + quote post
   if (!typesPlanned.includes('reply')) {
     plannedItems.push({
       slot: plannedItems.length + 1,
@@ -324,7 +324,7 @@ async function getFollowerCount(): Promise<number> {
 }
 
 /**
- * يولّد محتوى حسب النوع المحدد باستخدام النموذج المناسب
+ * Generates content based on the specified type using the appropriate model
  */
 export async function generateContentByType(
   type: ContentType,
@@ -360,7 +360,7 @@ export async function generateContentByType(
 }
 
 async function generateSingleTweet(ctx: any, taskType: TaskType): Promise<any> {
-  // ═══ استرجاع ذكي من العقل ═══
+  // ═══ Smart retrieval from brain ═══
   let brainContext = '';
   try {
     const brainQuery = await queryBrainForContent('single_tweet', 5, 3);
@@ -409,7 +409,7 @@ Return: {"text":"...","why_it_works":"...","originality_element":"...","reply_tr
 }
 
 async function generateThread(ctx: any, taskType: TaskType): Promise<any> {
-  // ═══ استرجاع ذكي من العقل ═══
+  // ═══ Smart retrieval from brain ═══
   let brainContext = '';
   try {
     const brainQuery = await queryBrainForContent('thread', 6, 5);
@@ -577,7 +577,7 @@ Return JSON:
 }
 
 async function generateReply(ctx: any, taskType: TaskType): Promise<any> {
-  // ═══ استرجاع ذكي من العقل ═══
+  // ═══ Smart retrieval from brain ═══
   let brainContext = '';
   try {
     const brainQuery = await queryBrainForContent('reply', 4, 2);
@@ -622,7 +622,7 @@ Return JSON:
 }
 
 async function generateQuotePost(ctx: any, taskType: TaskType): Promise<any> {
-  // ═══ استرجاع ذكي من العقل ═══
+  // ═══ Smart retrieval from brain ═══
   let brainContext = '';
   try {
     const brainQuery = await queryBrainForContent('quote', 4, 2);

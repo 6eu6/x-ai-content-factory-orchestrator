@@ -12,20 +12,20 @@ function cleanAscii(text: string): string {
 }
 
 /**
- * containsUnsafeClaim — يفحص هل النص يحتوي ادعاءات غير موثقة
+ * containsUnsafeClaim — checks if the text contains unsourced claims
  *
- * التحسين: بدل ما نطابق أي كلمة "I" أو "my" (اللي تدمر كل المحتوى)،
- * نفحص فقط الأنماط اللي تمثل ادعاءات شخصية غير موثقة.
- * الاستخدام العادي لـ "I think" أو "my approach" مسموح.
- * الأنماط مُعرّفة في lib/constants.ts
+ * Improvement: instead of matching any "I" or "my" word (which would destroy all content),
+ * we only check patterns that represent unsourced personal claims.
+ * Normal usage like "I think" or "my approach" is allowed.
+ * Patterns are defined in lib/constants.ts
  */
 function containsUnsafeClaim(text: string): boolean {
   const t = cleanAscii(text).toLowerCase();
-  // أنماط إضافية خاصة بالمحتوى (مو في constants لأنها خاصة بالتوليد)
+  // Additional content-specific patterns (not in constants because they are specific to generation)
   const contentSpecificPatterns = [
-    // تجنّب الهاشتاقات
+    // Avoid hashtags
     /#/,
-    // ادعاءات مفرطة
+    // Excessive claims
     /\d+\s*(x\s*)?(faster|better|more productive|more efficient)\b/i,
   ];
   return FIRST_PERSON_CLAIM_PATTERNS.some((p) => p.test(t)) || contentSpecificPatterns.some((p) => p.test(t));
@@ -138,11 +138,11 @@ function normalizeQuote(item: any) {
 }
 
 /**
- * normalizePack — ينظّف الحزمة بدل رميها بالكامل
+ * normalizePack — cleans the pack instead of discarding it entirely
  *
- * التحسين: بدل ما نرمي كل الحزمة لو تغريدة وحدة فيها مشكلة،
- * نستبدل التغريدات المعطوبة فقط بالfallback ونحتفظ بالباقي.
- * كذلك نسمح بأقل من 3 تغريدات بدل ما نلغي كل شيء.
+ * Improvement: instead of throwing away the entire pack if one tweet has an issue,
+ * we replace only the broken tweets with fallbacks and keep the rest.
+ * We also allow fewer than 3 tweets instead of canceling everything.
  */
 function normalizePack(pack: any) {
   const safe = fallbackPack();
@@ -150,12 +150,12 @@ function normalizePack(pack: any) {
   const repliesRaw = Array.isArray(pack?.reply_targets_strategy) ? pack.reply_targets_strategy : [];
   const quotesRaw = Array.isArray(pack?.quote_tweet_strategy) ? pack.quote_tweet_strategy : [];
 
-  // نظّف كل تغريدة لوحدها — استبدل المعطوبة بالـ fallback
+  // Clean each tweet individually — replace broken ones with fallback
   const cleanedTweets: any[] = [];
   for (let i = 0; i < 3; i++) {
     const raw = tweets[i];
     if (!raw) {
-      // لا توجد تغريدة كافية — استخدم fallback
+      // Not enough tweets — use fallback
       cleanedTweets.push({
         text: cleanAscii(safe.single_tweets[i]?.text || '').slice(0, 240),
         why_it_works: cleanAscii(safe.single_tweets[i]?.why_it_works || ''),
@@ -170,7 +170,7 @@ function normalizePack(pack: any) {
       continue;
     }
     const text = cleanAscii(String(raw?.text || ''));
-    // لو التغريدة فيها ادعاء غير موثق، استبدلها بالـ fallback
+    // If the tweet contains an unsourced claim, replace it with fallback
     if (containsUnsafeClaim(text) || !text.trim()) {
       cleanedTweets.push({
         text: cleanAscii(safe.single_tweets[i]?.text || '').slice(0, 240),
@@ -271,7 +271,7 @@ Return JSON with this exact shape:
   "human_checklist": ["..."]
 }`;
 
-  // ═══ يستخدم model-router بدل OpenAI مباشرة ═══
+  // ═══ Uses model-router instead of OpenAI directly ═══
   const response = await callModel('content_generation', [
     { role: 'system', content: 'Write publish-ready X content using provided mechanics only. Never invent proof, metrics, hashtags, or personal claims.' },
     { role: 'user', content: prompt }

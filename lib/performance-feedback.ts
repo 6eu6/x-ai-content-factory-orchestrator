@@ -5,14 +5,14 @@ import { getXUserTimeline, scoreXTweet, analyzeXTweet } from './x';
 import { sendTelegramMessage, allowedChatId, htmlEscape, shortText, MAIN_KEYBOARD } from './telegram';
 
 /**
- * Account Performance Scanner v2 — ماسح أداء الحساب + تعلم سببي من النتائج
+ * Account Performance Scanner v2 — Account performance scanner + causal learning from results
  *
- * تحسينات:
- * 1. تعلم سببي أعمق — يربط كل نتيجة بالقواعد المحددة المستخدمة
- * 2. تحديث working memory تلقائياً
- * 3. تسجيل في performance_scans
- * 4. إرسال ملخص التعلم لتليجرام
- * 5. استخلاص anti-patterns صريحة
+ * Improvements:
+ * 1. Deeper causal learning — links each result to specific rules used
+ * 2. Automatic working memory update
+ * 3. Logging in performance_scans
+ * 4. Sending learning summary to Telegram
+ * 5. Extracting explicit anti-patterns
  */
 
 export type PerformanceScanResult = {
@@ -56,7 +56,7 @@ export type LearningUpdate = {
 };
 
 /**
- * المسح الرئيسي — يفحص حساب @30piq ويتعلم من النتائج
+ * Main scan — inspects @30piq account and learns from results
  */
 export async function scanAccountPerformance(
   maxTweets = 10,
@@ -64,7 +64,7 @@ export async function scanAccountPerformance(
 ): Promise<PerformanceScanResult> {
   const supabase = supabaseAdmin();
 
-  // ═══ 1. سحب تغريدات الحساب + المقاييس ═══
+  // ═══ 1. Fetch account tweets + metrics ═══
   let tweets: any[] = [];
   try {
     tweets = await getXUserTimeline(username, maxTweets, true);
@@ -90,7 +90,7 @@ export async function scanAccountPerformance(
     };
   }
 
-  // ═══ 2. تحديث حالة الحساب ═══
+  // ═══ 2. Update account state ═══
   try {
     await supabase.from('account_state').upsert({
       account_handle: username,
@@ -100,7 +100,7 @@ export async function scanAccountPerformance(
     }, { onConflict: 'account_handle' });
   } catch {}
 
-  // ═══ 3. تحليل كل تغريدة ═══
+  // ═══ 3. Analyze each tweet ═══
   const analyses: PerformanceAnalysis[] = [];
 
   for (const tweet of tweets) {
@@ -112,7 +112,7 @@ export async function scanAccountPerformance(
     const quotes = m.quote_count || 0;
     const bookmarks = m.bookmark_count || 0;
 
-    // حساب performance_score
+    // Calculate performance_score
     const engagementScore = scoreXTweet(tweet);
     const viewAdjustedScore = views > 0 ? (engagementScore / views) * 1000 : 0;
 
@@ -120,7 +120,7 @@ export async function scanAccountPerformance(
     if (viewAdjustedScore > 50 || (likes > 5 && bookmarks > 2)) verdict = 'high_performer';
     if (viewAdjustedScore < 5 && views > 100) verdict = 'underperformer';
 
-    // ربط مع content_log
+    // Link with content_log
     let linkedLogId: number | undefined;
     let linkedLogData: any = null;
     try {
@@ -135,7 +135,7 @@ export async function scanAccountPerformance(
       linkedLogData = logEntry;
     } catch {}
 
-    // ربط مع القواعد والأنماط اللي استُخدمت في التوليد
+    // Link with the rules and patterns used in generation
     let linkedRuleIds: number[] = [];
     let linkedPatternIds: number[] = [];
 
@@ -187,7 +187,7 @@ export async function scanAccountPerformance(
     });
   }
 
-  // ═══ 4. تحليل AI — ليش نجح/فشل كل تغريدة ═══
+  // ═══ 4. AI analysis — why each tweet succeeded/failed ═══
   const analysisContext = analyses.map(a => ({
     text: a.text_preview,
     verdict: a.verdict,
@@ -247,11 +247,11 @@ Return JSON array matching each tweet:
     }
   } catch {}
 
-  // ═══ 5. تعلم العقل — تحديث الثقة والأنماط ═══
+  // ═══ 5. Brain learning — update confidence and patterns ═══
   const learningUpdates: LearningUpdate[] = [];
 
   for (const analysis of analyses) {
-    // تحديث content_log بالمقاييس الحقيقية
+    // Update content_log with real metrics
     if (analysis.linked_content_log_id) {
       try {
         await supabase
@@ -275,9 +275,9 @@ Return JSON array matching each tweet:
       } catch {}
     }
 
-    // لو تغريدة ناجحة — زوّد ثقة القواعد المرتبطة بالتحديد
+    // If tweet is successful — boost confidence of specifically linked rules
     if (analysis.verdict === 'high_performer') {
-      // حدّث القواعد المربوطة بالتحديد
+      // Update specifically linked rules
       for (const ruleId of (analysis.linked_rule_ids || [])) {
         learningUpdates.push({
           type: 'rule_boost',
@@ -289,7 +289,7 @@ Return JSON array matching each tweet:
         });
       }
 
-      // حدّث الأنماط المربوطة
+      // Update linked patterns
       for (const patternId of (analysis.linked_pattern_ids || [])) {
         learningUpdates.push({
           type: 'rule_boost',
@@ -301,7 +301,7 @@ Return JSON array matching each tweet:
         });
       }
 
-      // استخلص نمط جديد من النجاح
+      // Extract new pattern from success
       if (analysis.success_factors.length > 0) {
         learningUpdates.push({
           type: 'new_pattern',
@@ -313,7 +313,7 @@ Return JSON array matching each tweet:
       }
     }
 
-    // لو تغريدة فاشلة — نقّص ثقة القواعد المرتبطة
+    // If tweet failed — decrease confidence of linked rules
     if (analysis.verdict === 'underperformer') {
       for (const ruleId of (analysis.linked_rule_ids || [])) {
         learningUpdates.push({
@@ -349,7 +349,7 @@ Return JSON array matching each tweet:
     }
   }
 
-  // ═══ 6. تطبيق تحديثات التعلم على القاعدة ═══
+  // ═══ 6. Apply learning updates to the database ═══
   for (const update of learningUpdates) {
     try {
       if (update.type === 'rule_boost' || update.type === 'rule_decay') {
@@ -372,7 +372,7 @@ Return JSON array matching each tweet:
         }
       }
 
-      // إضافة anti-pattern صريح
+      // Add explicit anti-pattern
       if (update.type === 'anti_pattern' && update.target_id) {
         await supabase
           .from(update.target_table)
@@ -385,7 +385,7 @@ Return JSON array matching each tweet:
     } catch {}
   }
 
-  // ═══ 7. تحديث Working Memory — الثقة العالية فقط ═══
+  // ═══ 7. Update Working Memory — high confidence only ═══
   try {
     const { data: topAlgoRules } = await supabase
       .from('x_algorithm_learning_rules')
@@ -434,7 +434,7 @@ Return JSON array matching each tweet:
     }
   } catch {}
 
-  // ═══ 8. استخلص أنماط تعلم سببية جديدة ═══
+  // ═══ 8. Extract new causal learning patterns ═══
   try {
     const winners = analyses.filter(a => a.verdict === 'high_performer');
     const losers = analyses.filter(a => a.verdict === 'underperformer');
@@ -496,7 +496,7 @@ Return JSON:
 
       const causalParsed = parseModelJson(causationResponse);
 
-      // سجّل القواعد السببية في system_learning_rules
+      // Log causal rules in system_learning_rules
       if (causalParsed.causal_rules?.length) {
         for (const cr of causalParsed.causal_rules.slice(0, 5)) {
           await supabase.from('system_learning_rules').insert({
@@ -511,7 +511,7 @@ Return JSON:
         }
       }
 
-      // سجّل timing insights
+      // Log timing insights
       if (causalParsed.timing_insights?.length) {
         for (const insight of causalParsed.timing_insights.slice(0, 3)) {
           learningUpdates.push({
@@ -524,7 +524,7 @@ Return JSON:
         }
       }
 
-      // سجّل format insights
+      // Log format insights
       if (causalParsed.format_insights?.length) {
         for (const insight of causalParsed.format_insights.slice(0, 3)) {
           learningUpdates.push({
@@ -539,7 +539,7 @@ Return JSON:
     }
   } catch {}
 
-  // ═══ 9. سجل في performance_scans ═══
+  // ═══ 9. Log in performance_scans ═══
   try {
     const winners = analyses.filter(a => a.verdict === 'high_performer');
     const losers = analyses.filter(a => a.verdict === 'underperformer');
@@ -561,7 +561,7 @@ Return JSON:
     });
   } catch {}
 
-  // ═══ 10. سجّل في session_logs ═══
+  // ═══ 10. Log in session_logs ═══
   try {
     await supabase.from('session_logs').insert({
       ai_tool: 'performance_scanner_v2',
@@ -583,7 +583,7 @@ Return JSON:
     });
   } catch {}
 
-  // ═══ 11. [جديد] إرسال ملخص التعلم لتليجرام ═══
+  // ═══ 11. [new] Send learning summary to Telegram ═══
   try {
     const chatId = allowedChatId();
     if (chatId) {
@@ -618,7 +618,7 @@ Return JSON:
     }
   } catch {}
 
-  // ═══ 12. ملخص للعقل ═══
+  // ═══ 12. Brain summary ═══
   const brainSummary = buildBrainSummary(analyses, learningUpdates, username);
 
   return {

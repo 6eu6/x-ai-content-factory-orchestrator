@@ -4,11 +4,11 @@ import { scanAccountPerformance } from '../../../lib/performance-feedback';
 /**
  * GET/POST /api/account-performance-scan
  * 
- * يفحص حساب @30piq ويتعلم من النتائج:
- * - يسحب تغريدات الحساب + مقاييسها
- * - يحلل: ليش نجحت أو فشلت كل تغريدة
- * - يعلّم العقل: يزيد/ينقص ثقة القواعد
- * - يستخلص أنماط جديدة من النجاح/الفشل
+ * Scans @30piq account and learns from the results:
+ * - Pulls account tweets + their metrics
+ * - Analyzes: why each tweet succeeded or failed
+ * - Teaches the brain: increases/decreases rule confidence
+ * - Extracts new patterns from success/failure
  */
 export async function POST(req: Request) { return run(req); }
 export async function GET(req: Request) { return run(req); }

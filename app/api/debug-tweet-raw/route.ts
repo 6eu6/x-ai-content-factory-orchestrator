@@ -4,7 +4,7 @@ import { getTwitterApiKey, twitterApiBase } from '../../../lib/x';
 /**
  * GET /api/debug-tweet-raw?tweet_id=xxx
  * Returns the RAW response from TwitterAPI.io for a single tweet
- * مؤقت — للتشخيص فقط (مفتوح بدون سر)
+ * Temporary — for diagnostics only (open without secret)
  */
 export async function GET(req: Request) {
   try {

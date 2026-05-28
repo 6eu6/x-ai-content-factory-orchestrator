@@ -1,53 +1,53 @@
 export default function Home() {
   const routes = [
-    { path: '/api/health', method: 'GET', desc: 'فحص حالة النظام (عام، بدون سر)', public: true },
-    { path: '/api/db-setup', method: 'GET', desc: 'فحص/إنشاء جداول قاعدة البيانات' },
-    { path: '/api/check-account', method: 'GET', desc: 'فحص حالة حساب @30piq' },
-    { path: '/api/daily-run', method: 'GET/POST', desc: 'المنسّق الرئيسي اليومي' },
-    { path: '/api/model-router', method: 'GET/POST/DELETE', desc: 'إدارة قواعد توجيه النماذج' },
-    { path: '/api/shield-check', method: 'POST', desc: 'فحص حماية المحتوى (11 فحص)' },
-    { path: '/api/format-decision', method: 'GET/POST', desc: 'اختيار صيغة المحتوى المثلى' },
-    { path: '/api/production-cycle', method: 'GET/POST', desc: 'توليد بطاقات الإنتاج' },
-    { path: '/api/generate-media', method: 'POST', desc: 'توليد وسائط (صور، كاروسيل)' },
-    { path: '/api/publish-pack', method: 'POST', desc: 'تجهيز وتسليم حزمة المحتوى' },
-    { path: '/api/account-performance-scan', method: 'GET', desc: 'مسح أداء الحساب مع تعلّم سببي' },
-    { path: '/api/learning-cycle', method: 'GET/POST', desc: 'دورة تعلّم ذكية (بحث + فيروسي)' },
-    { path: '/api/weekly-review', method: 'GET', desc: 'مراجعة أسبوعية' },
-    { path: '/api/viral-account-scan', method: 'GET/POST', desc: 'تحليل حسابات فيروسية عميق' },
-    { path: '/api/viral-discovery-run', method: 'GET/POST', desc: 'اكتشاف فيروسي تلقائي' },
-    { path: '/api/research-intel-v4', method: 'GET', desc: 'بحث مصدري متقدم' },
-    { path: '/api/research-intel-run', method: 'GET/POST', desc: 'تشغيل بحث مصدري' },
-    { path: '/api/discovery-run', method: 'GET', desc: 'اكتشاف GitHub + ويب' },
-    { path: '/api/memory-maintenance-run', method: 'GET', desc: 'صيانة الذاكرة التعليمية' },
-    { path: '/api/growth-learning-run', method: 'GET/POST', desc: 'تعلّم النمو' },
-    { path: '/api/learning-reflection-run', method: 'GET/POST', desc: 'تأمل ذاتي' },
-    { path: '/api/log-user-action', method: 'POST', desc: 'تسجيل إجراءات المستخدم' },
-    { path: '/api/github-create-repo', method: 'POST', desc: 'إنشاء مستودع GitHub' },
-    { path: '/api/debug-twitterapi', method: 'GET', desc: 'تشخيص TwitterAPI' },
-    { path: '/api/system-cleanup', method: 'POST', desc: 'تنظيف بيانات تجريبية' },
+    { path: '/api/health', method: 'GET', desc: 'System health check (public, no secret required)', public: true },
+    { path: '/api/db-setup', method: 'GET', desc: 'Check/create database tables' },
+    { path: '/api/check-account', method: 'GET', desc: 'Check @30piq account status' },
+    { path: '/api/daily-run', method: 'GET/POST', desc: 'Main daily orchestrator' },
+    { path: '/api/model-router', method: 'GET/POST/DELETE', desc: 'Manage model routing rules' },
+    { path: '/api/shield-check', method: 'POST', desc: 'Content protection check (11 checks)' },
+    { path: '/api/format-decision', method: 'GET/POST', desc: 'Select optimal content format' },
+    { path: '/api/production-cycle', method: 'GET/POST', desc: 'Generate production cards' },
+    { path: '/api/generate-media', method: 'POST', desc: 'Generate media (images, carousel)' },
+    { path: '/api/publish-pack', method: 'POST', desc: 'Prepare and deliver content pack' },
+    { path: '/api/account-performance-scan', method: 'GET', desc: 'Account performance scan with causal learning' },
+    { path: '/api/learning-cycle', method: 'GET/POST', desc: 'Smart learning cycle (research + viral)' },
+    { path: '/api/weekly-review', method: 'GET', desc: 'Weekly review' },
+    { path: '/api/viral-account-scan', method: 'GET/POST', desc: 'Deep viral account analysis' },
+    { path: '/api/viral-discovery-run', method: 'GET/POST', desc: 'Automatic viral discovery' },
+    { path: '/api/research-intel-v4', method: 'GET', desc: 'Advanced source-based research' },
+    { path: '/api/research-intel-run', method: 'GET/POST', desc: 'Run source-based research' },
+    { path: '/api/discovery-run', method: 'GET', desc: 'GitHub + web discovery' },
+    { path: '/api/memory-maintenance-run', method: 'GET', desc: 'Educational memory maintenance' },
+    { path: '/api/growth-learning-run', method: 'GET/POST', desc: 'Growth learning' },
+    { path: '/api/learning-reflection-run', method: 'GET/POST', desc: 'Self-reflection' },
+    { path: '/api/log-user-action', method: 'POST', desc: 'Log user actions' },
+    { path: '/api/github-create-repo', method: 'POST', desc: 'Create GitHub repository' },
+    { path: '/api/debug-twitterapi', method: 'GET', desc: 'Diagnose TwitterAPI' },
+    { path: '/api/system-cleanup', method: 'POST', desc: 'Clean up experimental data' },
   ];
 
   const repoRoutes = [
-    { path: '/api/repo-ingest', method: 'GET/POST', desc: 'استيعاب مستودع GitHub' },
-    { path: '/api/repo-deep-learn', method: 'GET/POST', desc: 'تعلم عميق من المستودع' },
-    { path: '/api/repo-deep-learn-excerpt', method: 'GET/POST', desc: 'تعلم عميق من مقتطفات' },
-    { path: '/api/repo-style-learn', method: 'GET/POST', desc: 'تعلم أسلوب المستودع' },
-    { path: '/api/repo-build-planner', method: 'GET/POST', desc: 'تخطيط بناء المستودع' },
-    { path: '/api/repo-artifact-writer', method: 'GET/POST', desc: 'كتابة ملفات المستودع' },
-    { path: '/api/repo-artifact-repair', method: 'GET/POST', desc: 'إصلاح ملفات المستودع' },
-    { path: '/api/repo-validation-run', method: 'GET', desc: 'التحقق من المستودع' },
-    { path: '/api/repo-post-push-validation', method: 'GET', desc: 'تحقق بعد الدفع' },
-    { path: '/api/repo-create-and-push', method: 'POST', desc: 'إنشاء ودفع المستودع' },
-    { path: '/api/repo-investment-run', method: 'GET', desc: 'تقييم استثمار المستودع' },
-    { path: '/api/launch-content-from-repo', method: 'GET/POST', desc: 'محتوى إطلاق من المستودع' },
-    { path: '/api/launch-content-repair', method: 'GET/POST', desc: 'إصلاح محتوى الإطلاق' },
-    { path: '/api/launch-content-repair-strict', method: 'GET/POST', desc: 'إصلاح صارم' },
-    { path: '/api/launch-content-repair-v2', method: 'GET/POST', desc: 'إصلاح v2' },
+    { path: '/api/repo-ingest', method: 'GET/POST', desc: 'Ingest GitHub repository' },
+    { path: '/api/repo-deep-learn', method: 'GET/POST', desc: 'Deep learn from repository' },
+    { path: '/api/repo-deep-learn-excerpt', method: 'GET/POST', desc: 'Deep learn from excerpts' },
+    { path: '/api/repo-style-learn', method: 'GET/POST', desc: 'Learn repository style' },
+    { path: '/api/repo-build-planner', method: 'GET/POST', desc: 'Repository build planner' },
+    { path: '/api/repo-artifact-writer', method: 'GET/POST', desc: 'Write repository files' },
+    { path: '/api/repo-artifact-repair', method: 'GET/POST', desc: 'Repair repository files' },
+    { path: '/api/repo-validation-run', method: 'GET', desc: 'Validate repository' },
+    { path: '/api/repo-post-push-validation', method: 'GET', desc: 'Post-push validation' },
+    { path: '/api/repo-create-and-push', method: 'POST', desc: 'Create and push repository' },
+    { path: '/api/repo-investment-run', method: 'GET', desc: 'Evaluate repository investment' },
+    { path: '/api/launch-content-from-repo', method: 'GET/POST', desc: 'Launch content from repository' },
+    { path: '/api/launch-content-repair', method: 'GET/POST', desc: 'Repair launch content' },
+    { path: '/api/launch-content-repair-strict', method: 'GET/POST', desc: 'Strict repair' },
+    { path: '/api/launch-content-repair-v2', method: 'GET/POST', desc: 'Repair v2' },
   ];
 
   const telegramRoutes = [
-    { path: '/api/telegram/webhook', method: 'POST', desc: 'معالج أوامر البوت (12+ أمر عربي)' },
-    { path: '/api/telegram/setup', method: 'GET', desc: 'إعداد Telegram Webhook' },
+    { path: '/api/telegram/webhook', method: 'POST', desc: 'Bot command handler (12+ Arabic commands)' },
+    { path: '/api/telegram/setup', method: 'GET', desc: 'Setup Telegram Webhook' },
   ];
 
   return (
@@ -56,8 +56,8 @@ export default function Home() {
         <p style={{ fontSize: 13, opacity: 0.6, margin: 0 }}>X AI Content Factory</p>
         <h1 style={{ fontSize: 36, margin: '4px 0 12px', fontWeight: 700 }}>Orchestrator</h1>
         <p style={{ fontSize: 16, opacity: 0.85, maxWidth: 640 }}>
-          نظام آلي متكامل لزراعة حساب تويتر @30piq في مجال AI × الإنتاجية × النمو المهني.
-          المحتوى يُسلّم عبر تليغرام — والنشر يدوي دائمًا.
+          Automated system for growing the @30piq Twitter account in the AI x Productivity x Career Growth niche.
+          Content is delivered via Telegram — publishing is always manual.
         </p>
       </div>
 

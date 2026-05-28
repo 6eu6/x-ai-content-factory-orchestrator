@@ -13,7 +13,7 @@ export async function GET(req: Request) {
     const apply = url.searchParams.get('apply') === '1';
     const limit = Math.max(1, Math.min(1000, Number(url.searchParams.get('limit') || 100)));
 
-    // ── جلب القواعد الخوارزمية ──
+    // ── Fetch algorithm rules ──
     const { data: algoRules, error: algoError } = await supabase
       .from('x_algorithm_learning_rules')
       .select('*')
@@ -25,7 +25,7 @@ export async function GET(req: Request) {
       return Response.json({ ok: false, version: VERSION, error: `algo_rules: ${algoError.message}` }, { status: 500 });
     }
 
-    // ── جلب الأنماط الأسلوبية ──
+    // ── Fetch style patterns ──
     const { data: stylePatterns, error: styleError } = await supabase
       .from('viral_style_patterns')
       .select('*')
@@ -37,7 +37,7 @@ export async function GET(req: Request) {
       return Response.json({ ok: false, version: VERSION, error: `style_patterns: ${styleError.message}` }, { status: 500 });
     }
 
-    // ── تقييم كل القواعد ──
+    // ── Evaluate all rules ──
     const algoEvaluations = (algoRules || []).map(rule => ({
       id: rule.id,
       table: 'x_algorithm_learning_rules' as const,
@@ -56,27 +56,27 @@ export async function GET(req: Request) {
 
     const allEvaluations = [...algoEvaluations, ...styleEvaluations];
 
-    // ── التغييرات المطلوبة (حيث التوصية ≠ الحالة الحالية) ──
+    // ── Needed updates (where recommendation ≠ current status) ──
     const neededUpdates = allEvaluations
       .filter(e => e.recommended_status !== e.current_status)
-      .sort((a, b) => a.quality_score - b.quality_score); // الأضعف أولًا
+      .sort((a, b) => a.quality_score - b.quality_score); // Weakest first
 
     const toWatch = neededUpdates.filter(e => e.recommended_status === 'watch').length;
     const toArchive = neededUpdates.filter(e => e.recommended_status === 'archived').length;
     const remainingUpdates = Math.max(0, neededUpdates.length - MAX_UPDATES_PER_RUN);
 
-    // ── حد التطبيق ──
+    // ── Apply limit ──
     const updatesToApply = neededUpdates.slice(0, MAX_UPDATES_PER_RUN);
 
-    // ── حماية إضافية: لا تؤرشف قاعدة confidence >= 8 إلا إذا quality_score < 2.5 ──
+    // ── Extra safety: don't archive a rule with confidence >= 8 unless quality_score < 2.5 ──
     const safeUpdates = updatesToApply.filter(e => {
       if (e.recommended_status === 'archived' && e.confidence_score >= 8 && e.quality_score >= 2.5) {
-        return false; // لا تؤرشف قاعدة قوية
+        return false; // Don't archive a strong rule
       }
       return true;
     });
 
-    // ── التطبيق ──
+    // ── Apply changes ──
     const applied: Array<{ table: string; id: number; from: string; to: string; quality_score: number; ok: boolean; error?: string }> = [];
 
     if (apply) {
@@ -98,7 +98,7 @@ export async function GET(req: Request) {
       }
     }
 
-    // ── أضعف 20 ──
+    // ── Weakest 20 ──
     const weakest = allEvaluations
       .sort((a, b) => a.quality_score - b.quality_score)
       .slice(0, 20)
@@ -112,7 +112,7 @@ export async function GET(req: Request) {
         reasons: e.reasons
       }));
 
-    // ── التغييرات المقترحة ──
+    // ── Suggested changes ──
     const suggestedChanges = neededUpdates
       .slice(0, 50)
       .map(e => ({

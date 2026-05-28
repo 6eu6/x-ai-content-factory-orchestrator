@@ -4,14 +4,14 @@ import { generateMediaPipeline, generateImage, contentNeedsMedia } from '../../.
 /**
  * POST /api/generate-media
  *
- * يولّد وصف الوسائط أو صورة للمحتوى
+ * Generates media description or image for content
  *
  * Body: {
  *   content_type: 'carousel' | 'video_script' | 'single_tweet_with_image',
  *   topic: string,
  *   text_content: any,
  *   style_hint?: string,
- *   generate_image?: boolean,    // لو true، يحاول يولّد صورة فعلية
+ *   generate_image?: boolean,    // If true, attempts to generate an actual image
  *   image_size?: string          // 1024x1024 | 1344x768 | etc.
  * }
  */
@@ -36,10 +36,10 @@ export async function POST(req: Request) {
       target_platform: body.target_platform || 'x'
     });
 
-    // لو المستخدم طلب توليد صورة فعلية
+    // If the user requested actual image generation
     if (body.generate_image && result.media_items.length > 0) {
       const imageResults = [];
-      for (const item of result.media_items.slice(0, 4)) { // حد أقصى 4 صور
+      for (const item of result.media_items.slice(0, 4)) { // Max 4 images
         if (item.type === 'image_prompt' || item.type === 'carousel_slide') {
           const imageResult = await generateImage(item.prompt, body.image_size || '1024x1024');
           imageResults.push({

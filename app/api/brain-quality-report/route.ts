@@ -11,7 +11,7 @@ export async function GET(req: Request) {
     const url = new URL(req.url);
     const limit = Math.max(1, Math.min(1000, Number(url.searchParams.get('limit') || 100)));
 
-    // ── جلب القواعد الخوارزمية ──
+    // ── Fetch algorithm rules ──
     const { data: algoRules, error: algoError } = await supabase
       .from('x_algorithm_learning_rules')
       .select('*')
@@ -23,7 +23,7 @@ export async function GET(req: Request) {
       return Response.json({ ok: false, version: VERSION, error: `algo_rules: ${algoError.message}` }, { status: 500 });
     }
 
-    // ── جلب الأنماط الأسلوبية ──
+    // ── Fetch style patterns ──
     const { data: stylePatterns, error: styleError } = await supabase
       .from('viral_style_patterns')
       .select('*')
@@ -35,7 +35,7 @@ export async function GET(req: Request) {
       return Response.json({ ok: false, version: VERSION, error: `style_patterns: ${styleError.message}` }, { status: 500 });
     }
 
-    // ── تقييم كل قاعدة ──
+    // ── Evaluate each rule ──
     const algoEvaluations = (algoRules || []).map(rule => ({
       id: rule.id,
       table: 'x_algorithm_learning_rules' as const,
@@ -56,14 +56,14 @@ export async function GET(req: Request) {
 
     const allEvaluations = [...algoEvaluations, ...styleEvaluations];
 
-    // ── إحصائيات التوصيات ──
+    // ── Recommendation stats ──
     const statusSuggestions = {
       active: allEvaluations.filter(e => e.recommended_status === 'active').length,
       watch: allEvaluations.filter(e => e.recommended_status === 'watch').length,
       archived: allEvaluations.filter(e => e.recommended_status === 'archived').length
     };
 
-    // ── التغييرات المقترحة (حيث التوصية تختلف عن الحالة الحالية) ──
+    // ── Suggested changes (where recommendation differs from current status) ──
     const suggestedChanges = allEvaluations
       .filter(e => e.recommended_status !== e.current_status)
       .sort((a, b) => a.quality_score - b.quality_score)
@@ -78,7 +78,7 @@ export async function GET(req: Request) {
         reasons: e.reasons
       }));
 
-    // ── أضعف 20 ──
+    // ── Weakest 20 ──
     const weakest = allEvaluations
       .sort((a, b) => a.quality_score - b.quality_score)
       .slice(0, 20)

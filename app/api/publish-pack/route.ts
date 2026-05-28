@@ -7,18 +7,18 @@ import { parseModelJson } from '../../../lib/model-router';
 /**
  * POST /api/publish-pack
  *
- * يجهز حزمة المحتوى اليومية ويسلمها لتليجرام
- * النشر يدوي — المستخدم هو اللي ينشر
+ * Prepares the daily content pack and delivers it to Telegram.
+ * Publishing is manual — the user publishes themselves.
  *
- * Body (optional — لو فاضي، يسحب آخر daily-run):
+ * Body (optional — if empty, pulls the latest daily-run):
  * {
  *   items?: [{ content_type, content, priority, model_task }],
  *   content_pack?: any,
- *   auto_scan?: boolean   // بعد التسليم، يشغل ماسح الأداء تلقائياً
+ *   auto_scan?: boolean   // After delivery, runs performance scan automatically
  * }
  *
  * Query params:
- *   ?scan=1   — شغّل ماسح الأداء بعد التسليم
+ *   ?scan=1   — Run performance scan after delivery
  */
 export async function POST(req: Request) {
   try {
@@ -30,7 +30,7 @@ export async function POST(req: Request) {
     let diverseContent = body.items || [];
     let contentPack = body.content_pack || null;
 
-    // لو ما في items، سحب آخر daily-run من content_log
+    // If no items, pull the latest daily-run from content_log
     if (!diverseContent.length) {
       const supabase = supabaseAdmin();
       const { data: recentContent } = await supabase
@@ -59,10 +59,10 @@ export async function POST(req: Request) {
       }
     }
 
-    // جهّز وسلّم الحزمة
+    // Prepare and deliver the pack
     const result = await prepareAndDeliverDailyPack(diverseContent, contentPack);
 
-    // لو طلب مسح الأداء بعد التسليم
+    // If performance scan was requested after delivery
     let scanResult = null;
     if (shouldScan) {
       try {
