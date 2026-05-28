@@ -205,7 +205,7 @@ Docs: ${JSON.stringify(docs)}`;
     const autolearn = u.searchParams.get('autolearn') === '1';
     const automaintain = u.searchParams.get('automaintain') === '1';
     const mode = u.searchParams.get('mode') || 'trial';
-    const secret = u.searchParams.get('secret') || '';
+    const secret = process.env.ORCHESTRATOR_SECRET || '';
 
     const log = await insertSessionLog({
       actions_completed: ['repo_ingest', VERSION, r.full, `files:${docs.length}`, `rules:${rulesInserted}`, `opportunities:${opportunitiesInserted}`, `repo_decisions:${decisionsInserted}`, autolearn ? 'autolearn_enabled' : 'autolearn_disabled', automaintain ? 'automaintain_enabled' : 'automaintain_disabled'],
@@ -219,17 +219,18 @@ Docs: ${JSON.stringify(docs)}`;
     });
 
     const baseUrl = `${u.protocol}//${u.host}`;
+    const authHeaders: Record<string, string> = secret ? { 'x-orchestrator-secret': secret } : {};
 
     if (autolearn) {
-      const learnUrl = `${baseUrl}/api/repo-deep-learn?secret=${encodeURIComponent(secret)}&repo=${encodeURIComponent(r.full)}&mode=${mode}&limit=20&force=0`;
-      fetch(learnUrl, { method: 'GET' }).then(async (res) => {
+      const learnUrl = `${baseUrl}/api/repo-deep-learn?repo=${encodeURIComponent(r.full)}&mode=${mode}&limit=20&force=0`;
+      fetch(learnUrl, { method: 'GET', headers: authHeaders }).then(async (res) => {
         const learnResult = await res.json().catch(() => ({}));
         console.log(`[autolearn] repo-deep-learn completed for ${r.full}:`, JSON.stringify(learnResult.counts || {}));
 
         if (automaintain) {
-          const maintainUrl = `${baseUrl}/api/memory-maintenance-run?secret=${encodeURIComponent(secret)}&mode=${mode}`;
+          const maintainUrl = `${baseUrl}/api/memory-maintenance-run?mode=${mode}`;
           try {
-            const maintainRes = await fetch(maintainUrl, { method: 'GET' });
+            const maintainRes = await fetch(maintainUrl, { method: 'GET', headers: authHeaders });
             const maintainResult = await maintainRes.json().catch(() => ({}));
             console.log(`[automaintain] memory-maintenance-run completed:`, JSON.stringify(maintainResult.counts || {}));
           } catch (e: any) {

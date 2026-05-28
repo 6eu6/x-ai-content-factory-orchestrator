@@ -24,7 +24,7 @@ export function assertAuthorized(req: Request): void {
   const secret = process.env.ORCHESTRATOR_SECRET;
   if (!secret) throw new Error('Missing ORCHESTRATOR_SECRET');
   const url = new URL(req.url);
-  const token = req.headers.get('x-orchestrator-secret') || url.searchParams.get('secret') || '';
+  const token = req.headers.get('x-orchestrator-secret') || '';
   const isCron = url.searchParams.get('cron') === '1';
   const vercelCronHeader = req.headers.get('x-vercel-cron');
   if (token === secret) return;

@@ -1,7 +1,7 @@
 {
   "crons": [
     {
-      "path": "/api/daily-run?secret=${ORCHESTRATOR_SECRET}",
+      "path": "/api/cron-dispatcher?cron=1",
       "schedule": "0 6 * * *"
     }
   ],
