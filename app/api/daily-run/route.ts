@@ -4,15 +4,8 @@ import { scanXAccounts } from '../../../lib/content-engine-v3';
 import { sendTelegramMessage, allowedChatId, htmlEscape, shortText, sendTelegramPhoto, sendTelegramVideo, sendTelegramAnimation, MAIN_KEYBOARD } from '../../../lib/telegram';
 import { decideTelegramOpportunities, stageFromFollowerCount } from '../../../lib/decision-engine';
 import { enrichOpportunitiesWithRulePerformance } from '../../../lib/enrich-opportunities-with-rule-performance';
+import { filterPublishableOpportunities } from '../../../lib/content-policy';
 
-/**
- * GET/POST /api/daily-run
- *
- * Decision-gated daily run:
- * 1. X crawl → learning → raw opportunities
- * 2. Decision Engine chooses only a small number of safe recommendations
- * 3. Telegram receives selected recommendations only
- */
 export async function POST(req: Request) { return run(req); }
 export async function GET(req: Request) { return run(req); }
 
@@ -30,7 +23,6 @@ async function run(req: Request) {
     const accountLimit = envNumber('DAILY_SCAN_ACCOUNT_LIMIT', 10, 1, 30);
     const tweetsPerAccount = envNumber('DAILY_SCAN_TWEETS_PER_ACCOUNT', 8, 1, 25);
 
-    // ═══ 1. فحص الحساب ═══
     let xSnapshot: any = null;
     try {
       const { getXUserByUsername } = await import('../../../lib/x');
@@ -47,28 +39,31 @@ async function run(req: Request) {
       }, { onConflict: 'account_handle' });
     } catch {}
 
-    // ═══ 2. الزحف والتحليل ═══
     const scanResult = await scanXAccounts(accountLimit, tweetsPerAccount);
     const stage = stageFromFollowerCount(xSnapshot?.followers_count ?? 0);
 
-    // Phase 6: Enrich opportunities with rule performance data
     let rulePerformanceStats = { enriched_opportunities: 0, avg_weight: 0, boosted_count: 0, penalized_count: 0 };
     try {
       rulePerformanceStats = await enrichOpportunitiesWithRulePerformance(scanResult.opportunities || []);
     } catch {}
 
-    const decision = decideTelegramOpportunities(scanResult.opportunities || [], stage);
+    const publishGate = filterPublishableOpportunities(scanResult.opportunities || []);
+    const decision = decideTelegramOpportunities(publishGate.accepted || [], stage);
+    (decision as any)._publishGate = {
+      accepted: publishGate.accepted.length,
+      rejected: publishGate.rejected.length,
+      reasons: publishGate.rejected.slice(0, 5).map(r => r.reason)
+    };
 
-    // ═══ 3. تسجيل ═══
     const supabase = supabaseAdmin();
     try {
       await supabase.from('daily_checkins').upsert({
         checkin_date: new Date().toISOString().slice(0, 10),
-        execution_mode: 'v4_decision_gated_crawl',
+        execution_mode: 'v5_english_publish_gate',
         account_checked: Boolean(xSnapshot),
         tweets_planned: decision.selected.length,
         creator_posts_analyzed: scanResult.tweets_analyzed,
-        notes: `v4: raw ${scanResult.opportunities?.length || 0}, selected ${decision.selected.length}, held ${decision.held.length}, stage ${stage}, account_limit ${accountLimit}, tweets_per_account ${tweetsPerAccount}`
+        notes: `v5: raw ${scanResult.opportunities?.length || 0}, gate_ok ${publishGate.accepted.length}, gate_blocked ${publishGate.rejected.length}, selected ${decision.selected.length}, held ${decision.held.length}, stage ${stage}, account_limit ${accountLimit}, tweets_per_account ${tweetsPerAccount}`
       }, { onConflict: 'checkin_date' });
     } catch {}
 
@@ -79,7 +74,7 @@ async function run(req: Request) {
         raw_opportunities: scanResult.opportunities?.length || 0,
         selected_count: decision.selected.length,
         held_count: decision.held.length,
-        budget: decision.budget,
+        budget: { ...decision.budget, publish_gate: (decision as any)._publishGate },
         selected_payload: decision.selected.slice(0, 5).map((o: any) => ({
           type: o.type,
           score: o.decision_score?.final_score,
@@ -101,7 +96,6 @@ async function run(req: Request) {
       (decision as any)._runId = insertedRun?.id || null;
     } catch {}
 
-    // ═══ 4. تسليم لتلقرام ═══
     const chatId = allowedChatId();
     if (chatId) {
       try {
@@ -112,14 +106,15 @@ async function run(req: Request) {
 
     return Response.json({
       ok: true,
-      version: 'v4-decision-gated-crawl',
+      version: 'v5-english-publish-gate',
       xSnapshot: xSnapshot ? { followers: xSnapshot.followers_count } : null,
       decision: {
         stage,
         selected: decision.selected.length,
         held: decision.held.length,
         min_final_score: decision.budget.min_final_score,
-        rule_performance: rulePerformanceStats
+        rule_performance: rulePerformanceStats,
+        publish_gate: (decision as any)._publishGate
       },
       scan: {
         account_limit: accountLimit,
@@ -128,6 +123,8 @@ async function run(req: Request) {
         tweets_analyzed: scanResult.tweets_analyzed,
         viral_found: scanResult.viral_tweets_found,
         raw_opportunities: scanResult.opportunities?.length || 0,
+        gate_accepted: publishGate.accepted.length,
+        gate_rejected: publishGate.rejected.length,
         brain_updates: scanResult.brain_updates,
         media_downloaded: scanResult.media_downloaded,
         debug_log: (scanResult.debug_log || []).slice(0, 20)
@@ -140,6 +137,7 @@ async function run(req: Request) {
 
 async function deliverToTelegram(chatId: string, result: any, username: string, decision: any, followers: number) {
   const runShortId = decision._runId ? String(decision._runId).slice(0, 8) : '—';
+  const gate = decision._publishGate || { accepted: 0, rejected: 0, reasons: [] };
   const lines: string[] = [];
 
   lines.push(`🧠 <b>Decision Run — ${new Date().toISOString().slice(0, 10)}</b>`);
@@ -148,10 +146,10 @@ async function deliverToTelegram(chatId: string, result: any, username: string, 
   lines.push(`━━━━━━━━━━━━━━━━━━━━`);
   lines.push(`📊 زحف: ${result.accounts_scanned} حساب | ${result.tweets_analyzed} تغريدة | خام: ${result.opportunities?.length || 0}`);
   lines.push(`🧠 عقل: +${result.brain_updates.algorithm_rules} قاعدة +${result.brain_updates.style_patterns} نمط`);
+  lines.push(`🛡️ بوابة النشر: ${gate.accepted} صالح | ${gate.rejected} مرفوض`);
   lines.push(`🎯 القرار: ${decision.selected.length} مرسل | ${decision.held.length} مؤجل | الحد الأدنى: ${decision.budget.min_final_score}`);
   lines.push(`━━━━━━━━━━━━━━━━━━━━`);
 
-  // Phase 6: Show rule performance summary
   const rulePerf = (decision as any)._rulePerformance;
   if (rulePerf && rulePerf.enriched_opportunities > 0) {
     lines.push(`🧪 وزن قواعد العقل: avg ${rulePerf.avg_weight} / boosted ${rulePerf.boosted_count} / penalized ${rulePerf.penalized_count}`);
@@ -160,23 +158,17 @@ async function deliverToTelegram(chatId: string, result: any, username: string, 
   const selected = decision.selected || [];
   if (!selected.length) {
     lines.push('\n🟡 <b>لا توجد توصية نشر قوية الآن</b>');
-    lines.push('العقل وجد فرصًا، لكنها لم تتجاوز بوابة القرار. الأفضل عدم النشر بدل إرسال محتوى ضعيف.');
-    const topHeld = (decision.held || [])[0];
-    if (topHeld) {
-      lines.push('\n<b>أقرب فرصة مؤجلة:</b>');
-      lines.push(`Score: ${topHeld.decision_score.final_score}/10`);
-      lines.push(`${htmlEscape(shortText(topHeld.crafted_text, 220))}`);
-      if (topHeld.decision_score.rejection_reasons?.length) {
-        lines.push(`سبب التأجيل: ${htmlEscape(topHeld.decision_score.rejection_reasons[0])}`);
-      }
+    lines.push('كل الفرص الضعيفة أو غير المناسبة تم حجبها قبل الوصول لك.');
+    if (gate.reasons?.length) {
+      lines.push('\n<b>أسباب الحجب الأعلى:</b>');
+      for (const reason of gate.reasons.slice(0, 3)) lines.push(`• ${htmlEscape(reason)}`);
     }
   } else {
-    // Show run short ID for reference
     lines.push(`\n<b>✅ توصيات النشر المختارة (${selected.length})</b>`);
     lines.push(`<i>Run: ${runShortId}</i>`);
     for (let i = 0; i < selected.length; i++) {
       const opp = selected[i];
-      const typeLabel = opp.type === 'quote' ? '📌 اقتباس' : opp.type === 'reply' ? '↩️ رد' : opp.type === 'thread' ? '🧵 ثريد' : '📰 مقال';
+      const typeLabel = opp.type === 'quote' ? '📌 Quote' : opp.type === 'reply' ? '↩️ Reply' : opp.type === 'thread' ? '🧵 Thread' : '📰 Article';
       const score = opp.decision_score;
       const recNum = i + 1;
       lines.push(`\n<b>Rec #${recNum}</b> ${typeLabel} — <b>${score.final_score}/10</b>`);
