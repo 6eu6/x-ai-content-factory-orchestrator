@@ -504,6 +504,9 @@ async function processQualityEnhance(task: PipelineTaskRow): Promise<TaskResult>
         rewrites_attempted: enhanceResult.rewrite_summary.rewrites_attempted,
         rewrites_failed_validation: enhanceResult.rewrite_summary.rewrites_failed_validation,
         rewrites_skipped_reason: enhanceResult.rewrite_summary.rewrites_skipped_reason,
+        // Phase 2C.2: Rewrite JSON wrapper cleaning stats
+        rewrite_json_wrappers_cleaned: enhanceResult.rewrite_summary.rewrite_json_wrappers_cleaned,
+        rewrite_json_wrappers_failed_cleaning: enhanceResult.rewrite_summary.rewrite_json_wrappers_failed_cleaning,
         _opportunities: validationResults.validated,
         _quality_summary: enhanceResult.scores_summary,
         _numeric_guard_summary: guardResult.summary

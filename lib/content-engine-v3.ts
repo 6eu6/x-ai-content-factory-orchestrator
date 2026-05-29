@@ -70,6 +70,10 @@ export type ContentOpportunity = {
   rewrite_trigger_reason?: string;
   rewrite_attempted?: boolean;
   rewrite_failed_reason?: string;
+  // Phase 2C.2: rewrite JSON wrapper cleaning diagnostics
+  rewrite_raw_was_json_wrapper?: boolean;
+  rewrite_cleaned_json_wrapper?: boolean;
+  rewrite_cleaning_notes?: string;
 };
 
 export type MediaFromTweet = {

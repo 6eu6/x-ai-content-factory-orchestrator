@@ -33,7 +33,7 @@
 import { callModel, parseModelJson, TaskType } from './model-router';
 import { containsArabic, isAISlopWrapper } from './content-policy';
 import { quickShieldCheck } from './account-shield';
-import { looksLikeJsonWrapper } from './crafted-text-cleaner';
+import { looksLikeJsonWrapper, cleanCraftedText } from './crafted-text-cleaner';
 import { scoreNicheAlignment } from './niche-alignment';
 import { detectNumericClaims, hasSourceForClaim } from './numeric-claim-guard';
 import { validateOpportunityQuality } from './quality-validator';
@@ -88,6 +88,10 @@ export type OpportunityWithDiagnostics = {
   rewrite_rejected_reason?: string;
   shield_issues_before?: string[];
   shield_issues_after?: string[];
+  // Phase 2C.2 diagnostic fields: JSON wrapper cleaning in rewrite output
+  rewrite_raw_was_json_wrapper?: boolean;
+  rewrite_cleaned_json_wrapper?: boolean;
+  rewrite_cleaning_notes?: string;
   // Existing fields from enrich step
   avg_brain_rule_weight?: number;
   rule_performance_summary?: {
@@ -510,6 +514,10 @@ Return JSON only: {"originality": N, "evidence_safety": N, "usefulness": N}`
 export type RewriteResult = {
   text: string | null;
   failedReason: string | null;
+  // Phase 2C.2 diagnostics: JSON wrapper cleaning in rewrite output
+  rewrite_raw_was_json_wrapper?: boolean;
+  rewrite_cleaned_json_wrapper?: boolean;
+  rewrite_cleaning_notes?: string;
 };
 
 export async function rewriteForOriginality(
@@ -568,25 +576,81 @@ Return the rewritten text ONLY. No explanation, no quotes, no labels, no JSON.`
       return { text: null, failedReason: 'arabic_content_in_rewrite' };
     }
 
-    // If the rewrite looks like JSON/markdown wrapper, reject it
+    // Phase 2C.2: If the rewrite looks like JSON/markdown wrapper, attempt cleaning
+    // before rejecting. The model often returns valid content inside JSON wrappers.
+    let rewriteText = rewritten;
+    let rewriteRawWasJsonWrapper = false;
+    let rewriteCleanedJsonWrapper = false;
+    let rewriteCleaningNotes: string | undefined;
+
     if (looksLikeJsonWrapper(rewritten)) {
-      return { text: null, failedReason: 'json_wrapper_in_rewrite' };
+      rewriteRawWasJsonWrapper = true;
+      const cleanResult = cleanCraftedText(rewritten);
+
+      if (!cleanResult.malformed_json_output && cleanResult.cleaned_text.length >= 10) {
+        // Cleaning succeeded — use the cleaned text for further validation
+        rewriteText = cleanResult.cleaned_text;
+        rewriteCleanedJsonWrapper = true;
+        rewriteCleaningNotes = cleanResult.cleaning_notes;
+      } else {
+        // Cleaning failed — still malformed after attempt
+        return {
+          text: null,
+          failedReason: 'json_wrapper_in_rewrite',
+          rewrite_raw_was_json_wrapper: true,
+          rewrite_cleaned_json_wrapper: false,
+          rewrite_cleaning_notes: cleanResult.cleaning_notes,
+        };
+      }
+    }
+
+    // Validate cleaned rewrite — use rewriteText (may be cleaned from JSON)
+    // If the text was cleaned from JSON, use the cleaned version for all subsequent checks
+    const textToValidate = rewriteText;
+
+    // Double-check: if the cleaned text STILL looks like JSON, reject it
+    if (looksLikeJsonWrapper(textToValidate)) {
+      return {
+        text: null,
+        failedReason: 'json_wrapper_in_rewrite',
+        rewrite_raw_was_json_wrapper: true,
+        rewrite_cleaned_json_wrapper: rewriteCleanedJsonWrapper || undefined,
+        rewrite_cleaning_notes: rewriteCleaningNotes,
+      };
     }
 
     // If the rewrite looks like AI slop wrapper, reject it
-    const slopCheck = isAISlopWrapper(rewritten);
+    const slopCheck = isAISlopWrapper(textToValidate);
     if (!slopCheck.ok) {
-      return { text: null, failedReason: `ai_slop_in_rewrite:${slopCheck.reason || 'detected'}` };
+      return {
+        text: null,
+        failedReason: `ai_slop_in_rewrite:${slopCheck.reason || 'detected'}`,
+        rewrite_raw_was_json_wrapper: rewriteRawWasJsonWrapper || undefined,
+        rewrite_cleaned_json_wrapper: rewriteCleanedJsonWrapper || undefined,
+        rewrite_cleaning_notes: rewriteCleaningNotes,
+      };
     }
 
     // Reject generic engagement bait patterns
     for (const { pattern, name } of GENERIC_BAIT_PATTERNS) {
-      if (pattern.test(rewritten.trim())) {
-        return { text: null, failedReason: `generic_bait_in_rewrite:${name}` };
+      if (pattern.test(textToValidate.trim())) {
+        return {
+          text: null,
+          failedReason: `generic_bait_in_rewrite:${name}`,
+          rewrite_raw_was_json_wrapper: rewriteRawWasJsonWrapper || undefined,
+          rewrite_cleaned_json_wrapper: rewriteCleanedJsonWrapper || undefined,
+          rewrite_cleaning_notes: rewriteCleaningNotes,
+        };
       }
     }
 
-    return { text: rewritten, failedReason: null };
+    return {
+      text: textToValidate,
+      failedReason: null,
+      rewrite_raw_was_json_wrapper: rewriteRawWasJsonWrapper || undefined,
+      rewrite_cleaned_json_wrapper: rewriteCleanedJsonWrapper || undefined,
+      rewrite_cleaning_notes: rewriteCleaningNotes,
+    };
   } catch (err: any) {
     return { text: null, failedReason: `rewrite_exception:${err?.message || 'unknown'}` };
   }
@@ -674,6 +738,11 @@ export async function enhanceOpportunity(
   let scoresAfter: QualityScores | null = null;
   let finalText = text;
 
+  // Phase 2C.2: Track rewrite cleaning diagnostics
+  let rewriteRawWasJsonWrapper: boolean | undefined;
+  let rewriteCleanedJsonWrapper: boolean | undefined;
+  let rewriteCleaningNotes: string | undefined;
+
   // Capture original shield state for before/after comparison
   const shieldIssuesBefore = [...(opp.shield_issues || [])];
   const shieldPassedBefore = opp.shield_passed;
@@ -685,6 +754,19 @@ export async function enhanceOpportunity(
     notes.push(`Rewrite triggered: ${triggerReason}`);
 
     const rewriteResult = await rewriteForOriginality(text, scoresBefore);
+
+    // Phase 2C.2: Capture rewrite cleaning diagnostics from result
+    rewriteRawWasJsonWrapper = rewriteResult.rewrite_raw_was_json_wrapper;
+    rewriteCleanedJsonWrapper = rewriteResult.rewrite_cleaned_json_wrapper;
+    rewriteCleaningNotes = rewriteResult.rewrite_cleaning_notes;
+
+    if (rewriteResult.rewrite_raw_was_json_wrapper) {
+      if (rewriteResult.rewrite_cleaned_json_wrapper) {
+        notes.push(`Rewrite output was JSON wrapper — cleaned successfully: ${rewriteResult.rewrite_cleaning_notes || ''}`);
+      } else {
+        notes.push(`Rewrite output was JSON wrapper — cleaning failed`);
+      }
+    }
 
     if (rewriteResult.text && rewriteResult.text !== text) {
       // Rewrite produced a non-null, non-identical result
@@ -786,6 +868,10 @@ export async function enhanceOpportunity(
     rewrite_rejected_reason: rewriteRejectedReason || undefined,
     shield_issues_before: shieldIssuesBefore.length > 0 ? shieldIssuesBefore : undefined,
     shield_issues_after: shieldIssuesAfter || undefined,
+    // Phase 2C.2: Rewrite cleaning diagnostics
+    rewrite_raw_was_json_wrapper: rewriteRawWasJsonWrapper,
+    rewrite_cleaned_json_wrapper: rewriteCleanedJsonWrapper,
+    rewrite_cleaning_notes: rewriteCleaningNotes,
     quality_notes: notes.join('; ')
   };
 }
@@ -820,6 +906,9 @@ export async function enhanceOpportunities(
     rewrites_rejected_no_improvement: number;
     rewrites_failed_validation: number;
     rewrites_skipped_reason: Record<string, number>;
+    // Phase 2C.2: Rewrite JSON wrapper cleaning stats
+    rewrite_json_wrappers_cleaned: number;
+    rewrite_json_wrappers_failed_cleaning: number;
   };
 }> {
   if (!opportunities?.length) {
@@ -842,7 +931,9 @@ export async function enhanceOpportunities(
         rewrites_applied_by_shield_improvement: 0,
         rewrites_rejected_no_improvement: 0,
         rewrites_failed_validation: 0,
-        rewrites_skipped_reason: {}
+        rewrites_skipped_reason: {},
+        rewrite_json_wrappers_cleaned: 0,
+        rewrite_json_wrappers_failed_cleaning: 0,
       }
     };
   }
@@ -856,6 +947,9 @@ export async function enhanceOpportunities(
   let rewritesRejectedNoImprovement = 0;
   let rewriteCandidatesCount = 0;
   const skippedReasons: Record<string, number> = {};
+  // Phase 2C.2: Rewrite JSON wrapper cleaning stats
+  let rewriteJsonWrappersCleaned = 0;
+  let rewriteJsonWrappersFailedCleaning = 0;
 
   for (const opp of opportunities) {
     const result = await enhanceOpportunity(opp);
@@ -865,6 +959,14 @@ export async function enhanceOpportunities(
     if (result.rewrite_attempted) {
       rewritesAttempted++;
       rewriteCandidatesCount++;
+      // Phase 2C.2: Track JSON wrapper cleaning in rewrite output
+      if (result.rewrite_raw_was_json_wrapper) {
+        if (result.rewrite_cleaned_json_wrapper) {
+          rewriteJsonWrappersCleaned++;
+        } else {
+          rewriteJsonWrappersFailedCleaning++;
+        }
+      }
       if (result.rewrite_applied) {
         rewritesApplied++;
         // Track WHY the rewrite was applied
@@ -935,7 +1037,10 @@ export async function enhanceOpportunities(
       rewrites_applied_by_shield_improvement: rewritesAppliedByShieldImprovement,
       rewrites_rejected_no_improvement: rewritesRejectedNoImprovement,
       rewrites_failed_validation: rewritesFailedValidation,
-      rewrites_skipped_reason: skippedReasons
+      rewrites_skipped_reason: skippedReasons,
+      // Phase 2C.2: Rewrite JSON wrapper cleaning stats
+      rewrite_json_wrappers_cleaned: rewriteJsonWrappersCleaned,
+      rewrite_json_wrappers_failed_cleaning: rewriteJsonWrappersFailedCleaning,
     }
   };
 }
