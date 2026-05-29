@@ -494,9 +494,18 @@ async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskRe
       .eq('status', 'completed')
       .maybeSingle();
 
-    // Fallback: if no intelligence task, try merge_scan_results (backward compat)
-    let opportunities: any[] = intelTask?.result?._opportunities || [];
-    if (!opportunities.length) {
+    // CRITICAL FALLBACK RULE (Bug #1 fix):
+    // If opportunity_intelligence task exists and completed, always use its _opportunities.
+    // Empty _opportunities from intelligence means "selected zero", not "missing data".
+    // Only fallback to merge_scan_results if the intelligence task does not exist at all
+    // (i.e., pre-Phase 2D runs where the task type was never created).
+    let opportunities: any[];
+    if (intelTask) {
+      // Intelligence task exists and completed — use its result, even if empty
+      opportunities = intelTask.result?._opportunities || [];
+    } else {
+      // No intelligence task at all — this is an old (pre-Phase 2D) run.
+      // Fallback to merge_scan_results for backward compat.
       const { data: mergeTask } = await supabase
         .from('pipeline_tasks')
         .select('result')
@@ -546,7 +555,7 @@ async function processQualityEnhance(task: PipelineTaskRow): Promise<TaskResult>
     const supabase = supabaseAdmin();
     const runId = task.run_id;
 
-    // Get enrich results
+    // Get enrich results — always use enrich if it exists (even if _opportunities=[])
     const { data: enrichTask } = await supabase
       .from('pipeline_tasks')
       .select('result')
@@ -555,7 +564,33 @@ async function processQualityEnhance(task: PipelineTaskRow): Promise<TaskResult>
       .eq('status', 'completed')
       .maybeSingle();
 
-    const opportunities: OpportunityWithDiagnostics[] = enrichTask?.result?._opportunities || [];
+    // FALLBACK RULE: Only fallback to pre-enrich source if enrich task doesn't exist.
+    // If enrich exists and returned empty, that's intentional — zero opportunities pass through.
+    let opportunities: OpportunityWithDiagnostics[];
+    if (enrichTask) {
+      opportunities = enrichTask.result?._opportunities || [];
+    } else {
+      // Pre-enrich pipeline — shouldn't happen in Phase 2D+ but handle gracefully
+      const { data: intelTask } = await supabase
+        .from('pipeline_tasks')
+        .select('result')
+        .eq('run_id', runId)
+        .eq('task_type', 'opportunity_intelligence')
+        .eq('status', 'completed')
+        .maybeSingle();
+      if (intelTask) {
+        opportunities = intelTask.result?._opportunities || [];
+      } else {
+        const { data: mergeTask } = await supabase
+          .from('pipeline_tasks')
+          .select('result')
+          .eq('run_id', runId)
+          .eq('task_type', 'merge_scan_results')
+          .eq('status', 'completed')
+          .maybeSingle();
+        opportunities = mergeTask?.result?._opportunities || [];
+      }
+    }
 
     if (!opportunities.length) {
       return {
@@ -656,7 +691,8 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
     const supabase = supabaseAdmin();
     const runId = task.run_id;
 
-    // Get quality_enhance results
+    // Get quality_enhance results — always use quality_enhance if it exists
+    // FALLBACK RULE: Only fallback if quality_enhance task doesn't exist at all (pre-Phase 2B run)
     const { data: qualityTask } = await supabase
       .from('pipeline_tasks')
       .select('result')
@@ -665,7 +701,43 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
       .eq('status', 'completed')
       .maybeSingle();
 
-    const opportunities: OpportunityWithDiagnostics[] = qualityTask?.result?._opportunities || [];
+    let opportunities: OpportunityWithDiagnostics[];
+    if (qualityTask) {
+      // quality_enhance task exists — use its result, even if empty
+      opportunities = qualityTask.result?._opportunities || [];
+    } else {
+      // Pre-Phase 2B run: fallback to enrich or intelligence or merge
+      const { data: enrichTask } = await supabase
+        .from('pipeline_tasks')
+        .select('result')
+        .eq('run_id', runId)
+        .eq('task_type', 'enrich_opportunities')
+        .eq('status', 'completed')
+        .maybeSingle();
+      if (enrichTask) {
+        opportunities = enrichTask.result?._opportunities || [];
+      } else {
+        const { data: intelTask } = await supabase
+          .from('pipeline_tasks')
+          .select('result')
+          .eq('run_id', runId)
+          .eq('task_type', 'opportunity_intelligence')
+          .eq('status', 'completed')
+          .maybeSingle();
+        if (intelTask) {
+          opportunities = intelTask.result?._opportunities || [];
+        } else {
+          const { data: mergeTask } = await supabase
+            .from('pipeline_tasks')
+            .select('result')
+            .eq('run_id', runId)
+            .eq('task_type', 'merge_scan_results')
+            .eq('status', 'completed')
+            .maybeSingle();
+          opportunities = mergeTask?.result?._opportunities || [];
+        }
+      }
+    }
 
     if (!opportunities.length) {
       return {
@@ -771,7 +843,8 @@ async function processPublishGate(task: PipelineTaskRow): Promise<TaskResult> {
     const runId = task.run_id;
 
     // Get opportunity_judge results (Phase 2D: judge filters before publish_gate)
-    // Fallback chain: opportunity_judge → quality_enhance → enrich_opportunities
+    // FALLBACK RULE: Only fallback if the newer upstream task type doesn't exist at all.
+    // If judge exists and returned empty _opportunities, that's intentional — zero pass through.
     const { data: judgeTask } = await supabase
       .from('pipeline_tasks')
       .select('result')
@@ -781,10 +854,11 @@ async function processPublishGate(task: PipelineTaskRow): Promise<TaskResult> {
       .maybeSingle();
 
     let opportunities;
-    if (judgeTask?.result?._opportunities) {
-      opportunities = judgeTask.result._opportunities;
+    if (judgeTask) {
+      // Judge task exists and completed — use its _opportunities, even if empty
+      opportunities = judgeTask.result?._opportunities || [];
     } else {
-      // Fallback: read from quality_enhance (pre-Phase 2D runs)
+      // No judge task at all — pre-Phase 2D run. Fallback chain.
       const { data: qualityTask } = await supabase
         .from('pipeline_tasks')
         .select('result')
@@ -792,10 +866,9 @@ async function processPublishGate(task: PipelineTaskRow): Promise<TaskResult> {
         .eq('task_type', 'quality_enhance')
         .eq('status', 'completed')
         .maybeSingle();
-      if (qualityTask?.result?._opportunities) {
-        opportunities = qualityTask.result._opportunities;
+      if (qualityTask) {
+        opportunities = qualityTask.result?._opportunities || [];
       } else {
-        // Further fallback: enrich_opportunities (pre-Phase 2B runs)
         const { data: enrichTask } = await supabase
           .from('pipeline_tasks')
           .select('result')
@@ -1047,6 +1120,24 @@ async function processTelegramDelivery(task: PipelineTaskRow): Promise<TaskResul
       .eq('status', 'completed')
       .maybeSingle();
 
+    // Bug #2 fix: Fetch opportunity_intelligence result for Phase 2D diagnostics
+    const { data: intelTask } = await supabase
+      .from('pipeline_tasks')
+      .select('result')
+      .eq('run_id', runId)
+      .eq('task_type', 'opportunity_intelligence')
+      .eq('status', 'completed')
+      .maybeSingle();
+
+    // Bug #2 fix: Fetch opportunity_judge result for Phase 2D diagnostics
+    const { data: judgeTask } = await supabase
+      .from('pipeline_tasks')
+      .select('result')
+      .eq('run_id', runId)
+      .eq('task_type', 'opportunity_judge')
+      .eq('status', 'completed')
+      .maybeSingle();
+
     // Get account state
     const { data: accountTask } = await supabase
       .from('pipeline_tasks')
@@ -1070,6 +1161,21 @@ async function processTelegramDelivery(task: PipelineTaskRow): Promise<TaskResul
       media_downloaded: mergeTask?.result?.media_downloaded || 0,
       debug_log: []
     };
+
+    // Bug #2 fix: Attach Phase 2D diagnostics to decision for Telegram reporting
+    (decision as any)._intelligenceDiagnostics = intelTask?.result ? {
+      raw_opportunity_count: intelTask.result.raw_opportunity_count ?? 0,
+      intelligence_evaluated_count: intelTask.result.intelligence_evaluated_count ?? 0,
+      intelligence_selected_count: intelTask.result.intelligence_selected_count ?? 0,
+      intelligence_rejected_count: intelTask.result.intelligence_rejected_count ?? 0,
+      top_rejection_reasons: intelTask.result.top_rejection_reasons ?? {},
+    } : null;
+
+    (decision as any)._judgeDiagnostics = judgeTask?.result ? {
+      judge_passed_count: judgeTask.result.judge_passed_count ?? 0,
+      judge_failed_count: judgeTask.result.judge_failed_count ?? 0,
+      judge_failure_reasons: judgeTask.result.judge_failure_reasons ?? {},
+    } : null;
 
     // Set the decision run ID
     const decisionRunId = persistTask?.result?.decision_run_id;

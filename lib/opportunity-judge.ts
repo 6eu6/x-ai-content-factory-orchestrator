@@ -232,6 +232,42 @@ Return JSON only: {"originality_score": N, "usefulness_score": N, "niche_fit_sco
     ], { temperature: 0.0, max_tokens: 300, response_format: { type: 'json_object' } });
 
     const parsed = parseModelJson(response);
+
+    // Bug #4 fix: Validate parsed result has required numeric fields
+    // If parseModelJson returns an empty/broken object, treat as judge_parse_failed
+    if (!parsed || typeof parsed !== 'object') {
+      return {
+        originality_score: 1,
+        usefulness_score: 1,
+        niche_fit_score: 1,
+        evidence_safety_score: 1,
+        clarity_score: 1,
+        generic_bait_flag,
+        unsupported_claim_flag,
+        final_candidate_score: 1,
+        passed: false,
+        failure_reasons: ['judge_parse_failed'],
+      };
+    }
+
+    // Verify at least final_candidate_score is a number; if not, it's a parse failure
+    const hasValidScores = typeof parsed.final_candidate_score === 'number' ||
+                           typeof parsed.originality_score === 'number';
+    if (!hasValidScores) {
+      return {
+        originality_score: 1,
+        usefulness_score: 1,
+        niche_fit_score: 1,
+        evidence_safety_score: 1,
+        clarity_score: 1,
+        generic_bait_flag,
+        unsupported_claim_flag,
+        final_candidate_score: 1,
+        passed: false,
+        failure_reasons: ['judge_parse_failed'],
+      };
+    }
+
     aiScores = {
       originality_score: clampScore(parsed.originality_score),
       usefulness_score: clampScore(parsed.usefulness_score),
@@ -241,7 +277,10 @@ Return JSON only: {"originality_score": N, "usefulness_score": N, "niche_fit_sco
       final_candidate_score: clampScore(parsed.final_candidate_score),
     };
   } catch (err: any) {
-    // AI failure — return failed result with baseline scores
+    // Bug #4 fix: AI failure — return clean judge_parse_failed diagnostic, NOT raw parser error
+    // This prevents noisy publish_gate reasons like "ai_judge_failed:Unexpected end of JSON input"
+    // The raw error is logged to console but NOT propagated to shield_issues/publish_gate
+    console.warn(`[opportunity-judge] AI judge call failed: ${(err?.message || 'unknown').slice(0, 200)}`);
     return {
       originality_score: 1,
       usefulness_score: 1,
@@ -252,7 +291,7 @@ Return JSON only: {"originality_score": N, "usefulness_score": N, "niche_fit_sco
       unsupported_claim_flag,
       final_candidate_score: 1,
       passed: false,
-      failure_reasons: [`ai_judge_failed:${err?.message || 'unknown'}`],
+      failure_reasons: ['judge_parse_failed'],
     };
   }
 
@@ -349,7 +388,10 @@ export async function judgeCraftedCandidates(
       failedCount++;
       // Track each failure reason
       for (const reason of result.failure_reasons) {
-        const key = reason.split('_')[0] + '_' + reason.split('_')[1]; // Normalize e.g. "originality_score_6_below_7.8" → "originality_score"
+        // Bug #4 fix: Use the full reason for known clean diagnostics like "judge_parse_failed"
+        // Only normalize compound reasons like "originality_score_6_below_7.8" → "originality_score"
+        const key = reason === 'judge_parse_failed' ? reason
+          : reason.split('_')[0] + '_' + reason.split('_')[1];
         failureReasons[key] = (failureReasons[key] || 0) + 1;
       }
     }

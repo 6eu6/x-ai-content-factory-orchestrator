@@ -22,6 +22,19 @@ import {
 
 // ═══ Types ═══
 
+/** Valid X handle pattern: 1-15 chars, only A-Za-z0-9_ */
+export const VALID_X_HANDLE_REGEX = /^[A-Za-z0-9_]{1,15}$/;
+
+/**
+ * Validate an X handle. Returns true if the handle matches the valid pattern.
+ * Excludes Arabic text, emoji, labels, UI strings, URLs, empty handles, spaces/symbols.
+ */
+export function isValidXHandle(handle: string | null | undefined): boolean {
+  if (!handle) return false;
+  const trimmed = handle.trim();
+  return trimmed.length > 0 && VALID_X_HANDLE_REGEX.test(trimmed);
+}
+
 export type EnqueuePipelineRunOptions = {
   source?: string;
   accountLimit?: number;
@@ -257,6 +270,26 @@ export async function createPipelineTasks(
       accounts = data;
     }
   } catch {}
+
+  // Bug #3 fix: Filter out invalid X handles before creating scan_account tasks.
+  // Valid X handle pattern: 1-15 chars, only A-Za-z0-9_
+  // Exclude Arabic text, emoji, labels, UI strings, URLs, empty handles, spaces/symbols
+  const excludedInvalidHandles: string[] = [];
+  const validAccounts = accounts.filter(account => {
+    const handle = account.handle?.trim();
+    if (!handle || !isValidXHandle(handle)) {
+      excludedInvalidHandles.push(account.handle);
+      return false;
+    }
+    return true;
+  });
+
+  if (excludedInvalidHandles.length > 0) {
+    console.warn(`[pipeline-queue] Excluded ${excludedInvalidHandles.length} invalid X handles from scan: ${excludedInvalidHandles.slice(0, 5).map(h => JSON.stringify(h)).join(', ')}`);
+  }
+
+  // Replace accounts with only valid ones
+  accounts = validAccounts;
 
   // If no accounts found, still create global tasks (they will detect no accounts and handle gracefully)
   if (!accounts.length) {

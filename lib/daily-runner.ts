@@ -434,6 +434,8 @@ export async function deliverDecisionToTelegram(
 ): Promise<void> {
   const runShortId = decision._runId ? String(decision._runId).slice(0, 8) : '—';
   const gate = decision._publishGate || { accepted: 0, rejected: 0, reasons: [] };
+  const intelDiag = (decision as any)._intelligenceDiagnostics;
+  const judgeDiag = (decision as any)._judgeDiagnostics;
   const lines: string[] = [];
 
   lines.push(`🧠 <b>Decision Run — ${new Date().toISOString().slice(0, 10)}</b>`);
@@ -442,6 +444,36 @@ export async function deliverDecisionToTelegram(
   lines.push(`━━━━━━━━━━━━━━━━━━━━`);
   lines.push(`📊 زحف: ${scanResult.actual_accounts_scanned ?? scanResult.accounts_scanned} حساب | ${scanResult.manual_tweets_loaded ?? 0} تغريدة يدوية | ${scanResult.tweets_analyzed} محللة | خام: ${scanResult.opportunities?.length || 0}`);
   lines.push(`🧠 عقل: +${scanResult.brain_updates.algorithm_rules} قاعدة +${scanResult.brain_updates.style_patterns} نمط`);
+
+  // Bug #2 fix: Include Phase 2D intelligence and judge diagnostics
+  if (intelDiag) {
+    lines.push(`🔍 ذكاء: ${intelDiag.intelligence_evaluated_count} مُقيَّم | ${intelDiag.intelligence_selected_count} مختار | ${intelDiag.intelligence_rejected_count} مرفوض`);
+    if (intelDiag.intelligence_selected_count === 0) {
+      const topReasons = Object.entries(intelDiag.top_rejection_reasons || {})
+        .sort(([,a]: any, [,b]: any) => (b as number) - (a as number))
+        .slice(0, 3)
+        .map(([reason, count]) => `${reason} (${count})`)
+        .join(', ');
+      if (topReasons) {
+        lines.push(`   أسباب الرفض: ${topReasons}`);
+      }
+    }
+  }
+
+  if (judgeDiag) {
+    lines.push(`⚖️ حَكَم: ${judgeDiag.judge_passed_count} نجح | ${judgeDiag.judge_failed_count} رسب`);
+    if (judgeDiag.judge_failed_count > 0) {
+      const topJudgeReasons = Object.entries(judgeDiag.judge_failure_reasons || {})
+        .sort(([,a]: any, [,b]: any) => (b as number) - (a as number))
+        .slice(0, 3)
+        .map(([reason, count]) => `${reason} (${count})`)
+        .join(', ');
+      if (topJudgeReasons) {
+        lines.push(`   أسباب فشل الحَكَم: ${topJudgeReasons}`);
+      }
+    }
+  }
+
   lines.push(`🛡️ بوابة النشر: ${gate.accepted} صالح | ${gate.rejected} مرفوض`);
   lines.push(`🎯 القرار: ${decision.selected.length} مرسل | ${decision.held.length} مؤجل | الحد الأدنى: ${decision.budget.min_final_score}`);
   lines.push(`━━━━━━━━━━━━━━━━━━━━`);
@@ -453,8 +485,15 @@ export async function deliverDecisionToTelegram(
 
   const selected = decision.selected || [];
   if (!selected.length) {
-    lines.push('\n🟡 <b>لا توجد توصية نشر قوية الآن</b>');
-    lines.push('كل الفرص الضعيفة أو غير المناسبة تم حجبها قبل الوصول لك.');
+    // Bug #2 fix: When intelligence selected 0, say so clearly — don't imply publish_gate rejected crafted candidates
+    if (intelDiag && intelDiag.intelligence_selected_count === 0) {
+      lines.push('\n🟡 <b>لا توجد فرص خام قوية اختارها الذكاء الاصطناعي</b>');
+      lines.push('لم يتم العثور على فرص خام ذات زاوية مفيدة وفريدة للنشر.');
+      lines.push('لم تصل أي فرصة إلى مرحلة الصياغة أو بوابة النشر.');
+    } else {
+      lines.push('\n🟡 <b>لا توجد توصية نشر قوية الآن</b>');
+      lines.push('كل الفرص الضعيفة أو غير المناسبة تم حجبها قبل الوصول لك.');
+    }
     if (gate.reasons?.length) {
       lines.push('\n<b>أسباب الحجب الأعلى:</b>');
       for (const reason of gate.reasons.slice(0, 3)) lines.push(`• ${htmlEscape(reason)}`);
