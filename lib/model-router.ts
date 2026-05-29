@@ -3,6 +3,7 @@ import { requiredEnv, optionalEnv } from './env';
 import { supabaseAdmin } from './supabase';
 import { withRetry, isTransientError } from './retry';
 import { startCostEvent, completeCostEvent, failCostEvent, type CostProvider } from './cost-ledger';
+import { getCostContext } from './cost-context';
 
 /**
  * Model Router — Routes each task to the appropriate model via OpenRouter
@@ -263,6 +264,7 @@ export async function getAIClientForTask(taskType: TaskType): Promise<{ client: 
 /**
  * Simplified model call — automatically selects model by task type.
  * Phase 2A: Instruments every call with cost ledger tracking.
+ * run_id/task_id are resolved from: 1) explicit overrides, 2) AsyncLocalStorage cost context.
  */
 export async function callModel(
   taskType: TaskType,
@@ -275,10 +277,15 @@ export async function callModel(
   // Determine provider for cost ledger
   const provider: CostProvider = merged.provider === 'local' ? 'local' : (isOpenRouter() ? 'openrouter' : 'openai');
 
+  // Resolve run_id/task_id: explicit overrides take precedence, then AsyncLocalStorage context
+  const costCtx = getCostContext();
+  const runId = overrides?.run_id ?? costCtx.run_id;
+  const taskId = overrides?.task_id ?? costCtx.task_id;
+
   // Start cost event
   const costEventId = await startCostEvent({
-    run_id: overrides?.run_id,
-    task_id: overrides?.task_id,
+    run_id: runId,
+    task_id: taskId,
     task_type: taskType,
     provider,
     model: merged.model

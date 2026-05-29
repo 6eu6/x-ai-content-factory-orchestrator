@@ -30,19 +30,10 @@ CREATE INDEX IF NOT EXISTS idx_rejection_ledger_created_at ON rejection_ledger(c
 CREATE INDEX IF NOT EXISTS idx_rejection_ledger_run_reason
   ON rejection_ledger(run_id, rejection_reason);
 
--- RLS
+-- RLS: Enable with NO policies. Service role bypasses RLS, so the PM2 worker
+-- and Vercel API routes can read/write freely. No anon or authenticated role
+-- should ever access these internal ledger tables directly.
 ALTER TABLE rejection_ledger ENABLE ROW LEVEL SECURITY;
-
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_policies
-    WHERE tablename = 'rejection_ledger' AND policyname = 'Service role full access on rejection_ledger'
-  ) THEN
-    CREATE POLICY "Service role full access on rejection_ledger" ON rejection_ledger
-      FOR ALL USING (true) WITH CHECK (true);
-  END IF;
-END $$;
 
 -- Comment for documentation
 COMMENT ON TABLE rejection_ledger IS 'Phase 2A: Rejection diagnostics for publish gate — tracks why opportunities are rejected, with preview and hash for pattern analysis';

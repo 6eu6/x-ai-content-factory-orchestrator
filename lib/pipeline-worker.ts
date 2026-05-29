@@ -47,6 +47,7 @@ import {
   type AccountScanEmptyReason
 } from './content-engine-v3';
 import { recordPublishGateRejections } from './rejection-ledger';
+import { withCostContext } from './cost-context';
 
 // ═══ Types ═══
 
@@ -111,9 +112,13 @@ export async function processPipelineTaskBatch(options: ProcessBatchOptions): Pr
     const task = lockResult.task;
     tasksProcessed++;
 
-    // Process the task
+    // Process the task within a cost context so callModel/fetchTwitterApiJson
+    // can attribute cost events to this specific run_id and task_id
     try {
-      const result = await processTask(task);
+      const result = await withCostContext(
+        { run_id: task.run_id, task_id: task.id, task_type: task.task_type },
+        () => processTask(task)
+      );
 
       if (result.ok) {
         await completeTask(task.id, result.result);

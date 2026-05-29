@@ -1,6 +1,7 @@
 import { optionalEnv } from './env';
 import { withRetry, isTransientError } from './retry';
 import { startCostEvent, completeCostEvent, failCostEvent } from './cost-ledger';
+import { getCostContext } from './cost-context';
 
 export type XAccountSnapshot = {
   username: string;
@@ -54,11 +55,16 @@ async function throttle() {
 }
 
 export async function fetchTwitterApiJson(url: string, costMeta?: { run_id?: string; task_id?: string; task_type?: string }) {
-  // Phase 2A: Start cost event for TwitterAPI.io call
+  // Phase 2A: Resolve run_id/task_id from explicit costMeta, then AsyncLocalStorage context
+  const costCtx = getCostContext();
+  const runId = costMeta?.run_id ?? costCtx.run_id;
+  const taskId = costMeta?.task_id ?? costCtx.task_id;
+
+  // Start cost event for TwitterAPI.io call
   const costEventId = await startCostEvent({
-    run_id: costMeta?.run_id ?? null,
-    task_id: costMeta?.task_id ?? null,
-    task_type: costMeta?.task_type || 'twitter_api_call',
+    run_id: runId,
+    task_id: taskId,
+    task_type: costMeta?.task_type || costCtx.task_type || 'twitter_api_call',
     provider: 'twitterapi_io',
     model: null,
     request_url: url
@@ -77,14 +83,14 @@ export async function fetchTwitterApiJson(url: string, costMeta?: { run_id?: str
       return json;
     }, { attempts: 3, baseDelayMs: 1500, label: 'twitterapi', shouldRetry: isTransientError });
 
-    // Phase 2A: Complete cost event (TwitterAPI is flat subscription, cost = 0)
+    // Complete cost event (TwitterAPI is flat subscription, cost = 0)
     await completeCostEvent(costEventId, {
       estimated_cost_usd: 0
     });
 
     return result;
   } catch (err: any) {
-    // Phase 2A: Fail cost event
+    // Fail cost event
     await failCostEvent(costEventId, err?.message || 'TwitterAPI.io call failed');
     throw err;
   }

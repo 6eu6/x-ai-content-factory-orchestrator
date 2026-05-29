@@ -1,5 +1,5 @@
 /**
- * Phase 2A tests — Cost Ledger + Rejection Ledger
+ * Phase 2A tests — Cost Ledger + Rejection Ledger + Cost Context
  *
  * Tests the pure logic functions that don't require Supabase.
  * DB-dependent functions are tested via integration (manual or Supabase test instance).
@@ -21,6 +21,12 @@ import {
   formatSummaryJson,
   type RunCostSummary
 } from '../lib/run-cost-summary';
+import {
+  getCostContext,
+  withCostContext,
+  updateCostContext,
+  type CostContext
+} from '../lib/cost-context';
 
 // ═══ Cost Ledger: estimateCostUsd ═══
 
@@ -259,5 +265,126 @@ describe('formatSummaryJson', () => {
     expect(json.total_cost_usd).toBe(0.05);
     expect(json.events.total).toBe(1);
     expect(json.tokens.input).toBe(1000);
+  });
+});
+
+// ═══ Cost Context: AsyncLocalStorage propagation ═══
+
+describe('getCostContext (no context set)', () => {
+  it('returns null defaults when no context is set', () => {
+    const ctx = getCostContext();
+    expect(ctx.run_id).toBeNull();
+    expect(ctx.task_id).toBeNull();
+    expect(ctx.task_type).toBeNull();
+  });
+});
+
+describe('withCostContext', () => {
+  it('provides context inside the callback', async () => {
+    const ctx = await withCostContext(
+      { run_id: 'run-123', task_id: 'task-456', task_type: 'scan_account' },
+      async () => {
+        const inner = getCostContext();
+        expect(inner.run_id).toBe('run-123');
+        expect(inner.task_id).toBe('task-456');
+        expect(inner.task_type).toBe('scan_account');
+        return inner;
+      }
+    );
+    expect(ctx.run_id).toBe('run-123');
+  });
+
+  it('context is not visible outside the callback', async () => {
+    // Before: no context
+    expect(getCostContext().run_id).toBeNull();
+
+    await withCostContext(
+      { run_id: 'run-inside', task_id: 'task-inside', task_type: 'test' },
+      async () => {
+        // Inside: context is set
+        expect(getCostContext().run_id).toBe('run-inside');
+      }
+    );
+
+    // After: no context again
+    expect(getCostContext().run_id).toBeNull();
+  });
+
+  it('nested context overrides parent', async () => {
+    await withCostContext(
+      { run_id: 'outer-run', task_id: 'outer-task', task_type: 'outer' },
+      async () => {
+        expect(getCostContext().run_id).toBe('outer-run');
+
+        await withCostContext(
+          { run_id: 'inner-run', task_id: 'inner-task', task_type: 'inner' },
+          async () => {
+            expect(getCostContext().run_id).toBe('inner-run');
+            expect(getCostContext().task_type).toBe('inner');
+          }
+        );
+
+        // After inner: outer context is restored
+        expect(getCostContext().run_id).toBe('outer-run');
+      }
+    );
+  });
+
+  it('propagates through async boundaries', async () => {
+    await withCostContext(
+      { run_id: 'async-run', task_id: 'async-task', task_type: 'async_test' },
+      async () => {
+        // Simulate async call chain like callModel → withRetry → fetch
+        const result = await new Promise<CostContext>((resolve) => {
+          setTimeout(() => resolve(getCostContext()), 10);
+        });
+        expect(result.run_id).toBe('async-run');
+        expect(result.task_id).toBe('async-task');
+      }
+    );
+  });
+
+  it('works with multiple sequential contexts', async () => {
+    // Task 1
+    await withCostContext(
+      { run_id: 'run-A', task_id: 'task-1', task_type: 'scan_account' },
+      async () => {
+        expect(getCostContext().run_id).toBe('run-A');
+        expect(getCostContext().task_type).toBe('scan_account');
+      }
+    );
+
+    // Task 2
+    await withCostContext(
+      { run_id: 'run-B', task_id: 'task-2', task_type: 'merge_scan_results' },
+      async () => {
+        expect(getCostContext().run_id).toBe('run-B');
+        expect(getCostContext().task_type).toBe('merge_scan_results');
+      }
+    );
+
+    // After all: no context
+    expect(getCostContext().run_id).toBeNull();
+  });
+});
+
+describe('updateCostContext', () => {
+  it('updates fields within an active context', async () => {
+    await withCostContext(
+      { run_id: 'initial-run', task_id: null, task_type: null },
+      async () => {
+        expect(getCostContext().task_id).toBeNull();
+
+        updateCostContext({ task_id: 'task-updated' });
+        expect(getCostContext().task_id).toBe('task-updated');
+        expect(getCostContext().run_id).toBe('initial-run');
+      }
+    );
+  });
+
+  it('does nothing when no context is set', () => {
+    // Should not throw
+    updateCostContext({ run_id: 'ignored' });
+    expect(getCostContext().run_id).toBeNull();
   });
 });

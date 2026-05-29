@@ -34,19 +34,10 @@ CREATE INDEX IF NOT EXISTS idx_cost_ledger_model ON pipeline_cost_ledger(model);
 CREATE INDEX IF NOT EXISTS idx_cost_ledger_run_provider
   ON pipeline_cost_ledger(run_id, provider);
 
--- RLS
+-- RLS: Enable with NO policies. Service role bypasses RLS, so the PM2 worker
+-- and Vercel API routes can read/write freely. No anon or authenticated role
+-- should ever access these internal ledger tables directly.
 ALTER TABLE pipeline_cost_ledger ENABLE ROW LEVEL SECURITY;
-
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_policies
-    WHERE tablename = 'pipeline_cost_ledger' AND policyname = 'Service role full access on pipeline_cost_ledger'
-  ) THEN
-    CREATE POLICY "Service role full access on pipeline_cost_ledger" ON pipeline_cost_ledger
-      FOR ALL USING (true) WITH CHECK (true);
-  END IF;
-END $$;
 
 -- Comment for documentation
 COMMENT ON TABLE pipeline_cost_ledger IS 'Phase 2A: Durable cost ledger for tracking per-run, per-task, per-provider costs during the 30-day @30piq experiment';
