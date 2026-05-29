@@ -522,7 +522,12 @@ export type RewriteResult = {
 
 export async function rewriteForOriginality(
   text: string,
-  currentScores: QualityScores
+  currentScores: QualityScores,
+  briefContext?: {
+    recommended_angle: string;
+    do_not_claim: string[];
+    required_context: string[];
+  }
 ): Promise<RewriteResult> {
   try {
     const response = await callModel('content_crafting' as TaskType, [
@@ -545,7 +550,11 @@ Rules (mandatory — violation = rejected rewrite):
 10. Vary sentence length — mix short punchy fragments with longer explanatory sentences
 11. Sound like a smart builder/operator, not a content mill, not a life coach
 12. Do NOT add numbers/percentages that weren't in the original unless you have a source
-13. Do NOT start with "Here's", "Sure,", or "I'll" — those are AI conversation artifacts
+13. Do NOT start with "Here's", "Sure,", or "I'll" — those are AI conversation artifacts${briefContext ? `
+14. CRITICAL: Follow the recommended angle: "${briefContext.recommended_angle}". The rewrite MUST adopt this perspective.
+15. DO NOT invent personal experience ("I tried", "I found", "my experience") unless the source explicitly supports it.
+16. AVOID these specific claims: ${briefContext.do_not_claim.join(', ') || 'none'}
+17. INCLUDE this context: ${briefContext.required_context.join(', ') || 'none'}` : ''}
 
 Current scores: originality=${currentScores.originality}/10, evidence_safety=${currentScores.evidence_safety}/10, usefulness=${currentScores.usefulness}/10
 
@@ -753,7 +762,11 @@ export async function enhanceOpportunity(
     rewriteAttempted = true;
     notes.push(`Rewrite triggered: ${triggerReason}`);
 
-    const rewriteResult = await rewriteForOriginality(text, scoresBefore);
+    const rewriteResult = await rewriteForOriginality(text, scoresBefore, opp._brief ? {
+      recommended_angle: opp._brief.recommended_angle || '',
+      do_not_claim: opp._brief.do_not_claim || [],
+      required_context: opp._brief.required_context || [],
+    } : undefined);
 
     // Phase 2C.2: Capture rewrite cleaning diagnostics from result
     rewriteRawWasJsonWrapper = rewriteResult.rewrite_raw_was_json_wrapper;

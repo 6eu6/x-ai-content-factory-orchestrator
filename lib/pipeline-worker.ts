@@ -56,6 +56,7 @@ import { guardNicheAlignment } from './niche-alignment';
 import { validateOpportunitiesBeforeGate } from './quality-validator';
 import { evaluateOpportunities, type OpportunityBrief, type IntelligenceSummary } from './opportunity-intelligence';
 import { judgeCraftedCandidates, type JudgeResult, type JudgeSummary } from './opportunity-judge';
+import { callModel, parseModelJson } from './model-router';
 
 // ═══ Types ═══
 
@@ -170,6 +171,300 @@ export async function processPipelineTaskBatch(options: ProcessBatchOptions): Pr
   }
 
   return buildBatchResult('max_tasks', workerId, tasksProcessed, tasksCompleted, tasksFailed, tasksRetried, startTime, errors);
+}
+
+// ═══ Phase 2D.2: Brief-faithful Crafting Functions ═══
+
+/**
+ * Patterns indicating invented personal experience that is NOT supported by the source.
+ * These should NEVER appear in crafted text unless the source explicitly supports them.
+ */
+const INVENTED_EXPERIENCE_PATTERNS = [
+  /\bI tried\b/i,
+  /\bI found\b/i,
+  /\bmy experience\b/i,
+  /\bI tested\b/i,
+  /\bI used\b/i,
+  /\bI built\b/i,
+  /\bI discovered\b/i,
+  /\bI learned\b/i,
+  /\bI noticed\b/i,
+  /\bI've been\b/i,
+  /\bI've done\b/i,
+  /\bI started\b/i,
+  /\bI switched\b/i,
+];
+
+/**
+ * Generic praise patterns that should not appear in crafted text.
+ * These indicate low-quality, non-analytical content.
+ */
+const GENERIC_PRAISE_PATTERNS = [
+  /\bbrilliant minds?\b/i,
+  /\bgame changer\b/i,
+  /\bthis is huge\b/i,
+  /\bseeing \w+ gives me hope\b/i,
+  /\bso inspiring\b/i,
+  /\bamazing (new|update|feature)\b/i,
+  /\bgroundbreaking\b/i,
+];
+
+/**
+ * Heuristic brief alignment validator.
+ * Checks whether crafted_text follows the brief's recommended_angle.
+ *
+ * Scoring:
+ * - Start at 5.0 (neutral)
+ * - Penalize if crafted text doesn't share concepts with recommended_angle
+ * - Penalize generic praise
+ * - Penalize invented personal experience (unless source supports it)
+ * - Penalize if do_not_claim terms appear
+ * - Reward if key concepts from recommended_angle appear in text
+ *
+ * Returns score 1-10 and notes.
+ */
+export function validateBriefAlignment(
+  craftedText: string,
+  brief: {
+    recommended_angle: string;
+    source_summary: string;
+    do_not_claim: string[];
+    required_context: string[];
+  },
+  sourceText?: string
+): { score: number; notes: string[]; invented_personal_experience: boolean; ignored_recommended_angle: boolean } {
+  if (!craftedText || craftedText.length < 10) {
+    return { score: 1, notes: ['Empty or too short crafted text'], invented_personal_experience: false, ignored_recommended_angle: true };
+  }
+
+  const notes: string[] = [];
+  let score = 5.0;
+
+  // Extract key concepts from recommended_angle (split by common delimiters)
+  const angleWords = (brief.recommended_angle || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length > 3);  // Skip short words
+
+  // Check if crafted text contains concepts from the recommended angle
+  const craftedLower = craftedText.toLowerCase();
+  const matchedConcepts = angleWords.filter(w => craftedLower.includes(w));
+  const conceptRatio = angleWords.length > 0 ? matchedConcepts.length / angleWords.length : 0;
+
+  if (conceptRatio >= 0.3) {
+    score += 2.0;
+    notes.push(`Good angle alignment: ${matchedConcepts.length}/${angleWords.length} angle concepts found`);
+  } else if (conceptRatio >= 0.15) {
+    score += 1.0;
+    notes.push(`Partial angle alignment: ${matchedConcepts.length}/${angleWords.length} angle concepts found`);
+  } else {
+    score -= 2.0;
+    notes.push(`Weak angle alignment: only ${matchedConcepts.length}/${angleWords.length} angle concepts found — text may ignore recommended_angle`);
+  }
+
+  // Check for generic praise patterns
+  for (const pattern of GENERIC_PRAISE_PATTERNS) {
+    if (pattern.test(craftedText)) {
+      score -= 1.5;
+      notes.push(`Generic praise detected: ${pattern.source}`);
+      break;
+    }
+  }
+
+  // Check for invented personal experience
+  let inventedExperience = false;
+  const sourceLower = (sourceText || '').toLowerCase();
+  for (const pattern of INVENTED_EXPERIENCE_PATTERNS) {
+    if (pattern.test(craftedText)) {
+      // Check if the source actually supports this personal claim
+      // If the source says "I tried..." and the crafted text says "I tried...", that's OK
+      // But if the source is about someone else and the crafted text says "I tried...", that's invented
+      if (!sourceLower.includes('i tried') && !sourceLower.includes('i found') && !sourceLower.includes('i tested') && !sourceLower.includes('i used')) {
+        score -= 2.0;
+        notes.push(`Invented personal experience: pattern "${pattern.source}" detected without source support`);
+        inventedExperience = true;
+        break;
+      }
+    }
+  }
+
+  // Check for do_not_claim terms
+  if (brief.do_not_claim && brief.do_not_claim.length > 0) {
+    for (const claim of brief.do_not_claim) {
+      const claimLower = claim.toLowerCase();
+      if (craftedLower.includes(claimLower) && claimLower.length > 3) {
+        score -= 1.5;
+        notes.push(`do_not_claim term found in text: "${claim.slice(0, 50)}"`);
+        break;
+      }
+    }
+  }
+
+  const ignoredAngle = conceptRatio < 0.1 && brief.recommended_angle.length >= 20;
+
+  score = Math.max(1, Math.min(10, Math.round(score * 10) / 10));
+
+  return {
+    score,
+    notes,
+    invented_personal_experience: inventedExperience,
+    ignored_recommended_angle: ignoredAngle,
+  };
+}
+
+/**
+ * Craft content from a brief using the selected_candidate_crafting model route.
+ *
+ * This replaces the original crafted_text (from content-engine-v3) with a
+ * brief-faithful version that follows the recommended_angle, avoids
+ * do_not_claim terms, includes required_context, and does not invent
+ * personal experience.
+ */
+async function craftFromBrief(
+  opp: Record<string, any>,
+  brief: {
+    recommended_angle: string;
+    audience_relevance: string;
+    why_it_matters: string;
+    do_not_claim: string[];
+    content_format: string;
+    source_summary: string;
+    required_context: string[];
+    niche_fit_score: number;
+    originality_potential_score: number;
+    publishability_score: number;
+  }
+): Promise<{
+  crafted_text: string | null;
+  format: string;
+  brief_alignment_score: number;
+  brief_alignment_notes: string[];
+  invented_personal_experience_flag: boolean;
+  ignored_recommended_angle_flag: boolean;
+}> {
+  const sourceText = String(opp.source_text || opp.text || '').slice(0, 400);
+  const sourceAuthor = String(opp.source_author || opp.author || opp.username || '');
+  const originalCrafted = String(opp.crafted_text || '').slice(0, 200);
+  const doNotClaimStr = (brief.do_not_claim || []).map(c => `- "${c}"`).join('\n');
+  const requiredContextStr = (brief.required_context || []).map(c => `- ${c}`).join('\n');
+
+  try {
+    const response = await callModel('selected_candidate_crafting' as any, [
+      {
+        role: 'system',
+        content: `You are a content crafter for @30piq, an X account focused on AI, creators, internet culture, productivity, skills, and modern work.
+
+Your task: Craft a tweet that STRICTLY follows the Opportunity Brief below. The brief was produced by an intelligence analyst who identified this as a promising opportunity with a specific recommended angle.
+
+═══ MANDATORY RULES ═══
+
+1. FOLLOW THE RECOMMENDED ANGLE exactly. The recommended_angle is your primary directive — do NOT substitute it with a different angle.
+
+2. DO NOT invent personal experience. Never write "I tried", "I found", "I tested", "my experience", "I used", "I built", "I discovered", "I learned", "I noticed" — unless the source tweet is FROM @30piq themselves confirming this experience.
+
+3. DO NOT use generic praise: no "brilliant minds", "game changer", "this is huge", "seeing X gives me hope", "so inspiring".
+
+4. AVOID all do_not_claim terms listed below — these are claims the source does NOT support and must not be repeated.
+
+5. INCLUDE all required_context items — these are facts/points that MUST be present for the content to be honest.
+
+6. Sound analytical, useful, specific, and @30piq-like: a smart builder/operator perspective, not a content mill or life coach.
+
+7. Keep it under 280 characters.
+
+8. Return PLAIN TEXT ONLY — no JSON, no markdown, no code fences, no labels.
+
+9. English ONLY.
+
+10. No hashtags, no AI slop words (delve, crucial, leverage, game-changer, unlock, empower, elevate, foster, streamline, harness, cutting-edge, paradigm, synergy).
+
+═══ OPPORTUNITY BRIEF ═══
+
+Recommended angle: ${brief.recommended_angle}
+
+Source summary: ${brief.source_summary}
+
+Why it matters: ${brief.why_it_matters}
+
+Audience relevance: ${brief.audience_relevance}
+
+Content format: ${brief.content_format}
+
+DO NOT CLAIM:
+${doNotClaimStr || '(none)'}
+
+REQUIRED CONTEXT (must include):
+${requiredContextStr || '(none)'}
+
+Niche fit: ${brief.niche_fit_score}/10
+Originality potential: ${brief.originality_potential_score}/10
+Publishability: ${brief.publishability_score}/10`,
+      },
+      {
+        role: 'user',
+        content: `Craft a brief-faithful tweet for this opportunity:
+
+Source by @${sourceAuthor}: "${sourceText}"
+
+Original drafted text (IGNORE its angle — use the brief's angle instead): "${originalCrafted}"
+
+Craft the tweet now following the recommended angle.`,
+      },
+    ], { temperature: 0.2, max_tokens: 800 });
+
+    let crafted = String(response || '').trim();
+
+    // Clean JSON wrapper if model returns JSON
+    if (crafted.startsWith('{') || crafted.startsWith('```')) {
+      try {
+        const parsed = parseModelJson(crafted);
+        if (parsed.crafted_text && typeof parsed.crafted_text === 'string') {
+          crafted = parsed.crafted_text.trim();
+        } else if (parsed.text && typeof parsed.text === 'string') {
+          crafted = parsed.text.trim();
+        }
+      } catch {
+        // Not JSON — use as-is
+      }
+    }
+
+    // Strip code fences
+    crafted = crafted.replace(/^```(?:json|text)?\s*\n?/i, '').replace(/\n?\s*```$/i, '').trim();
+
+    if (!crafted || crafted.length < 10) {
+      return {
+        crafted_text: null,
+        format: brief.content_format || 'reply',
+        brief_alignment_score: 1,
+        brief_alignment_notes: ['Crafting produced empty or too short text'],
+        invented_personal_experience_flag: false,
+        ignored_recommended_angle_flag: true,
+      };
+    }
+
+    // Validate brief alignment
+    const alignment = validateBriefAlignment(crafted, brief, sourceText);
+
+    return {
+      crafted_text: crafted,
+      format: brief.content_format || 'reply',
+      brief_alignment_score: alignment.score,
+      brief_alignment_notes: alignment.notes,
+      invented_personal_experience_flag: alignment.invented_personal_experience,
+      ignored_recommended_angle_flag: alignment.ignored_recommended_angle,
+    };
+  } catch (err: any) {
+    console.warn(`[craftFromBrief] AI call failed: ${(err?.message || 'unknown').slice(0, 200)}`);
+    return {
+      crafted_text: null,
+      format: brief.content_format || 'reply',
+      brief_alignment_score: 1,
+      brief_alignment_notes: [`AI call failed: ${(err?.message || 'unknown').slice(0, 100)}`],
+      invented_personal_experience_flag: false,
+      ignored_recommended_angle_flag: true,
+    };
+  }
 }
 
 // ═══ Task Processing Logic ═══
@@ -428,22 +723,16 @@ async function processOpportunityIntelligence(task: PipelineTaskRow): Promise<Ta
     // Log summary
     console.log(`[pipeline-worker] opportunity_intelligence: evaluated ${summary.intelligence_evaluated_count} raw opportunities, selected ${summary.intelligence_selected_count}, rejected ${summary.intelligence_rejected_count}. Top rejection reasons: ${JSON.stringify(summary.top_rejection_reasons)}`);
 
-    // Pass only selected opportunities + their briefs forward
-    // Merge brief data into the opportunity objects for downstream use
-    const selectedOpportunities = opportunities.filter(opp => {
-      const brief = briefs.find(b =>
-        b.source_text === (opp.source_text || opp.text) &&
-        b.source_tweet_url === (opp.source_tweet_url || opp.tweet_url || opp.url)
-      );
-      return brief?.should_craft === true;
-    }).map(opp => {
-      const brief = briefs.find(b =>
-        b.source_text === (opp.source_text || opp.text) &&
-        b.source_tweet_url === (opp.source_tweet_url || opp.tweet_url || opp.url)
-      );
-      // Merge brief guidance into the opportunity for downstream crafting
-      return {
+    // Phase 2D.2: Use index-based matching instead of source_text/source_tweet_url matching.
+    // evaluateOpportunities processes opportunities in order, so briefs[i] ↔ opportunities[i].
+    // The old code used briefs.find() by source_text which could match duplicates,
+    // causing selected_opportunities_count > intelligence_selected_count.
+    const selectedOpportunities = opportunities
+      .map((opp, index) => ({ opp, brief: briefs[index], index }))
+      .filter(({ brief }) => brief?.should_craft === true)
+      .map(({ opp, brief }) => ({
         ...opp,
+        _source_index: brief ? (brief as any)._source_index : undefined,
         _brief: brief ? {
           recommended_angle: brief.recommended_angle,
           audience_relevance: brief.audience_relevance,
@@ -456,8 +745,24 @@ async function processOpportunityIntelligence(task: PipelineTaskRow): Promise<Ta
           originality_potential_score: brief.originality_potential_score,
           publishability_score: brief.publishability_score,
         } : undefined,
-      };
-    });
+      }));
+
+    // Phase 2D.2: Diagnostic — detect count mismatch
+    const selectedBriefsCount = selectedBriefs.length;
+    const selectedOpportunitiesCount = selectedOpportunities.length;
+    const duplicateSourceCount = (() => {
+      const seen = new Map<string, number>();
+      for (const opp of opportunities) {
+        const key = `${opp.source_text || opp.text}|${opp.source_tweet_url || opp.tweet_url || opp.url}`;
+        seen.set(key, (seen.get(key) || 0) + 1);
+      }
+      return [...seen.values()].filter(c => c > 1).reduce((sum, c) => sum + c, 0);
+    })();
+    const selectedCountMismatch = selectedBriefsCount !== selectedOpportunitiesCount;
+
+    if (selectedCountMismatch) {
+      console.warn(`[pipeline-worker] WARNING: selected count mismatch — selectedBriefs=${selectedBriefsCount}, selectedOpportunities=${selectedOpportunitiesCount}, duplicateSources=${duplicateSourceCount}`);
+    }
 
     return {
       ok: true,
@@ -469,6 +774,11 @@ async function processOpportunityIntelligence(task: PipelineTaskRow): Promise<Ta
         top_rejection_reasons: summary.top_rejection_reasons,
         avg_publishability_score: summary.avg_publishability_score,
         avg_originality_potential_score: summary.avg_originality_potential_score,
+        // Phase 2D.2: Selection integrity diagnostics
+        selected_briefs_count: selectedBriefsCount,
+        selected_opportunities_count: selectedOpportunitiesCount,
+        selected_count_mismatch_detected: selectedCountMismatch,
+        duplicate_source_count: duplicateSourceCount,
         _opportunities: selectedOpportunities,
         _intelligence_summary: summary,
       }
@@ -532,6 +842,51 @@ async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskRe
     const { enrichOpportunitiesWithRulePerformance } = await import('./enrich-opportunities-with-rule-performance');
     const rulePerformanceStats = await enrichOpportunitiesWithRulePerformance(opportunities);
 
+    // Phase 2D.2: Brief-faithful recrafting for selected opportunities that have a _brief.
+    // The original crafted_text from content-engine-v3 was generated BEFORE intelligence,
+    // so it ignores the recommended_angle. We now recraft using selected_candidate_crafting.
+    let briefRecraftCount = 0;
+    let briefRecraftFailed = 0;
+    for (let i = 0; i < opportunities.length; i++) {
+      const opp = opportunities[i];
+      const brief = opp._brief;
+      if (brief && brief.recommended_angle && brief.recommended_angle.length >= 10) {
+        try {
+          const recraftResult = await craftFromBrief(opp, brief);
+          if (recraftResult.crafted_text) {
+            opportunities[i] = {
+              ...opp,
+              crafted_text: recraftResult.crafted_text,
+              _brief_used_for_crafting: true,
+              _brief_alignment_score: recraftResult.brief_alignment_score,
+              _brief_alignment_notes: recraftResult.brief_alignment_notes,
+              _invented_personal_experience_flag: recraftResult.invented_personal_experience_flag,
+              _ignored_recommended_angle_flag: recraftResult.ignored_recommended_angle_flag,
+            };
+            briefRecraftCount++;
+          } else {
+            briefRecraftFailed++;
+            // Mark the brief as attempted but failed
+            opportunities[i] = {
+              ...opp,
+              _brief_used_for_crafting: true,
+              _brief_alignment_score: recraftResult.brief_alignment_score,
+              _brief_alignment_notes: recraftResult.brief_alignment_notes,
+              _invented_personal_experience_flag: recraftResult.invented_personal_experience_flag,
+              _ignored_recommended_angle_flag: recraftResult.ignored_recommended_angle_flag,
+            };
+          }
+        } catch (recraftErr: any) {
+          console.warn(`[pipeline-worker] brief recraft failed for opp ${i}: ${recraftErr?.message || 'unknown'}`);
+          briefRecraftFailed++;
+        }
+      }
+    }
+
+    if (briefRecraftCount > 0 || briefRecraftFailed > 0) {
+      console.log(`[pipeline-worker] brief-faithful recrafting: ${briefRecraftCount} succeeded, ${briefRecraftFailed} failed`);
+    }
+
     return {
       ok: true,
       result: {
@@ -539,6 +894,9 @@ async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskRe
         avg_weight: rulePerformanceStats.avg_weight,
         boosted_count: rulePerformanceStats.boosted_count,
         penalized_count: rulePerformanceStats.penalized_count,
+        // Phase 2D.2: Brief recrafting stats
+        brief_recraft_count: briefRecraftCount,
+        brief_recraft_failed: briefRecraftFailed,
         _opportunities: opportunities,
         _rule_performance: rulePerformanceStats
       }
@@ -613,6 +971,40 @@ async function processQualityEnhance(task: PipelineTaskRow): Promise<TaskResult>
     // ═══ Phase 2C Step 1: Niche alignment scoring and guard ═══
     const nicheResult = guardNicheAlignment(currentOpportunities);
     currentOpportunities = nicheResult.guarded as OpportunityWithDiagnostics[];
+
+    // ═══ Phase 2D.2 Step 1.5: Brief alignment gate ═══
+    // For opportunities with _brief, check if crafted_text follows recommended_angle.
+    // If brief_alignment_score < 7.5, mark pre_gate_rejection_reason='brief_alignment_failed'
+    // and shield_passed=false. This prevents brief-ignoring content from passing.
+    let briefAlignmentFailedCount = 0;
+    for (let i = 0; i < currentOpportunities.length; i++) {
+      const opp = currentOpportunities[i];
+      if (opp._brief && opp._brief.recommended_angle && opp._brief.recommended_angle.length >= 10) {
+        const alignment = validateBriefAlignment(
+          opp.crafted_text || '',
+          opp._brief,
+          opp.source_text
+        );
+        // Store alignment diagnostics
+        currentOpportunities[i] = {
+          ...opp,
+          _brief_alignment_score: alignment.score,
+          _brief_alignment_notes: alignment.notes,
+          _invented_personal_experience_flag: alignment.invented_personal_experience,
+          _ignored_recommended_angle_flag: alignment.ignored_recommended_angle,
+        };
+        if (alignment.score < 7.5) {
+          currentOpportunities[i]._brief_alignment_failed = true;
+          currentOpportunities[i].pre_gate_rejection_reason = 'brief_alignment_failed';
+          currentOpportunities[i].shield_passed = false;
+          currentOpportunities[i].shield_issues = [...(currentOpportunities[i].shield_issues || []), 'brief_alignment_failed'];
+          briefAlignmentFailedCount++;
+        }
+      }
+    }
+    if (briefAlignmentFailedCount > 0) {
+      console.log(`[pipeline-worker] quality_enhance: ${briefAlignmentFailedCount} opportunities failed brief alignment gate`);
+    }
 
     // ═══ Phase 2B Step 1: Originality Enhancer (self-critique/rewrite loop) ═══
     const enhanceResult = await enhanceOpportunities(currentOpportunities);
@@ -805,6 +1197,7 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
           niche_fit_score: judgeResult.niche_fit_score,
           evidence_safety_score: judgeResult.evidence_safety_score,
           clarity_score: judgeResult.clarity_score,
+          brief_alignment_score: judgeResult.brief_alignment_score,
           generic_bait_flag: judgeResult.generic_bait_flag,
           unsupported_claim_flag: judgeResult.unsupported_claim_flag,
           failure_reasons: judgeResult.failure_reasons,

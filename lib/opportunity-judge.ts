@@ -35,6 +35,7 @@ export type JudgeResult = {
   generic_bait_flag: boolean;
   unsupported_claim_flag: boolean;
   final_candidate_score: number;   // 1-10
+  brief_alignment_score: number;   // 1-10 (Phase 2D.2)
   passed: boolean;
   failure_reasons: string[];
 };
@@ -60,6 +61,9 @@ const USEFULNESS_THRESHOLD = 7;
 
 /** Minimum evidence_safety_score to pass judge */
 const EVIDENCE_SAFETY_THRESHOLD = 8;
+
+/** Phase 2D.2: Minimum brief_alignment_score to pass judge */
+const BRIEF_ALIGNMENT_THRESHOLD = 7.5;
 
 /**
  * Generic engagement bait patterns — reused concept from originality-enhancer.ts
@@ -105,9 +109,9 @@ const UNSUPPORTED_NUMERIC_PATTERNS = [
  *
  * Returns flags that feed into the final JudgeResult.
  */
-export function quickJudgeCheck(text: string): { generic_bait_flag: boolean; unsupported_claim_flag: boolean } {
+export function quickJudgeCheck(text: string): { generic_bait_flag: boolean; unsupported_claim_flag: boolean; brief_alignment_score: number } {
   if (!text || typeof text !== 'string') {
-    return { generic_bait_flag: false, unsupported_claim_flag: false };
+    return { generic_bait_flag: false, unsupported_claim_flag: false, brief_alignment_score: 0 };
   }
 
   const trimmed = text.trim();
@@ -136,7 +140,7 @@ export function quickJudgeCheck(text: string): { generic_bait_flag: boolean; uns
     }
   }
 
-  return { generic_bait_flag: genericBaitFlag, unsupported_claim_flag: unsupportedClaimFlag };
+  return { generic_bait_flag: genericBaitFlag, unsupported_claim_flag: unsupportedClaimFlag, brief_alignment_score: 0 };
 }
 
 // ═══ AI-Powered Judging ═══
@@ -169,6 +173,7 @@ export async function judgeCraftedCandidate(
   // Step 2: AI-powered scoring
   const recommendedAngle = brief?.recommended_angle || brief?.angle || 'general AI/productivity insight';
   const briefContext = brief?.why || brief?.context || '';
+  const doNotClaim = Array.isArray(brief?.do_not_claim) ? brief.do_not_claim.join(', ') : '';
 
   let aiScores: {
     originality_score: number;
@@ -177,6 +182,7 @@ export async function judgeCraftedCandidate(
     evidence_safety_score: number;
     clarity_score: number;
     final_candidate_score: number;
+    brief_alignment_score: number;
   };
 
   try {
@@ -190,7 +196,7 @@ You are evaluating a crafted tweet BEFORE it goes to the publish gate. Your job 
 The tweet was crafted with this recommended angle: "${recommendedAngle}"
 Brief context: "${briefContext}"
 
-Score the crafted text on five dimensions (1-10 each):
+Score the crafted text on six dimensions (1-10 each):
 
 1. "originality_score": Does this offer a specific, non-obvious angle? Or is it generic AI-style content anyone could write?
    - Generic = 1-4 (vague, templated, no personal angle, sounds like any AI output)
@@ -217,13 +223,22 @@ Score the crafted text on five dimensions (1-10 each):
    - Adequate = 5-7 (understandable but could be tighter or better structured)
    - Crystal clear = 8-10 (sharp, concise, immediately understood, well-structured)
 
+6. "brief_alignment_score": Does the crafted text follow the recommended angle specified above? Does it genuinely adopt that perspective, or does it ignore it and go in a different direction?
+   - Misaligned = 1-4 (completely ignores the recommended angle, takes a different approach, or is generic)
+   - Partially aligned = 5-7 (touches on the angle but doesn't fully commit, or mixes the angle with generic commentary)
+   - Fully aligned = 8-10 (clearly and specifically follows the recommended angle, stays on-point throughout)
+   
+   Also check: does the text invent personal experience ("I tried", "I found", "my experience") when the source doesn't support it? If so, penalize brief_alignment_score heavily.
+
 Also compute "final_candidate_score" (1-10): A weighted overall score reflecting whether this candidate should proceed to publish_gate.
-Weighting: originality 30%, usefulness 25%, niche_fit 15%, evidence_safety 20%, clarity 10%.
+Weighting: originality 25%, usefulness 20%, niche_fit 15%, evidence_safety 15%, clarity 10%, brief_alignment 15%.
 
 IMPORTANT: Be strict. Most content should score 5-7. Only genuinely excellent content should score 8+.
-If the text contains generic engagement bait, unsupported claims, or AI slop, penalize heavily.
+If the text contains generic engagement bait, unsupported claims, AI slop, or ignores the recommended angle, penalize heavily.
 
-Return JSON only: {"originality_score": N, "usefulness_score": N, "niche_fit_score": N, "evidence_safety_score": N, "clarity_score": N, "final_candidate_score": N}`
+Do NOT claim terms to avoid: ${doNotClaim || 'none'}
+
+Return JSON only: {"originality_score": N, "usefulness_score": N, "niche_fit_score": N, "evidence_safety_score": N, "clarity_score": N, "brief_alignment_score": N, "final_candidate_score": N}`
       },
       {
         role: 'user',
@@ -244,6 +259,7 @@ Return JSON only: {"originality_score": N, "usefulness_score": N, "niche_fit_sco
         clarity_score: 1,
         generic_bait_flag,
         unsupported_claim_flag,
+        brief_alignment_score: 1,
         final_candidate_score: 1,
         passed: false,
         failure_reasons: ['judge_parse_failed'],
@@ -262,6 +278,7 @@ Return JSON only: {"originality_score": N, "usefulness_score": N, "niche_fit_sco
         clarity_score: 1,
         generic_bait_flag,
         unsupported_claim_flag,
+        brief_alignment_score: 1,
         final_candidate_score: 1,
         passed: false,
         failure_reasons: ['judge_parse_failed'],
@@ -274,6 +291,7 @@ Return JSON only: {"originality_score": N, "usefulness_score": N, "niche_fit_sco
       niche_fit_score: clampScore(parsed.niche_fit_score),
       evidence_safety_score: clampScore(parsed.evidence_safety_score),
       clarity_score: clampScore(parsed.clarity_score),
+      brief_alignment_score: clampScore(parsed.brief_alignment_score),
       final_candidate_score: clampScore(parsed.final_candidate_score),
     };
   } catch (err: any) {
@@ -289,6 +307,7 @@ Return JSON only: {"originality_score": N, "usefulness_score": N, "niche_fit_sco
       clarity_score: 1,
       generic_bait_flag,
       unsupported_claim_flag,
+      brief_alignment_score: 1,
       final_candidate_score: 1,
       passed: false,
       failure_reasons: ['judge_parse_failed'],
@@ -304,6 +323,7 @@ Return JSON only: {"originality_score": N, "usefulness_score": N, "niche_fit_sco
     clarity_score: aiScores.clarity_score,
     generic_bait_flag,
     unsupported_claim_flag,
+    brief_alignment_score: aiScores.brief_alignment_score,
     final_candidate_score: aiScores.final_candidate_score,
     passed: true,  // Will be set to false by hard criteria below
     failure_reasons: [],
@@ -334,6 +354,11 @@ Return JSON only: {"originality_score": N, "usefulness_score": N, "niche_fit_sco
 
   if (result.unsupported_claim_flag) {
     failureReasons.push('unsupported_claim_flag');
+  }
+
+  // Phase 2D.2: Hard fail if brief_alignment_score < 7.5
+  if (result.brief_alignment_score < BRIEF_ALIGNMENT_THRESHOLD) {
+    failureReasons.push(`brief_alignment_score_${result.brief_alignment_score}_below_${BRIEF_ALIGNMENT_THRESHOLD}`);
   }
 
   result.failure_reasons = failureReasons;
