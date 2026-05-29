@@ -54,6 +54,8 @@ import { guardOpportunitiesNumericClaims } from './numeric-claim-guard';
 import { cleanOpportunitiesText } from './crafted-text-cleaner';
 import { guardNicheAlignment } from './niche-alignment';
 import { validateOpportunitiesBeforeGate } from './quality-validator';
+import { evaluateOpportunities, type OpportunityBrief, type IntelligenceSummary } from './opportunity-intelligence';
+import { judgeCraftedCandidates, type JudgeResult, type JudgeSummary } from './opportunity-judge';
 
 // ═══ Types ═══
 
@@ -190,10 +192,14 @@ async function processTask(task: PipelineTaskRow): Promise<TaskResult> {
       return processScanAccount(task);
     case 'merge_scan_results':
       return processMergeScanResults(task);
+    case 'opportunity_intelligence':
+      return processOpportunityIntelligence(task);
     case 'enrich_opportunities':
       return processEnrichOpportunities(task);
     case 'quality_enhance':
       return processQualityEnhance(task);
+    case 'opportunity_judge':
+      return processOpportunityJudge(task);
     case 'publish_gate':
       return processPublishGate(task);
     case 'decision':
@@ -359,14 +365,14 @@ async function processMergeScanResults(task: PipelineTaskRow): Promise<TaskResul
   }
 }
 
-// ═══ enrich_opportunities ═══
+// ═══ opportunity_intelligence (Phase 2D) ═══
 
-async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskResult> {
+async function processOpportunityIntelligence(task: PipelineTaskRow): Promise<TaskResult> {
   try {
     const supabase = supabaseAdmin();
     const runId = task.run_id;
 
-    // Get merge results
+    // Get merge results (opportunities from scan)
     const { data: mergeTask } = await supabase
       .from('pipeline_tasks')
       .select('result')
@@ -375,7 +381,131 @@ async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskRe
       .eq('status', 'completed')
       .maybeSingle();
 
-    const opportunities = mergeTask?.result?._opportunities || [];
+    const opportunities: Record<string, any>[] = mergeTask?.result?._opportunities || [];
+
+    if (!opportunities.length) {
+      return {
+        ok: true,
+        result: {
+          raw_opportunity_count: 0,
+          intelligence_evaluated_count: 0,
+          intelligence_rejected_count: 0,
+          intelligence_selected_count: 0,
+          _briefs: [],
+          _intelligence_summary: null,
+        }
+      };
+    }
+
+    // Run intelligence evaluation on all raw opportunities
+    const { briefs, summary } = await evaluateOpportunities(opportunities);
+
+    // Filter to only selected opportunities (should_craft = true)
+    const selectedBriefs = briefs.filter(b => b.should_craft);
+    const rejectedBriefs = briefs.filter(b => !b.should_craft);
+
+    // Record rejected opportunities to rejection ledger (non-blocking)
+    if (rejectedBriefs.length > 0) {
+      try {
+        await recordPublishGateRejections(
+          rejectedBriefs.map((b, index) => ({
+            index,
+            type: b.type,
+            reason: `intelligence_rejected:${b.rejection_reason || 'unknown'}`,
+            preview: b.source_text.slice(0, 140),
+          })),
+          {
+            run_id: runId,
+            task_id: task.id,
+            opportunities: rejectedBriefs as any,
+          }
+        );
+      } catch (rejErr: any) {
+        console.error('[pipeline-worker] intelligence rejection ledger error:', rejErr.message);
+      }
+    }
+
+    // Log summary
+    console.log(`[pipeline-worker] opportunity_intelligence: evaluated ${summary.intelligence_evaluated_count} raw opportunities, selected ${summary.intelligence_selected_count}, rejected ${summary.intelligence_rejected_count}. Top rejection reasons: ${JSON.stringify(summary.top_rejection_reasons)}`);
+
+    // Pass only selected opportunities + their briefs forward
+    // Merge brief data into the opportunity objects for downstream use
+    const selectedOpportunities = opportunities.filter(opp => {
+      const brief = briefs.find(b =>
+        b.source_text === (opp.source_text || opp.text) &&
+        b.source_tweet_url === (opp.source_tweet_url || opp.tweet_url || opp.url)
+      );
+      return brief?.should_craft === true;
+    }).map(opp => {
+      const brief = briefs.find(b =>
+        b.source_text === (opp.source_text || opp.text) &&
+        b.source_tweet_url === (opp.source_tweet_url || opp.tweet_url || opp.url)
+      );
+      // Merge brief guidance into the opportunity for downstream crafting
+      return {
+        ...opp,
+        _brief: brief ? {
+          recommended_angle: brief.recommended_angle,
+          audience_relevance: brief.audience_relevance,
+          why_it_matters: brief.why_it_matters,
+          do_not_claim: brief.do_not_claim,
+          content_format: brief.content_format,
+          source_summary: brief.source_summary,
+          required_context: brief.required_context,
+          niche_fit_score: brief.niche_fit_score,
+          originality_potential_score: brief.originality_potential_score,
+          publishability_score: brief.publishability_score,
+        } : undefined,
+      };
+    });
+
+    return {
+      ok: true,
+      result: {
+        raw_opportunity_count: summary.raw_opportunity_count,
+        intelligence_evaluated_count: summary.intelligence_evaluated_count,
+        intelligence_rejected_count: summary.intelligence_rejected_count,
+        intelligence_selected_count: summary.intelligence_selected_count,
+        top_rejection_reasons: summary.top_rejection_reasons,
+        avg_publishability_score: summary.avg_publishability_score,
+        avg_originality_potential_score: summary.avg_originality_potential_score,
+        _opportunities: selectedOpportunities,
+        _intelligence_summary: summary,
+      }
+    };
+  } catch (err: any) {
+    return { ok: false, result: {}, error: `opportunity_intelligence failed: ${err.message}` };
+  }
+}
+
+// ═══ enrich_opportunities ═══
+
+async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskResult> {
+  try {
+    const supabase = supabaseAdmin();
+    const runId = task.run_id;
+
+    // Get intelligence results (Phase 2D: read from intelligence instead of merge directly)
+    const { data: intelTask } = await supabase
+      .from('pipeline_tasks')
+      .select('result')
+      .eq('run_id', runId)
+      .eq('task_type', 'opportunity_intelligence')
+      .eq('status', 'completed')
+      .maybeSingle();
+
+    // Fallback: if no intelligence task, try merge_scan_results (backward compat)
+    let opportunities: any[] = intelTask?.result?._opportunities || [];
+    if (!opportunities.length) {
+      const { data: mergeTask } = await supabase
+        .from('pipeline_tasks')
+        .select('result')
+        .eq('run_id', runId)
+        .eq('task_type', 'merge_scan_results')
+        .eq('status', 'completed')
+        .maybeSingle();
+      opportunities = mergeTask?.result?._opportunities || [];
+    }
 
     if (!opportunities.length) {
       return {
@@ -519,13 +649,14 @@ async function processQualityEnhance(task: PipelineTaskRow): Promise<TaskResult>
 
 // ═══ publish_gate ═══
 
-async function processPublishGate(task: PipelineTaskRow): Promise<TaskResult> {
+// ═══ opportunity_judge (Phase 2D) ═══
+
+async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResult> {
   try {
     const supabase = supabaseAdmin();
     const runId = task.run_id;
 
-    // Get quality_enhance results (Phase 2B: opportunities now come from quality_enhance, not enrich)
-    // Fallback to enrich_opportunities for backward compatibility with runs that started before Phase 2B
+    // Get quality_enhance results
     const { data: qualityTask } = await supabase
       .from('pipeline_tasks')
       .select('result')
@@ -534,19 +665,146 @@ async function processPublishGate(task: PipelineTaskRow): Promise<TaskResult> {
       .eq('status', 'completed')
       .maybeSingle();
 
+    const opportunities: OpportunityWithDiagnostics[] = qualityTask?.result?._opportunities || [];
+
+    if (!opportunities.length) {
+      return {
+        ok: true,
+        result: {
+          judge_passed_count: 0,
+          judge_failed_count: 0,
+          judge_failure_reasons: {},
+          _opportunities: [],
+          _judge_summary: null,
+        }
+      };
+    }
+
+    // Get intelligence briefs for context (if available)
+    const { data: intelTask } = await supabase
+      .from('pipeline_tasks')
+      .select('result')
+      .eq('run_id', runId)
+      .eq('task_type', 'opportunity_intelligence')
+      .eq('status', 'completed')
+      .maybeSingle();
+
+    const intelBriefs: Record<string, OpportunityBrief> = {};
+    if (intelTask?.result?._intelligence_summary) {
+      // Build a lookup of briefs by source text for matching
+      const intelOpps: any[] = intelTask?.result?._opportunities || [];
+      for (const opp of intelOpps) {
+        if (opp._brief) {
+          const key = (opp.source_text || opp.text || '').slice(0, 100);
+          intelBriefs[key] = opp._brief;
+        }
+      }
+    }
+
+    // Build judge candidates with their briefs
+    const candidates = opportunities.map(opp => {
+      const key = (opp.source_text || '').slice(0, 100);
+      const brief = intelBriefs[key] || {};
+      return {
+        crafted_text: opp.crafted_text || '',
+        brief,
+        opportunity: opp,
+      };
+    });
+
+    // Run judge on all candidates
+    const { results, summary } = await judgeCraftedCandidates(candidates.map(c => ({
+      crafted_text: c.crafted_text,
+      brief: c.brief,
+    })));
+
+    // Apply judge results to opportunities — judge-failed ones get shield_passed=false
+    const judgedOpportunities = opportunities.map((opp, i) => {
+      const judgeResult = results[i];
+      if (!judgeResult) return opp;
+
+      return {
+        ...opp,
+        _judge_result: {
+          passed: judgeResult.passed,
+          final_candidate_score: judgeResult.final_candidate_score,
+          originality_score: judgeResult.originality_score,
+          usefulness_score: judgeResult.usefulness_score,
+          niche_fit_score: judgeResult.niche_fit_score,
+          evidence_safety_score: judgeResult.evidence_safety_score,
+          clarity_score: judgeResult.clarity_score,
+          generic_bait_flag: judgeResult.generic_bait_flag,
+          unsupported_claim_flag: judgeResult.unsupported_claim_flag,
+          failure_reasons: judgeResult.failure_reasons,
+        },
+        // If judge fails, mark shield_passed=false so publish_gate rejects it
+        ...(judgeResult.passed ? {} : {
+          shield_passed: false,
+          shield_issues: [...(opp.shield_issues || []), `judge_failed:${judgeResult.failure_reasons[0] || 'unknown'}`],
+        }),
+      };
+    });
+
+    // Log summary
+    console.log(`[pipeline-worker] opportunity_judge: ${summary.judge_passed_count} passed, ${summary.judge_failed_count} failed. Avg final_candidate_score: ${summary.avg_final_candidate_score}, Avg originality: ${summary.avg_originality_score}`);
+
+    return {
+      ok: true,
+      result: {
+        judge_passed_count: summary.judge_passed_count,
+        judge_failed_count: summary.judge_failed_count,
+        judge_failure_reasons: summary.judge_failure_reasons,
+        avg_final_candidate_score: summary.avg_final_candidate_score,
+        avg_originality_score: summary.avg_originality_score,
+        _opportunities: judgedOpportunities,
+        _judge_summary: summary,
+      }
+    };
+  } catch (err: any) {
+    return { ok: false, result: {}, error: `opportunity_judge failed: ${err.message}` };
+  }
+}
+
+async function processPublishGate(task: PipelineTaskRow): Promise<TaskResult> {
+  try {
+    const supabase = supabaseAdmin();
+    const runId = task.run_id;
+
+    // Get opportunity_judge results (Phase 2D: judge filters before publish_gate)
+    // Fallback chain: opportunity_judge → quality_enhance → enrich_opportunities
+    const { data: judgeTask } = await supabase
+      .from('pipeline_tasks')
+      .select('result')
+      .eq('run_id', runId)
+      .eq('task_type', 'opportunity_judge')
+      .eq('status', 'completed')
+      .maybeSingle();
+
     let opportunities;
-    if (qualityTask?.result?._opportunities) {
-      opportunities = qualityTask.result._opportunities;
+    if (judgeTask?.result?._opportunities) {
+      opportunities = judgeTask.result._opportunities;
     } else {
-      // Fallback: read from enrich_opportunities (pre-Phase 2B runs)
-      const { data: enrichTask } = await supabase
+      // Fallback: read from quality_enhance (pre-Phase 2D runs)
+      const { data: qualityTask } = await supabase
         .from('pipeline_tasks')
         .select('result')
         .eq('run_id', runId)
-        .eq('task_type', 'enrich_opportunities')
+        .eq('task_type', 'quality_enhance')
         .eq('status', 'completed')
         .maybeSingle();
-      opportunities = enrichTask?.result?._opportunities || [];
+      if (qualityTask?.result?._opportunities) {
+        opportunities = qualityTask.result._opportunities;
+      } else {
+        // Further fallback: enrich_opportunities (pre-Phase 2B runs)
+        const { data: enrichTask } = await supabase
+          .from('pipeline_tasks')
+          .select('result')
+          .eq('run_id', runId)
+          .eq('task_type', 'enrich_opportunities')
+          .eq('status', 'completed')
+          .maybeSingle();
+        opportunities = enrichTask?.result?._opportunities || [];
+      }
     }
 
     const { filterPublishableOpportunities } = await import('./content-policy');

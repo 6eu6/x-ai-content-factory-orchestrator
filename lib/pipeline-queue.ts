@@ -36,8 +36,10 @@ export type PipelineTaskType =
   | 'load_account_state'
   | 'scan_account'
   | 'merge_scan_results'
+  | 'opportunity_intelligence'  // Phase 2D: AI opportunity intelligence + candidate selection
   | 'enrich_opportunities'
   | 'quality_enhance'       // Phase 2B: Originality enhancer + numeric claim guard
+  | 'opportunity_judge'     // Phase 2D: Pre-gate judge
   | 'publish_gate'
   | 'decision'
   | 'persist_decision'
@@ -218,12 +220,14 @@ export async function enqueuePipelineRun(options: EnqueuePipelineRunOptions = {}
  *   1. load_account_state (global, step 10)
  *   2. scan_account (one per account, step 20+N)
  *   3. merge_scan_results (global, step 50, depends on all scan_account)
- *   4. enrich_opportunities (global, step 60)
- *   5. quality_enhance (global, step 65) — Phase 2B
- *   6. publish_gate (global, step 70)
- *   7. decision (global, step 80)
- *   8. persist_decision (global, step 90)
- *   9. telegram_delivery (global, step 100)
+ *   4. opportunity_intelligence (global, step 55) — Phase 2D
+ *   5. enrich_opportunities (global, step 60)
+ *   6. quality_enhance (global, step 65) — Phase 2B
+ *   7. opportunity_judge (global, step 68) — Phase 2D
+ *   8. publish_gate (global, step 70)
+ *   9. decision (global, step 80)
+ *  10. persist_decision (global, step 90)
+ *  11. telegram_delivery (global, step 100)
  *
  * Returns the number of tasks created.
  */
@@ -310,6 +314,17 @@ export async function createPipelineTasks(
   });
   stepOrder += 10;
 
+  // Global: opportunity_intelligence (Phase 2D: after merge, before enrich)
+  tasks.push({
+    run_id: runId,
+    task_type: 'opportunity_intelligence',
+    status: 'queued',
+    step_order: stepOrder,
+    account_handle: null,
+    payload: { source: options.source }
+  });
+  stepOrder += 5;
+
   // Global: enrich_opportunities
   tasks.push({
     run_id: runId,
@@ -319,9 +334,9 @@ export async function createPipelineTasks(
     account_handle: null,
     payload: { source: options.source }
   });
-  stepOrder += 10;
+  stepOrder += 5;
 
-  // Global: quality_enhance (Phase 2B: after enrich, before publish_gate)
+  // Global: quality_enhance (Phase 2B: after enrich, before judge)
   tasks.push({
     run_id: runId,
     task_type: 'quality_enhance',
@@ -330,7 +345,18 @@ export async function createPipelineTasks(
     account_handle: null,
     payload: { source: options.source }
   });
-  stepOrder += 10;
+  stepOrder += 3;
+
+  // Global: opportunity_judge (Phase 2D: after quality_enhance, before publish_gate)
+  tasks.push({
+    run_id: runId,
+    task_type: 'opportunity_judge',
+    status: 'queued',
+    step_order: stepOrder,
+    account_handle: null,
+    payload: { source: options.source }
+  });
+  stepOrder += 2;
 
   // Global: publish_gate
   tasks.push({
@@ -725,21 +751,33 @@ async function areGlobalPrerequisitesMet(runId: string, taskType: string): Promi
     if (!allScansDone) return false;
 
     // For tasks after merge, check merge is done
-    if (['enrich_opportunities', 'publish_gate', 'decision', 'persist_decision', 'telegram_delivery'].includes(taskType)) {
+    if (['opportunity_intelligence', 'enrich_opportunities', 'quality_enhance', 'opportunity_judge', 'publish_gate', 'decision', 'persist_decision', 'telegram_delivery'].includes(taskType)) {
       const mergeTask = tasks.find((t: any) => t.task_type === 'merge_scan_results');
       if (mergeTask && mergeTask.status !== 'completed') return false;
     }
 
+    // For tasks after opportunity_intelligence, check intelligence is done
+    if (['enrich_opportunities', 'quality_enhance', 'opportunity_judge', 'publish_gate', 'decision', 'persist_decision', 'telegram_delivery'].includes(taskType)) {
+      const intelTask = tasks.find((t: any) => t.task_type === 'opportunity_intelligence');
+      if (intelTask && intelTask.status !== 'completed') return false;
+    }
+
     // For tasks after enrich, check enrich is done
-    if (['quality_enhance', 'publish_gate', 'decision', 'persist_decision', 'telegram_delivery'].includes(taskType)) {
+    if (['quality_enhance', 'opportunity_judge', 'publish_gate', 'decision', 'persist_decision', 'telegram_delivery'].includes(taskType)) {
       const enrichTask = tasks.find((t: any) => t.task_type === 'enrich_opportunities');
       if (enrichTask && enrichTask.status !== 'completed') return false;
     }
 
     // For tasks after quality_enhance, check quality_enhance is done
-    if (['publish_gate', 'decision', 'persist_decision', 'telegram_delivery'].includes(taskType)) {
+    if (['opportunity_judge', 'publish_gate', 'decision', 'persist_decision', 'telegram_delivery'].includes(taskType)) {
       const qualityTask = tasks.find((t: any) => t.task_type === 'quality_enhance');
       if (qualityTask && qualityTask.status !== 'completed') return false;
+    }
+
+    // For tasks after opportunity_judge, check judge is done
+    if (['publish_gate', 'decision', 'persist_decision', 'telegram_delivery'].includes(taskType)) {
+      const judgeTask = tasks.find((t: any) => t.task_type === 'opportunity_judge');
+      if (judgeTask && judgeTask.status !== 'completed') return false;
     }
 
     // For tasks after publish_gate, check publish_gate is done
