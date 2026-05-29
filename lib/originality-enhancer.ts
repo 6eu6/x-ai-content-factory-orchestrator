@@ -34,6 +34,9 @@ import { callModel, parseModelJson, TaskType } from './model-router';
 import { containsArabic, isAISlopWrapper } from './content-policy';
 import { quickShieldCheck } from './account-shield';
 import { looksLikeJsonWrapper } from './crafted-text-cleaner';
+import { scoreNicheAlignment } from './niche-alignment';
+import { detectNumericClaims, hasSourceForClaim } from './numeric-claim-guard';
+import { validateOpportunityQuality } from './quality-validator';
 
 // ═══ Types ═══
 
@@ -80,6 +83,11 @@ export type OpportunityWithDiagnostics = {
   rewrite_trigger_reason?: string;
   rewrite_attempted?: boolean;
   rewrite_failed_reason?: string;
+  // Phase 2C.1 expanded diagnostic fields
+  rewrite_apply_reason?: string;
+  rewrite_rejected_reason?: string;
+  shield_issues_before?: string[];
+  shield_issues_after?: string[];
   // Existing fields from enrich step
   avg_brain_rule_weight?: number;
   rule_performance_summary?: {
@@ -305,6 +313,126 @@ export function detectGenericBait(text: string): string | null {
   return null;
 }
 
+// ═══ Rewrite Apply Decision Logic (Phase 2C.1) ═══
+
+/**
+ * Result of the shouldApplyRewrite decision.
+ * Exported for testing.
+ */
+export type ApplyRewriteDecision = {
+  shouldApply: boolean;
+  applyReasons: string[];
+  rejectedReason: string | null;
+};
+
+/**
+ * Pure function to decide whether a rewrite should be applied.
+ *
+ * Phase 2C.1 fix: The old code only applied rewrites when
+ * scoresAfter.originality > scoresBefore.originality. This was too narrow —
+ * a rewrite may fix slop_forbidden_words, generic bait, shield issues, or
+ * quality validation even if the originality score stays the same.
+ *
+ * Safety checks (reject rewrite if ANY of these are true):
+ * - Rewrite is off-niche
+ * - Rewrite introduces unsourced numeric claims
+ * - Rewrite fails quality validation
+ *
+ * Improvement checks (apply rewrite if ANY of these are true):
+ * - Originality score improved
+ * - Shield now passes (was false before)
+ * - Fewer shield issues after rewrite
+ * - Removed slop_forbidden_words
+ * - Removed generic bait
+ * - Removed missing_originality
+ * - Rewrite passes quality validation while original did not
+ */
+export function shouldApplyRewrite(params: {
+  scoresBefore: QualityScores;
+  scoresAfter: QualityScores;
+  shieldIssuesBefore: string[];
+  shieldIssuesAfter: string[];
+  shieldPassedBefore: boolean;
+  shieldPassedAfter: boolean;
+  originalText: string;
+  rewrittenText: string;
+  originalValidationPassed: boolean;
+  rewriteValidationPassed: boolean;
+  rewriteIsOffNiche: boolean;
+  rewriteIntroducesUnsourcedNumericClaims: boolean;
+}): ApplyRewriteDecision {
+  const {
+    scoresBefore, scoresAfter,
+    shieldIssuesBefore, shieldIssuesAfter,
+    shieldPassedBefore, shieldPassedAfter,
+    originalText, rewrittenText,
+    originalValidationPassed, rewriteValidationPassed,
+    rewriteIsOffNiche,
+    rewriteIntroducesUnsourcedNumericClaims,
+  } = params;
+
+  // ─── Safety checks: reject rewrite if it introduces problems ───
+
+  if (rewriteIsOffNiche) {
+    return { shouldApply: false, applyReasons: [], rejectedReason: 'rewrite_is_off_niche' };
+  }
+
+  if (rewriteIntroducesUnsourcedNumericClaims) {
+    return { shouldApply: false, applyReasons: [], rejectedReason: 'rewrite_introduces_unsourced_numeric_claims' };
+  }
+
+  if (!rewriteValidationPassed) {
+    return { shouldApply: false, applyReasons: [], rejectedReason: 'rewrite_fails_quality_validation' };
+  }
+
+  // ─── Improvement checks: apply if ANY improvement detected ───
+
+  const applyReasons: string[] = [];
+
+  // Condition 1: Originality score improved
+  if (scoresAfter.originality > scoresBefore.originality) {
+    applyReasons.push('originality_improved');
+  }
+
+  // Condition 2: Shield now passes but didn't before
+  if (shieldPassedAfter && !shieldPassedBefore) {
+    applyReasons.push('shield_now_passes');
+  }
+
+  // Condition 3: Fewer shield issues after rewrite
+  if (shieldIssuesAfter.length < shieldIssuesBefore.length) {
+    applyReasons.push('fewer_shield_issues');
+  }
+
+  // Condition 4: Removed slop_forbidden_words
+  if (shieldIssuesBefore.includes('slop_forbidden_words') && !shieldIssuesAfter.includes('slop_forbidden_words')) {
+    applyReasons.push('removed_slop_forbidden_words');
+  }
+
+  // Condition 5: Removed generic bait
+  if (detectGenericBait(originalText) && !detectGenericBait(rewrittenText)) {
+    applyReasons.push('removed_generic_bait');
+  }
+
+  // Condition 6: Removed missing_originality
+  if (shieldIssuesBefore.includes('missing_originality') && !shieldIssuesAfter.includes('missing_originality')) {
+    applyReasons.push('removed_missing_originality');
+  }
+
+  // Condition 7: Rewrite passes quality validation but original did not
+  if (!originalValidationPassed && rewriteValidationPassed) {
+    applyReasons.push('passes_quality_validation_original_did_not');
+  }
+
+  // ─── Decision ───
+
+  if (applyReasons.length > 0) {
+    return { shouldApply: true, applyReasons, rejectedReason: null };
+  }
+
+  return { shouldApply: false, applyReasons: [], rejectedReason: 'no_improvement_detected' };
+}
+
 // ═══ AI-Powered Scoring ═══
 
 /**
@@ -474,10 +602,12 @@ Return the rewritten text ONLY. No explanation, no quotes, no labels, no JSON.`
  * 2. Determine if rewrite should be triggered (expanded conditions)
  * 3. If triggered, attempt one rewrite
  * 4. Validate rewrite result (plain text, no JSON, no Arabic, no AI slop)
- * 5. If rewrite passes validation and improves originality, apply it
- * 6. If rewrite fails validation, keep original but record diagnostics
- * 7. Re-run quickShieldCheck after any rewrite attempt
- * 8. Return enhanced opportunity with full diagnostic fields
+ * 5. Run shield check on rewritten text, compare with original shield state
+ * 6. Apply rewrite if ANY improvement detected (originality, shield, bait, validation)
+ * 7. Reject rewrite if it introduces problems (off-niche, unsourced claims, fails validation)
+ * 8. Record diagnostic fields (rewrite_apply_reason, rewrite_rejected_reason, shield_issues_before/after)
+ * 9. Re-run quickShieldCheck after any rewrite attempt
+ * 10. Return enhanced opportunity with full diagnostic fields
  *
  * This NEVER bypasses publish_gate. If the rewrite doesn't help,
  * the opportunity goes to publish_gate with its low scores and
@@ -539,8 +669,15 @@ export async function enhanceOpportunity(
   let rewriteApplied = false;
   let rewriteAttempted = false;
   let rewriteFailedReason: string | null = null;
+  let rewriteApplyReason: string | null = null;
+  let rewriteRejectedReason: string | null = null;
   let scoresAfter: QualityScores | null = null;
   let finalText = text;
+
+  // Capture original shield state for before/after comparison
+  const shieldIssuesBefore = [...(opp.shield_issues || [])];
+  const shieldPassedBefore = opp.shield_passed;
+  let shieldIssuesAfter: string[] | null = null;
 
   if (triggerReason) {
     // Rewrite is warranted — attempt exactly one rewrite
@@ -554,15 +691,53 @@ export async function enhanceOpportunity(
       // Re-score the rewrite
       scoresAfter = await scoreWithAI(rewriteResult.text);
 
-      if (scoresAfter.originality > scoresBefore.originality) {
-        // Rewrite improved originality — apply it
+      // Run shield check on the rewritten text to compare with original
+      const shieldAfterRewrite = quickShieldCheck(rewriteResult.text, opp);
+      shieldIssuesAfter = shieldAfterRewrite.reasons;
+
+      // Run niche alignment on the rewritten text (safety check + for validation)
+      const nicheResult = scoreNicheAlignment({ ...opp, crafted_text: rewriteResult.text });
+
+      // Check if rewrite introduces unsourced numeric claims
+      const originalNumericClaims = detectNumericClaims(text).length;
+      const rewriteNumericClaims = detectNumericClaims(rewriteResult.text).length;
+      const rewriteIntroducesUnsourcedClaims = rewriteNumericClaims > originalNumericClaims && !hasSourceForClaim(opp);
+
+      // Run quality validation on both original and rewritten text
+      const originalValidation = validateOpportunityQuality({
+        ...opp,
+        crafted_text: text,
+      });
+      const rewriteValidation = validateOpportunityQuality({
+        ...opp,
+        crafted_text: rewriteResult.text,
+        niche_alignment_score: nicheResult.niche_alignment_score,
+      });
+
+      // Use the pure decision function to determine whether to apply the rewrite
+      const decision = shouldApplyRewrite({
+        scoresBefore,
+        scoresAfter,
+        shieldIssuesBefore,
+        shieldIssuesAfter: shieldAfterRewrite.reasons,
+        shieldPassedBefore,
+        shieldPassedAfter: shieldAfterRewrite.safe,
+        originalText: text,
+        rewrittenText: rewriteResult.text,
+        originalValidationPassed: originalValidation.passed,
+        rewriteValidationPassed: rewriteValidation.passed,
+        rewriteIsOffNiche: nicheResult.is_off_niche,
+        rewriteIntroducesUnsourcedNumericClaims: rewriteIntroducesUnsourcedClaims,
+      });
+
+      if (decision.shouldApply) {
         finalText = rewriteResult.text;
         rewriteApplied = true;
-        notes.push(`Rewritten: originality ${scoresBefore.originality} → ${scoresAfter.originality}`);
+        rewriteApplyReason = decision.applyReasons.join(',');
+        notes.push(`Rewrite applied (${decision.applyReasons.join(', ')}): originality ${scoresBefore.originality} → ${scoresAfter.originality}`);
       } else {
-        // Rewrite didn't improve originality score
-        rewriteFailedReason = `rewrite_no_improvement:${scoresAfter.originality}_<=_${scoresBefore.originality}`;
-        notes.push(`Rewrite did not improve originality (${scoresAfter.originality} ≤ ${scoresBefore.originality})`);
+        rewriteRejectedReason = decision.rejectedReason;
+        notes.push(`Rewrite rejected: ${decision.rejectedReason} (originality ${scoresAfter.originality} vs ${scoresBefore.originality}, shield issues ${shieldAfterRewrite.reasons.length} vs ${shieldIssuesBefore.length})`);
       }
     } else if (rewriteResult.text === text) {
       // Rewrite returned identical text
@@ -574,15 +749,18 @@ export async function enhanceOpportunity(
       notes.push(`Rewrite failed: ${rewriteFailedReason}`);
     }
 
-    // Step 3: After rewrite attempt (success or fail), re-run shield check
-    // This updates shield_passed and shield_issues based on the final text
-    const shieldResult = quickShieldCheck(finalText, opp);
-    opp.shield_passed = shieldResult.safe;
-    opp.shield_issues = shieldResult.reasons;
-
-    if (rewriteApplied) {
-      notes.push(`Post-rewrite shield: ${shieldResult.safe ? 'passed' : 'failed'} (${shieldResult.reasons.join(',') || 'no issues'})`);
+    // After rewrite attempt (success or fail), update shield on final text
+    if (rewriteApplied && shieldIssuesAfter) {
+      // Use the shield result from the rewritten text (already computed)
+      opp.shield_passed = shieldIssuesAfter.length === 0;
+      opp.shield_issues = shieldIssuesAfter;
+      notes.push(`Post-rewrite shield: ${opp.shield_passed ? 'passed' : 'failed'} (${shieldIssuesAfter.join(',') || 'no issues'})`);
     } else {
+      // Re-run shield check on original text (no rewrite applied)
+      const shieldResult = quickShieldCheck(finalText, opp);
+      opp.shield_passed = shieldResult.safe;
+      opp.shield_issues = shieldResult.reasons;
+      shieldIssuesAfter = shieldResult.reasons;
       notes.push(`Post-attempt shield on original: ${shieldResult.safe ? 'passed' : 'failed'} (${shieldResult.reasons.join(',') || 'no issues'})`);
     }
   } else {
@@ -604,6 +782,10 @@ export async function enhanceOpportunity(
     rewrite_attempted: rewriteAttempted,
     rewrite_trigger_reason: triggerReason || undefined,
     rewrite_failed_reason: rewriteFailedReason || undefined,
+    rewrite_apply_reason: rewriteApplyReason || undefined,
+    rewrite_rejected_reason: rewriteRejectedReason || undefined,
+    shield_issues_before: shieldIssuesBefore.length > 0 ? shieldIssuesBefore : undefined,
+    shield_issues_after: shieldIssuesAfter || undefined,
     quality_notes: notes.join('; ')
   };
 }
@@ -633,6 +815,9 @@ export async function enhanceOpportunities(
     rewrite_candidates_count: number;
     rewrites_attempted: number;
     rewrites_applied: number;
+    rewrites_applied_by_originality: number;
+    rewrites_applied_by_shield_improvement: number;
+    rewrites_rejected_no_improvement: number;
     rewrites_failed_validation: number;
     rewrites_skipped_reason: Record<string, number>;
   };
@@ -653,6 +838,9 @@ export async function enhanceOpportunities(
         rewrite_candidates_count: 0,
         rewrites_attempted: 0,
         rewrites_applied: 0,
+        rewrites_applied_by_originality: 0,
+        rewrites_applied_by_shield_improvement: 0,
+        rewrites_rejected_no_improvement: 0,
         rewrites_failed_validation: 0,
         rewrites_skipped_reason: {}
       }
@@ -663,6 +851,9 @@ export async function enhanceOpportunities(
   let rewritesApplied = 0;
   let rewritesAttempted = 0;
   let rewritesFailedValidation = 0;
+  let rewritesAppliedByOriginality = 0;
+  let rewritesAppliedByShieldImprovement = 0;
+  let rewritesRejectedNoImprovement = 0;
   let rewriteCandidatesCount = 0;
   const skippedReasons: Record<string, number> = {};
 
@@ -676,10 +867,26 @@ export async function enhanceOpportunities(
       rewriteCandidatesCount++;
       if (result.rewrite_applied) {
         rewritesApplied++;
+        // Track WHY the rewrite was applied
+        const applyReason = result.rewrite_apply_reason || '';
+        if (applyReason.includes('originality_improved')) {
+          rewritesAppliedByOriginality++;
+        }
+        if (applyReason.includes('shield_now_passes') ||
+            applyReason.includes('fewer_shield_issues') ||
+            applyReason.includes('removed_slop_forbidden_words') ||
+            applyReason.includes('removed_generic_bait') ||
+            applyReason.includes('removed_missing_originality')) {
+          rewritesAppliedByShieldImprovement++;
+        }
       } else {
         rewritesFailedValidation++;
+        // Track specific rejection reason
+        if (result.rewrite_rejected_reason === 'no_improvement_detected') {
+          rewritesRejectedNoImprovement++;
+        }
         // Track the specific failure reason
-        const reason = result.rewrite_failed_reason || 'unknown';
+        const reason = result.rewrite_failed_reason || result.rewrite_rejected_reason || 'unknown';
         const reasonKey = reason.split(':')[0]; // Normalize "ai_slop_in_rewrite:ai_slop_here_is" → "ai_slop_in_rewrite"
         skippedReasons[reasonKey] = (skippedReasons[reasonKey] || 0) + 1;
       }
@@ -724,6 +931,9 @@ export async function enhanceOpportunities(
       rewrite_candidates_count: rewriteCandidatesCount,
       rewrites_attempted: rewritesAttempted,
       rewrites_applied: rewritesApplied,
+      rewrites_applied_by_originality: rewritesAppliedByOriginality,
+      rewrites_applied_by_shield_improvement: rewritesAppliedByShieldImprovement,
+      rewrites_rejected_no_improvement: rewritesRejectedNoImprovement,
       rewrites_failed_validation: rewritesFailedValidation,
       rewrites_skipped_reason: skippedReasons
     }

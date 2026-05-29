@@ -22,10 +22,12 @@
 import { describe, it, expect } from 'vitest';
 import {
   shouldTriggerRewrite,
+  shouldApplyRewrite,
   detectGenericBait,
   heuristicOriginality,
   type OpportunityWithDiagnostics,
   type QualityScores,
+  type ApplyRewriteDecision,
 } from '../lib/originality-enhancer';
 import { looksLikeJsonWrapper } from '../lib/crafted-text-cleaner';
 import { containsArabic, isAISlopWrapper } from '../lib/content-policy';
@@ -376,6 +378,9 @@ describe('quality_enhance summary includes rewrite diagnostics', () => {
       rewrite_candidates_count: 0,
       rewrites_attempted: 0,
       rewrites_applied: 0,
+      rewrites_applied_by_originality: 0,
+      rewrites_applied_by_shield_improvement: 0,
+      rewrites_rejected_no_improvement: 0,
       rewrites_failed_validation: 0,
       rewrites_skipped_reason: {} as Record<string, number>,
     };
@@ -383,6 +388,9 @@ describe('quality_enhance summary includes rewrite diagnostics', () => {
     expect(summaryShape).toHaveProperty('rewrite_candidates_count');
     expect(summaryShape).toHaveProperty('rewrites_attempted');
     expect(summaryShape).toHaveProperty('rewrites_applied');
+    expect(summaryShape).toHaveProperty('rewrites_applied_by_originality');
+    expect(summaryShape).toHaveProperty('rewrites_applied_by_shield_improvement');
+    expect(summaryShape).toHaveProperty('rewrites_rejected_no_improvement');
     expect(summaryShape).toHaveProperty('rewrites_failed_validation');
     expect(summaryShape).toHaveProperty('rewrites_skipped_reason');
   });
@@ -522,5 +530,287 @@ describe('shouldTriggerRewrite: combined conditions', () => {
     const scores = makeScores({ originality: 8.5 });
     const result = shouldTriggerRewrite(opp.crafted_text, scores, opp);
     expect(result).toBeNull();
+  });
+});
+
+// ═══ shouldApplyRewrite: Phase 2C.1 expanded apply logic ═══
+
+describe('shouldApplyRewrite: rewrite applied when originality same but slop_forbidden_words removed', () => {
+  it('rewrite is applied when originality score is the same but slop_forbidden_words is removed', () => {
+    const decision = shouldApplyRewrite({
+      scoresBefore: makeScores({ originality: 6.0 }),
+      scoresAfter: makeScores({ originality: 6.0 }), // Same score
+      shieldIssuesBefore: ['slop_forbidden_words', 'missing_originality'],
+      shieldIssuesAfter: ['missing_originality'], // slop removed
+      shieldPassedBefore: false,
+      shieldPassedAfter: false,
+      originalText: 'Leverage AI to streamline your workflow and empower your team',
+      rewrittenText: 'Built a RAG pipeline with GPT-4 that actually works',
+      originalValidationPassed: true,
+      rewriteValidationPassed: true,
+      rewriteIsOffNiche: false,
+      rewriteIntroducesUnsourcedNumericClaims: false,
+    });
+
+    expect(decision.shouldApply).toBe(true);
+    expect(decision.applyReasons).toContain('removed_slop_forbidden_words');
+    expect(decision.applyReasons).toContain('fewer_shield_issues');
+  });
+});
+
+describe('shouldApplyRewrite: rewrite applied when shield_issues count decreases', () => {
+  it('rewrite is applied when shield issues go from 3 to 1', () => {
+    const decision = shouldApplyRewrite({
+      scoresBefore: makeScores({ originality: 5.0 }),
+      scoresAfter: makeScores({ originality: 5.0 }), // Same
+      shieldIssuesBefore: ['slop_forbidden_words', 'missing_originality', 'has_hashtag'],
+      shieldIssuesAfter: ['has_hashtag'], // 2 issues removed
+      shieldPassedBefore: false,
+      shieldPassedAfter: false,
+      originalText: 'Leverage AI to streamline your workflow #AI',
+      rewrittenText: 'Built a RAG pipeline with GPT-4 #AI',
+      originalValidationPassed: true,
+      rewriteValidationPassed: true,
+      rewriteIsOffNiche: false,
+      rewriteIntroducesUnsourcedNumericClaims: false,
+    });
+
+    expect(decision.shouldApply).toBe(true);
+    expect(decision.applyReasons).toContain('fewer_shield_issues');
+    expect(decision.applyReasons).toContain('removed_slop_forbidden_words');
+    expect(decision.applyReasons).toContain('removed_missing_originality');
+  });
+});
+
+describe('shouldApplyRewrite: rewrite applied when original shield_passed=false and rewritten shield_passed=true', () => {
+  it('rewrite is applied when shield goes from failed to passed', () => {
+    const decision = shouldApplyRewrite({
+      scoresBefore: makeScores({ originality: 7.0 }),
+      scoresAfter: makeScores({ originality: 7.0 }), // Same
+      shieldIssuesBefore: ['slop_forbidden_words'],
+      shieldIssuesAfter: [], // All issues resolved
+      shieldPassedBefore: false,
+      shieldPassedAfter: true,
+      originalText: 'Leverage AI to streamline your workflow',
+      rewrittenText: 'Built a RAG pipeline with GPT-4 that actually works',
+      originalValidationPassed: true,
+      rewriteValidationPassed: true,
+      rewriteIsOffNiche: false,
+      rewriteIntroducesUnsourcedNumericClaims: false,
+    });
+
+    expect(decision.shouldApply).toBe(true);
+    expect(decision.applyReasons).toContain('shield_now_passes');
+    expect(decision.applyReasons).toContain('fewer_shield_issues');
+    expect(decision.applyReasons).toContain('removed_slop_forbidden_words');
+  });
+});
+
+describe('shouldApplyRewrite: rewrite rejected when originality improves but rewritten text fails quality validation', () => {
+  it('rewrite is rejected when it fails quality validation despite originality improvement', () => {
+    const decision = shouldApplyRewrite({
+      scoresBefore: makeScores({ originality: 5.0 }),
+      scoresAfter: makeScores({ originality: 8.0 }), // Improved
+      shieldIssuesBefore: [],
+      shieldIssuesAfter: [],
+      shieldPassedBefore: true,
+      shieldPassedAfter: true,
+      originalText: 'Some original text about AI',
+      rewrittenText: 'Some rewritten text',
+      originalValidationPassed: true,
+      rewriteValidationPassed: false, // Fails validation
+      rewriteIsOffNiche: false,
+      rewriteIntroducesUnsourcedNumericClaims: false,
+    });
+
+    expect(decision.shouldApply).toBe(false);
+    expect(decision.rejectedReason).toBe('rewrite_fails_quality_validation');
+  });
+});
+
+describe('shouldApplyRewrite: rewrite rejected when rewritten text introduces AI slop', () => {
+  it('rewrite is rejected when it introduces unsourced numeric claims', () => {
+    const decision = shouldApplyRewrite({
+      scoresBefore: makeScores({ originality: 5.0 }),
+      scoresAfter: makeScores({ originality: 8.0 }),
+      shieldIssuesBefore: [],
+      shieldIssuesAfter: [],
+      shieldPassedBefore: true,
+      shieldPassedAfter: true,
+      originalText: 'Some original text about AI productivity',
+      rewrittenText: 'AI improved productivity by 300%',
+      originalValidationPassed: true,
+      rewriteValidationPassed: true,
+      rewriteIsOffNiche: false,
+      rewriteIntroducesUnsourcedNumericClaims: true, // Introduces unsourced claims
+    });
+
+    expect(decision.shouldApply).toBe(false);
+    expect(decision.rejectedReason).toBe('rewrite_introduces_unsourced_numeric_claims');
+  });
+
+  it('rewrite is rejected when it goes off-niche', () => {
+    const decision = shouldApplyRewrite({
+      scoresBefore: makeScores({ originality: 5.0 }),
+      scoresAfter: makeScores({ originality: 8.0 }),
+      shieldIssuesBefore: [],
+      shieldIssuesAfter: [],
+      shieldPassedBefore: true,
+      shieldPassedAfter: true,
+      originalText: 'Some text about AI',
+      rewrittenText: 'Superman movie is the best',
+      originalValidationPassed: true,
+      rewriteValidationPassed: true,
+      rewriteIsOffNiche: true, // Off-niche
+      rewriteIntroducesUnsourcedNumericClaims: false,
+    });
+
+    expect(decision.shouldApply).toBe(false);
+    expect(decision.rejectedReason).toBe('rewrite_is_off_niche');
+  });
+});
+
+describe('shouldApplyRewrite: rewrite_apply_reason is recorded', () => {
+  it('apply reasons are returned when rewrite is applied', () => {
+    const decision = shouldApplyRewrite({
+      scoresBefore: makeScores({ originality: 5.0 }),
+      scoresAfter: makeScores({ originality: 7.0 }),
+      shieldIssuesBefore: ['slop_forbidden_words'],
+      shieldIssuesAfter: [],
+      shieldPassedBefore: false,
+      shieldPassedAfter: true,
+      originalText: 'Leverage AI to streamline your workflow',
+      rewrittenText: 'Built a RAG pipeline with GPT-4 that actually works',
+      originalValidationPassed: true,
+      rewriteValidationPassed: true,
+      rewriteIsOffNiche: false,
+      rewriteIntroducesUnsourcedNumericClaims: false,
+    });
+
+    expect(decision.shouldApply).toBe(true);
+    expect(decision.applyReasons.length).toBeGreaterThan(0);
+    expect(decision.applyReasons).toContain('originality_improved');
+    expect(decision.applyReasons).toContain('shield_now_passes');
+    expect(decision.applyReasons).toContain('removed_slop_forbidden_words');
+    // The applyReasons string would be joined with comma for the diagnostic field
+    const reasonString = decision.applyReasons.join(',');
+    expect(reasonString).toContain('originality_improved');
+    expect(reasonString).toContain('removed_slop_forbidden_words');
+  });
+
+  it('rejected reason is recorded when rewrite is rejected', () => {
+    const decision = shouldApplyRewrite({
+      scoresBefore: makeScores({ originality: 7.0 }),
+      scoresAfter: makeScores({ originality: 7.0 }), // No improvement
+      shieldIssuesBefore: [],
+      shieldIssuesAfter: [],
+      shieldPassedBefore: true,
+      shieldPassedAfter: true,
+      originalText: 'Built a RAG pipeline with GPT-4 that actually works',
+      rewrittenText: 'Created a RAG setup with GPT-4 that really functions',
+      originalValidationPassed: true,
+      rewriteValidationPassed: true,
+      rewriteIsOffNiche: false,
+      rewriteIntroducesUnsourcedNumericClaims: false,
+    });
+
+    expect(decision.shouldApply).toBe(false);
+    expect(decision.rejectedReason).toBe('no_improvement_detected');
+  });
+});
+
+describe('shouldApplyRewrite: shield_issues_before and shield_issues_after are recorded', () => {
+  it('diagnostic fields can capture before/after shield issues', () => {
+    const shieldIssuesBefore = ['slop_forbidden_words', 'missing_originality'];
+    const shieldIssuesAfter = ['missing_originality']; // slop removed
+
+    const decision = shouldApplyRewrite({
+      scoresBefore: makeScores({ originality: 6.0 }),
+      scoresAfter: makeScores({ originality: 6.0 }),
+      shieldIssuesBefore,
+      shieldIssuesAfter,
+      shieldPassedBefore: false,
+      shieldPassedAfter: false,
+      originalText: 'Leverage AI to streamline your workflow',
+      rewrittenText: 'Built a RAG pipeline with GPT-4 that works',
+      originalValidationPassed: true,
+      rewriteValidationPassed: true,
+      rewriteIsOffNiche: false,
+      rewriteIntroducesUnsourcedNumericClaims: false,
+    });
+
+    // Verify the before/after are captured in the decision
+    expect(decision.shouldApply).toBe(true);
+    expect(decision.applyReasons).toContain('removed_slop_forbidden_words');
+    expect(decision.applyReasons).toContain('fewer_shield_issues');
+
+    // In the actual enhanceOpportunity, these would be set on the opportunity:
+    // opp.shield_issues_before = shieldIssuesBefore
+    // opp.shield_issues_after = shieldIssuesAfter
+    expect(shieldIssuesBefore).toContain('slop_forbidden_words');
+    expect(shieldIssuesAfter).not.toContain('slop_forbidden_words');
+  });
+
+  it('OpportunityWithDiagnostics type supports shield_issues_before and shield_issues_after', () => {
+    const opp = makeOpp();
+    opp.shield_issues_before = ['slop_forbidden_words', 'missing_originality'];
+    opp.shield_issues_after = ['missing_originality'];
+
+    expect(opp.shield_issues_before).toContain('slop_forbidden_words');
+    expect(opp.shield_issues_after).not.toContain('slop_forbidden_words');
+    expect(opp.shield_issues_before!.length).toBeGreaterThan(opp.shield_issues_after!.length);
+  });
+});
+
+describe('shouldApplyRewrite: publish_gate thresholds remain unchanged', () => {
+  it('shouldApplyRewrite does not change the 7.8 originality threshold', () => {
+    // Even with the expanded apply logic, the threshold is NOT lowered
+    // A rewrite with originality 7.7 → 7.7 (same) is still valid if other
+    // improvements exist (shield, bait removal), but the threshold itself
+    // is not changed.
+    const scores7_7 = makeScores({ originality: 7.7 });
+    const scores7_8 = makeScores({ originality: 7.8 });
+    const opp = makeOpp({ shield_issues: [] });
+
+    // shouldTriggerRewrite still uses 7.8 as the threshold
+    expect(shouldTriggerRewrite('test text', scores7_7, opp)).not.toBeNull();
+    expect(shouldTriggerRewrite('test text', scores7_8, opp)).toBeNull();
+  });
+
+  it('publish gate still rejects content with shield_passed=false', () => {
+    const opp = {
+      type: 'reply',
+      crafted_text: 'Leverage AI to streamline your workflow',
+      source_tweet_url: 'https://x.com/user/status/123',
+      shield_passed: false,
+      shield_issues: ['slop_forbidden_words'],
+    };
+
+    const gate = filterPublishableOpportunities([opp]);
+    expect(gate.rejected.length).toBe(1);
+  });
+});
+
+// ═══ shouldApplyRewrite: removed_generic_bait ═══
+
+describe('shouldApplyRewrite: rewrite applied when generic bait is removed', () => {
+  it('rewrite is applied when generic bait text is cleaned up', () => {
+    const decision = shouldApplyRewrite({
+      scoresBefore: makeScores({ originality: 6.0 }),
+      scoresAfter: makeScores({ originality: 6.0 }), // Same score
+      shieldIssuesBefore: [],
+      shieldIssuesAfter: [],
+      shieldPassedBefore: true,
+      shieldPassedAfter: true,
+      originalText: 'Yo... this new AI tool is amazing',
+      rewrittenText: 'Built a RAG pipeline with GPT-4 that actually works',
+      originalValidationPassed: true,
+      rewriteValidationPassed: true,
+      rewriteIsOffNiche: false,
+      rewriteIntroducesUnsourcedNumericClaims: false,
+    });
+
+    expect(decision.shouldApply).toBe(true);
+    expect(decision.applyReasons).toContain('removed_generic_bait');
   });
 });
