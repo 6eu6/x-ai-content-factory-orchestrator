@@ -18,6 +18,7 @@
 import { callModel, parseModelJson, TaskType } from './model-router';
 import { containsArabic, isAISlopWrapper } from './content-policy';
 import { quickShieldCheck } from './account-shield';
+import { looksLikeJsonWrapper } from './crafted-text-cleaner';
 
 // ═══ Types ═══
 
@@ -52,6 +53,14 @@ export type OpportunityWithDiagnostics = {
   rewrite_applied?: boolean;
   numeric_claim_removed?: boolean;
   quality_notes?: string;
+  // Phase 2C diagnostic fields
+  niche_alignment_score?: number;
+  niche_alignment_reason?: string;
+  cleaned_json_wrapper?: boolean;
+  malformed_json_output?: boolean;
+  pre_gate_rejection_reason?: string;
+  final_quality_validation_passed?: boolean;
+  final_quality_validation_notes?: string;
   // Existing fields from enrich step
   avg_brain_rule_weight?: number;
   rule_performance_summary?: {
@@ -252,11 +261,18 @@ Return JSON only: {"originality": N, "evidence_safety": N, "usefulness": N}`
 
 /**
  * Rewrite crafted_text to improve originality.
- * The rewrite must NOT:
- * - Lower any gate threshold
- * - Weaken content-policy
- * - Introduce Arabic text
- * - Add unsourced numeric claims
+ * Phase 2C: Strengthened rewrite that produces genuinely original angles.
+ *
+ * The rewrite must:
+ * - Produce plain text only, NEVER JSON
+ * - Be under 280 characters
+ * - Be English only, no Arabic
+ * - Avoid AI slop, generic engagement bait, "Yo…", "Interesting take"
+ * - Add a specific non-obvious insight
+ * - Connect to AI/productivity/career only when source genuinely supports it
+ * - NOT invent unsupported facts or introduce unsourced numeric claims
+ * - Sound like a smart builder/operator, not a content mill
+ * - If a niche-aligned original angle cannot be produced, return null
  */
 export async function rewriteForOriginality(
   text: string,
@@ -268,33 +284,43 @@ export async function rewriteForOriginality(
         role: 'system',
         content: `You are a content improvement specialist for @30piq (AI × productivity × career growth niche).
 
-Your task: Rewrite this tweet to be MORE ORIGINAL while keeping it truthful.
+Your task: Rewrite this tweet to be GENUINELY ORIGINAL with a specific @30piq-style angle.
 
-Rules (mandatory):
-1. Keep it under 280 characters
-2. English ONLY — no Arabic
-3. No AI slop words (delve, crucial, leverage, game-changer, unlock, empower, etc.)
-4. No hashtags
-5. No unsourced numeric claims — if there are numbers without a source, remove or rephrase them
-6. Add a SPECIFIC angle: personal experience, surprising framing, counterintuitive take, or niche reference
-7. Make it actionable for AI/productivity professionals
-8. Vary sentence length — not all the same
-9. Sound like a smart friend in tech, not a content mill
-10. Do NOT add numbers/percentages that weren't in the original
+Rules (mandatory — violation = rejected rewrite):
+1. Return PLAIN TEXT ONLY — no JSON, no markdown, no code fences, no labels, no prefixes
+2. Keep it under 280 characters
+3. English ONLY — no Arabic, no other languages
+4. No AI slop words (delve, crucial, leverage, game-changer, unlock, empower, elevate, foster, streamline, harness, cutting-edge, paradigm, synergy, navigate the landscape, etc.)
+5. No hashtags
+6. No unsourced numeric claims — remove or rephrase numbers without a source
+7. No generic engagement bait: avoid "Yo…", "Interesting take", "Hot take", "Thoughts?", "This.", "So true", "Boom"
+8. Add a SPECIFIC, NON-OBVIOUS insight: personal experience, counterintuitive framing, niche tool reference, or operator perspective
+9. Only connect to AI/productivity/career if the SOURCE CONTENT genuinely supports such an angle — do NOT force a fake AI angle onto unrelated entertainment content
+10. Vary sentence length — mix short punchy fragments with longer explanatory sentences
+11. Sound like a smart builder/operator, not a content mill, not a life coach
+12. Do NOT add numbers/percentages that weren't in the original unless you have a source
+13. Do NOT start with "Here's", "Sure,", or "I'll" — those are AI conversation artifacts
 
 Current scores: originality=${currentScores.originality}/10, evidence_safety=${currentScores.evidence_safety}/10, usefulness=${currentScores.usefulness}/10
 
-Return the rewritten text ONLY. No explanation, no quotes, no labels.`
+If you cannot produce a genuinely original, niche-aligned angle, return "CANNOT_REWRITE_ORIGINALITY".
+
+Return the rewritten text ONLY. No explanation, no quotes, no labels, no JSON.`
       },
       {
         role: 'user',
         content: `Rewrite this to be more original:\n\n"${text}"`
       }
-    ], { temperature: 0.3, max_tokens: 300 });
+    ], { temperature: 0.4, max_tokens: 300 });
 
     const rewritten = String(response || '').trim();
 
-    // Validate rewrite
+    // Check for safe rewrite signal
+    if (/CANNOT_REWRITE_ORIGINALITY/i.test(rewritten)) {
+      return null;
+    }
+
+    // Validate rewrite — plain text only
     if (!rewritten || rewritten.length < 10 || rewritten.length > MAX_REWRITE_LENGTH) {
       return null;
     }
@@ -304,10 +330,31 @@ Return the rewritten text ONLY. No explanation, no quotes, no labels.`
       return null;
     }
 
+    // If the rewrite looks like JSON/markdown wrapper, reject it
+    if (looksLikeJsonWrapper(rewritten)) {
+      return null;
+    }
+
     // If the rewrite looks like AI slop wrapper, reject it
     const slopCheck = isAISlopWrapper(rewritten);
     if (!slopCheck.ok) {
       return null;
+    }
+
+    // Reject generic engagement bait patterns
+    const genericBaitPatterns = [
+      /^yo[,.…!\s]/i,
+      /^interesting take/i,
+      /^hot take/i,
+      /^this\.\s*$/i,
+      /^so true/i,
+      /^boom/i,
+      /^thoughts\?\s*$/i,
+    ];
+    for (const pattern of genericBaitPatterns) {
+      if (pattern.test(rewritten.trim())) {
+        return null;
+      }
     }
 
     return rewritten;

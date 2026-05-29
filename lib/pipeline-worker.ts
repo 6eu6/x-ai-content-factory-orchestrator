@@ -51,6 +51,9 @@ import { recordPublishGateRejections } from './rejection-ledger';
 import { withCostContext } from './cost-context';
 import { enhanceOpportunities, type OpportunityWithDiagnostics } from './originality-enhancer';
 import { guardOpportunitiesNumericClaims } from './numeric-claim-guard';
+import { cleanOpportunitiesText } from './crafted-text-cleaner';
+import { guardNicheAlignment } from './niche-alignment';
+import { validateOpportunitiesBeforeGate } from './quality-validator';
 
 // ═══ Types ═══
 
@@ -406,7 +409,7 @@ async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskRe
   }
 }
 
-// ═══ quality_enhance (Phase 2B) ═══
+// ═══ quality_enhance (Phase 2B + Phase 2C) ═══
 
 async function processQualityEnhance(task: PipelineTaskRow): Promise<TaskResult> {
   try {
@@ -438,11 +441,22 @@ async function processQualityEnhance(task: PipelineTaskRow): Promise<TaskResult>
       };
     }
 
-    // ═══ Step 1: Originality Enhancer (self-critique/rewrite loop) ═══
-    const enhanceResult = await enhanceOpportunities(opportunities);
+    // ═══ Phase 2C Step 0: Clean crafted_text (extract from JSON/markdown wrappers) ═══
+    const cleanResult = cleanOpportunitiesText(opportunities);
+    let currentOpportunities = cleanResult.cleaned as OpportunityWithDiagnostics[];
 
-    // ═══ Step 2: Numeric Claim Guard ═══
+    // ═══ Phase 2C Step 1: Niche alignment scoring and guard ═══
+    const nicheResult = guardNicheAlignment(currentOpportunities);
+    currentOpportunities = nicheResult.guarded as OpportunityWithDiagnostics[];
+
+    // ═══ Phase 2B Step 1: Originality Enhancer (self-critique/rewrite loop) ═══
+    const enhanceResult = await enhanceOpportunities(currentOpportunities);
+
+    // ═══ Phase 2B Step 2: Numeric Claim Guard ═══
     const guardResult = await guardOpportunitiesNumericClaims(enhanceResult.enhanced);
+
+    // ═══ Phase 2C Step 3: Hard validation before publish_gate ═══
+    const validationResults = validateOpportunitiesBeforeGate(guardResult.guarded);
 
     // Record numeric claim rejections to rejection ledger (non-blocking)
     if (guardResult.rejected.length > 0) {
@@ -466,7 +480,7 @@ async function processQualityEnhance(task: PipelineTaskRow): Promise<TaskResult>
     }
 
     // Log summary
-    console.log(`[pipeline-worker] quality_enhance: ${enhanceResult.rewrites_applied} rewrites applied, ${guardResult.rejected.length} numeric claims rejected, ${guardResult.guarded.length} passed to publish_gate`);
+    console.log(`[pipeline-worker] quality_enhance: cleaned ${cleanResult.summary.json_wrappers_cleaned} JSON wrappers, ${nicheResult.summary.off_niche} off-niche, ${enhanceResult.rewrites_applied} rewrites applied, ${guardResult.rejected.length} numeric claims rejected, ${validationResults.summary.failed} failed validation, ${validationResults.summary.passed} passed to publish_gate`);
 
     return {
       ok: true,
@@ -476,7 +490,16 @@ async function processQualityEnhance(task: PipelineTaskRow): Promise<TaskResult>
         numeric_rejected: guardResult.rejected.length,
         numeric_claims_detected: guardResult.summary.numeric_claims_detected,
         numeric_rewrites_succeeded: guardResult.summary.rewrites_succeeded,
-        _opportunities: guardResult.guarded,
+        // Phase 2C diagnostics
+        json_wrappers_cleaned: cleanResult.summary.json_wrappers_cleaned,
+        malformed_count: cleanResult.summary.malformed_count,
+        off_niche_count: nicheResult.summary.off_niche,
+        niche_aligned_count: nicheResult.summary.aligned,
+        avg_niche_score: nicheResult.summary.avg_score,
+        validation_passed: validationResults.summary.passed,
+        validation_failed: validationResults.summary.failed,
+        validation_failure_reasons: validationResults.summary.failure_reasons,
+        _opportunities: validationResults.validated,
         _quality_summary: enhanceResult.scores_summary,
         _numeric_guard_summary: guardResult.summary
       }

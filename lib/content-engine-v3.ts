@@ -58,6 +58,14 @@ export type ContentOpportunity = {
   rewrite_applied?: boolean;
   numeric_claim_removed?: boolean;
   quality_notes?: string;
+  // Phase 2C: niche alignment and cleaning diagnostics
+  niche_alignment_score?: number;
+  niche_alignment_reason?: string;
+  cleaned_json_wrapper?: boolean;
+  malformed_json_output?: boolean;
+  pre_gate_rejection_reason?: string;
+  final_quality_validation_passed?: boolean;
+  final_quality_validation_notes?: string;
 };
 
 export type MediaFromTweet = {
