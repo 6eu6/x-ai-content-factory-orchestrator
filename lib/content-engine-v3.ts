@@ -51,6 +51,13 @@ export type ContentOpportunity = {
     strongest_rule: string | null;
     weakest_rule: string | null;
   };
+  // Phase 2B: quality diagnostics (optional, set by quality_enhance step)
+  originality_score_before?: number;
+  originality_score_after?: number | null;
+  evidence_safety_score?: number;
+  rewrite_applied?: boolean;
+  numeric_claim_removed?: boolean;
+  quality_notes?: string;
 };
 
 export type MediaFromTweet = {

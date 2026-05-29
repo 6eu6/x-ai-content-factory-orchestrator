@@ -11,6 +11,7 @@
  *   - scan_account: Scan a single X account (ONE account per task, FULL quality)
  *   - merge_scan_results: Merge all scan_account results + discover opportunities
  *   - enrich_opportunities: Enrich opportunities with rule performance data
+ *   - quality_enhance: Phase 2B — Originality enhancer + numeric claim guard
  *   - publish_gate: Filter opportunities through English publish gate
  *   - decision: Apply decision engine to publishable opportunities
  *   - persist_decision: Log the decision to decision_runs table
@@ -48,6 +49,8 @@ import {
 } from './content-engine-v3';
 import { recordPublishGateRejections } from './rejection-ledger';
 import { withCostContext } from './cost-context';
+import { enhanceOpportunities, type OpportunityWithDiagnostics } from './originality-enhancer';
+import { guardOpportunitiesNumericClaims } from './numeric-claim-guard';
 
 // ═══ Types ═══
 
@@ -186,6 +189,8 @@ async function processTask(task: PipelineTaskRow): Promise<TaskResult> {
       return processMergeScanResults(task);
     case 'enrich_opportunities':
       return processEnrichOpportunities(task);
+    case 'quality_enhance':
+      return processQualityEnhance(task);
     case 'publish_gate':
       return processPublishGate(task);
     case 'decision':
@@ -401,9 +406,9 @@ async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskRe
   }
 }
 
-// ═══ publish_gate ═══
+// ═══ quality_enhance (Phase 2B) ═══
 
-async function processPublishGate(task: PipelineTaskRow): Promise<TaskResult> {
+async function processQualityEnhance(task: PipelineTaskRow): Promise<TaskResult> {
   try {
     const supabase = supabaseAdmin();
     const runId = task.run_id;
@@ -417,7 +422,101 @@ async function processPublishGate(task: PipelineTaskRow): Promise<TaskResult> {
       .eq('status', 'completed')
       .maybeSingle();
 
-    const opportunities = enrichTask?.result?._opportunities || [];
+    const opportunities: OpportunityWithDiagnostics[] = enrichTask?.result?._opportunities || [];
+
+    if (!opportunities.length) {
+      return {
+        ok: true,
+        result: {
+          enhanced_count: 0,
+          rewrites_applied: 0,
+          numeric_rejected: 0,
+          _opportunities: [],
+          _quality_summary: null,
+          _numeric_guard_summary: null
+        }
+      };
+    }
+
+    // ═══ Step 1: Originality Enhancer (self-critique/rewrite loop) ═══
+    const enhanceResult = await enhanceOpportunities(opportunities);
+
+    // ═══ Step 2: Numeric Claim Guard ═══
+    const guardResult = await guardOpportunitiesNumericClaims(enhanceResult.enhanced);
+
+    // Record numeric claim rejections to rejection ledger (non-blocking)
+    if (guardResult.rejected.length > 0) {
+      try {
+        await recordPublishGateRejections(
+          guardResult.rejected.map((r, index) => ({
+            index,
+            type: r.opportunity.type,
+            reason: `numeric_claim_needs_source:${r.reason}`,
+            preview: String(r.opportunity.crafted_text || '').slice(0, 140)
+          })),
+          {
+            run_id: runId,
+            task_id: task.id,
+            opportunities: guardResult.rejected.map(r => r.opportunity)
+          }
+        );
+      } catch (rejErr: any) {
+        console.error('[pipeline-worker] quality_enhance rejection ledger error:', rejErr.message);
+      }
+    }
+
+    // Log summary
+    console.log(`[pipeline-worker] quality_enhance: ${enhanceResult.rewrites_applied} rewrites applied, ${guardResult.rejected.length} numeric claims rejected, ${guardResult.guarded.length} passed to publish_gate`);
+
+    return {
+      ok: true,
+      result: {
+        enhanced_count: enhanceResult.enhanced.length,
+        rewrites_applied: enhanceResult.rewrites_applied,
+        numeric_rejected: guardResult.rejected.length,
+        numeric_claims_detected: guardResult.summary.numeric_claims_detected,
+        numeric_rewrites_succeeded: guardResult.summary.rewrites_succeeded,
+        _opportunities: guardResult.guarded,
+        _quality_summary: enhanceResult.scores_summary,
+        _numeric_guard_summary: guardResult.summary
+      }
+    };
+  } catch (err: any) {
+    return { ok: false, result: {}, error: err.message };
+  }
+}
+
+// ═══ publish_gate ═══
+
+async function processPublishGate(task: PipelineTaskRow): Promise<TaskResult> {
+  try {
+    const supabase = supabaseAdmin();
+    const runId = task.run_id;
+
+    // Get quality_enhance results (Phase 2B: opportunities now come from quality_enhance, not enrich)
+    // Fallback to enrich_opportunities for backward compatibility with runs that started before Phase 2B
+    const { data: qualityTask } = await supabase
+      .from('pipeline_tasks')
+      .select('result')
+      .eq('run_id', runId)
+      .eq('task_type', 'quality_enhance')
+      .eq('status', 'completed')
+      .maybeSingle();
+
+    let opportunities;
+    if (qualityTask?.result?._opportunities) {
+      opportunities = qualityTask.result._opportunities;
+    } else {
+      // Fallback: read from enrich_opportunities (pre-Phase 2B runs)
+      const { data: enrichTask } = await supabase
+        .from('pipeline_tasks')
+        .select('result')
+        .eq('run_id', runId)
+        .eq('task_type', 'enrich_opportunities')
+        .eq('status', 'completed')
+        .maybeSingle();
+      opportunities = enrichTask?.result?._opportunities || [];
+    }
 
     const { filterPublishableOpportunities } = await import('./content-policy');
     const publishGate = filterPublishableOpportunities(opportunities);
