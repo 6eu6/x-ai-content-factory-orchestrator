@@ -46,6 +46,7 @@ import {
   type SingleAccountScanResult,
   type AccountScanEmptyReason
 } from './content-engine-v3';
+import { recordPublishGateRejections } from './rejection-ledger';
 
 // ═══ Types ═══
 
@@ -415,6 +416,20 @@ async function processPublishGate(task: PipelineTaskRow): Promise<TaskResult> {
 
     const { filterPublishableOpportunities } = await import('./content-policy');
     const publishGate = filterPublishableOpportunities(opportunities);
+
+    // Phase 2A: Persist rejections to rejection_ledger
+    if (publishGate.rejected.length > 0) {
+      try {
+        await recordPublishGateRejections(publishGate.rejected, {
+          run_id: runId,
+          task_id: task.id,
+          opportunities
+        });
+      } catch (rejErr: any) {
+        console.error('[pipeline-worker] publish_gate rejection ledger error:', rejErr.message);
+        // Non-blocking: don't fail the task if rejection persistence fails
+      }
+    }
 
     return {
       ok: true,

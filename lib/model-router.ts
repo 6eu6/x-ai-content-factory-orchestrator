@@ -2,6 +2,7 @@ import OpenAI from 'openai';
 import { requiredEnv, optionalEnv } from './env';
 import { supabaseAdmin } from './supabase';
 import { withRetry, isTransientError } from './retry';
+import { startCostEvent, completeCostEvent, failCostEvent, type CostProvider } from './cost-ledger';
 
 /**
  * Model Router — Routes each task to the appropriate model via OpenRouter
@@ -260,29 +261,56 @@ export async function getAIClientForTask(taskType: TaskType): Promise<{ client: 
 }
 
 /**
- * Simplified model call — automatically selects model by task type
+ * Simplified model call — automatically selects model by task type.
+ * Phase 2A: Instruments every call with cost ledger tracking.
  */
 export async function callModel(
   taskType: TaskType,
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
-  overrides?: Partial<ModelConfig>
+  overrides?: Partial<ModelConfig> & { run_id?: string; task_id?: string }
 ): Promise<string> {
   const { client, config } = await getAIClientForTask(taskType);
   const merged = { ...config, ...overrides };
 
-  const response = await withRetry(
-    () => client.chat.completions.create({
-      model: merged.model,
-      temperature: merged.temperature,
-      max_tokens: merged.max_tokens,
-      top_p: merged.top_p,
-      response_format: merged.response_format as any,
-      messages
-    }),
-    { attempts: 3, baseDelayMs: 1200, label: `callModel:${taskType}:${merged.model}`, shouldRetry: isTransientError }
-  );
+  // Determine provider for cost ledger
+  const provider: CostProvider = merged.provider === 'local' ? 'local' : (isOpenRouter() ? 'openrouter' : 'openai');
 
-  return response.choices[0]?.message?.content || '';
+  // Start cost event
+  const costEventId = await startCostEvent({
+    run_id: overrides?.run_id,
+    task_id: overrides?.task_id,
+    task_type: taskType,
+    provider,
+    model: merged.model
+  });
+
+  try {
+    const response = await withRetry(
+      () => client.chat.completions.create({
+        model: merged.model,
+        temperature: merged.temperature,
+        max_tokens: merged.max_tokens,
+        top_p: merged.top_p,
+        response_format: merged.response_format as any,
+        messages
+      }),
+      { attempts: 3, baseDelayMs: 1200, label: `callModel:${taskType}:${merged.model}`, shouldRetry: isTransientError }
+    );
+
+    // Complete cost event with token usage
+    const usage = (response as any).usage;
+    await completeCostEvent(costEventId, {
+      input_tokens: usage?.prompt_tokens ?? null,
+      output_tokens: usage?.completion_tokens ?? null,
+      total_tokens: usage?.total_tokens ?? null
+    });
+
+    return response.choices[0]?.message?.content || '';
+  } catch (err: any) {
+    // Fail cost event
+    await failCostEvent(costEventId, err?.message || 'callModel failed');
+    throw err;
+  }
 }
 
 /**
