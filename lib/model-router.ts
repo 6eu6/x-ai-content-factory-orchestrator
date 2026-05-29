@@ -18,20 +18,23 @@ import { getCostContext } from './cost-context';
  */
 
 export type TaskType =
-  | 'content_generation'      // Daily content generation (tweets, replies, quotes)
-  | 'content_crafting'        // Custom content crafting (quotes, replies, threads)
-  | 'deep_analysis'           // Deep analysis (repo analysis, algorithm extraction)
-  | 'research_synthesis'      // Research synthesis (research-intel, trend analysis)
-  | 'quality_evaluation'      // Quality evaluation (quality gate, slop detection)
-  | 'media_description'       // Media description (image prompt, video script)
-  | 'learning_extraction'     // Learning extraction (pattern extraction, rule mining)
-  | 'format_decision'         // Format decision (which content type to produce)
-  | 'article_writing'         // Article writing (X Articles, long-form)
-  | 'thread_writing'          // Thread writing (5-15 tweet threads)
-  | 'performance_analysis'    // Performance analysis (engagement feedback, learning from results)
-  | 'shield_check'            // Shield check (slop detection, claim verification)
-  | 'repo_artifact'           // Repo artifact writing (README, code, docs)
-  | 'casual_generation';      // Quick casual generation (short replies, quick takes)
+  | 'content_generation'           // Daily content generation (tweets, replies, quotes)
+  | 'content_crafting'             // Custom content crafting (quotes, replies, threads)
+  | 'deep_analysis'                // Deep analysis (repo analysis, algorithm extraction)
+  | 'research_synthesis'           // Research synthesis (research-intel, trend analysis)
+  | 'quality_evaluation'           // Quality evaluation (quality gate, slop detection)
+  | 'media_description'            // Media description (image prompt, video script)
+  | 'learning_extraction'          // Learning extraction (pattern extraction, rule mining)
+  | 'format_decision'              // Format decision (which content type to produce)
+  | 'article_writing'              // Article writing (X Articles, long-form)
+  | 'thread_writing'               // Thread writing (5-15 tweet threads)
+  | 'performance_analysis'         // Performance analysis (engagement feedback, learning from results)
+  | 'shield_check'                 // Shield check (slop detection, claim verification)
+  | 'repo_artifact'                // Repo artifact writing (README, code, docs)
+  | 'casual_generation'            // Quick casual generation (short replies, quick takes)
+  | 'opportunity_intelligence'     // Phase 2D: structured opportunity scoring, niche reasoning, angle discovery
+  | 'opportunity_judge'            // Phase 2D: strict pre-gate scoring of crafted candidates
+  | 'selected_candidate_crafting'; // Phase 2D: craft final text from opportunity brief
 
 export type ModelProvider = 'cloud' | 'local';
 
@@ -148,7 +151,32 @@ const DEFAULT_ROUTING: Record<TaskType, ModelConfig> = {
     temperature: 0.35,
     max_tokens: 500,
     description: 'Quick generation — short replies + quick takes'
-  }
+  },
+  // Phase 2D dedicated routes — high-value judgment tasks get strongest models
+  opportunity_intelligence: {
+    model: 'anthropic/claude-sonnet-4-20250514',
+    temperature: 0.05,
+    max_tokens: 2600,
+    response_format: { type: 'json_object' },
+    provider: 'cloud',
+    description: 'Opportunity intelligence — structured opportunity scoring and brief generation',
+  },
+  opportunity_judge: {
+    model: 'anthropic/claude-sonnet-4-20250514',
+    temperature: 0.02,
+    max_tokens: 1200,
+    response_format: { type: 'json_object' },
+    provider: 'cloud',
+    description: 'Opportunity judge — strict pre-gate scoring',
+  },
+  selected_candidate_crafting: {
+    model: 'deepseek/deepseek-chat-v3-0324',
+    temperature: 0.20,
+    max_tokens: 2000,
+    response_format: { type: 'json_object' },
+    provider: 'cloud',
+    description: 'Selected candidate crafting from opportunity brief',
+  },
 };
 
 let routingCache: Record<string, ModelConfig> | null = null;
@@ -183,10 +211,12 @@ function buildClient(config?: ModelConfig): OpenAI {
 }
 
 // Invalid model names — cause 400 error from OpenRouter
+// Phase 2D.1: Removed openai/gpt-4.1-mini (now valid on OpenRouter)
+// Phase 2D.1: Removed anthropic/claude-sonnet-4 (dated variant anthropic/claude-sonnet-4-20250514 is valid)
+// Only block models that are CONFIRMED non-existent; outdated assumptions should not
+// prevent using valid modern models. DB-switchable: update model_routing_rules to override.
 const INVALID_MODELS = new Set([
-  'openai/gpt-4.1-mini',       // Does not exist! Correct: openai/gpt-4o-mini
-  'openai/gpt-4.1',            // Does not exist!
-  'anthropic/claude-sonnet-4',  // Does not exist! Correct: anthropic/claude-sonnet-4-20250514
+  'openai/gpt-4.1',            // Confirmed non-existent — correct is openai/gpt-4o or openai/gpt-4.1-mini
 ]);
 
 async function loadRoutingRules(): Promise<Record<string, ModelConfig>> {

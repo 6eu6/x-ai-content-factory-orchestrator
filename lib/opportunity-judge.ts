@@ -180,7 +180,7 @@ export async function judgeCraftedCandidate(
   };
 
   try {
-    const response = await callModel('quality_evaluation' as TaskType, [
+    const response = await callModel('opportunity_judge' as TaskType, [
       {
         role: 'system',
         content: `You are a content quality judge for an X account (@30piq) focused on AI × productivity × career growth.
@@ -229,7 +229,7 @@ Return JSON only: {"originality_score": N, "usefulness_score": N, "niche_fit_sco
         role: 'user',
         content: `Judge this crafted tweet:\n\n"${craftedText}"`
       }
-    ], { temperature: 0.0, max_tokens: 300, response_format: { type: 'json_object' } });
+    ], { temperature: 0.02, max_tokens: 1200, response_format: { type: 'json_object' } });
 
     const parsed = parseModelJson(response);
 

@@ -58,6 +58,12 @@ export type OpportunityBrief = {
   // Decision
   should_craft: boolean;
   rejection_reason?: string;
+
+  // Phase 2D.1: Parse failure diagnostics (only set when AI call/parse fails)
+  parse_failed?: boolean;
+  intelligence_error_type?: 'model_call_failed' | 'json_parse_failed' | 'missing_required_fields';
+  intelligence_error_message_short?: string;
+  raw_model_output_preview?: string;
 };
 
 export type RejectionDebug = {
@@ -69,6 +75,11 @@ export type RejectionDebug = {
   usefulness_score: number;
   niche_fit_score: number;
   recommended_angle: string;
+  // Phase 2D.1: Parse failure diagnostics
+  parse_failed?: boolean;
+  intelligence_error_type?: 'model_call_failed' | 'json_parse_failed' | 'missing_required_fields';
+  intelligence_error_message_short?: string;
+  raw_model_output_preview?: string;
 };
 
 export type IntelligenceSummary = {
@@ -81,6 +92,9 @@ export type IntelligenceSummary = {
   avg_publishability_score: number;
   avg_originality_potential_score: number;
   sampled_rejection_debug: RejectionDebug[];
+  // Phase 2D.1: Parse failure tracking
+  intelligence_parse_failed_count: number;
+  parse_failure_rate: number;
 };
 
 // ═══ Niche Model Constants ═══
@@ -294,6 +308,7 @@ export const CANONICAL_REJECTION_REASONS = [
   'language_or_context_mismatch',
   'insufficient_context',
   'weak_source',
+  'intelligence_parse_failed',
 ] as const;
 
 export type CanonicalRejectionReason = typeof CANONICAL_REJECTION_REASONS[number];
@@ -730,7 +745,7 @@ export async function evaluateOpportunity(opp: Record<string, any>): Promise<Opp
 
   // AI evaluation
   try {
-    const aiResponse = await callModel('quality_evaluation' as TaskType, [
+    const aiResponse = await callModel('opportunity_intelligence' as TaskType, [
       {
         role: 'system',
         content: buildIntelligenceSystemPrompt(),
@@ -751,11 +766,87 @@ Produce the Opportunity Brief JSON now.`,
       },
     ], {
       temperature: 0.05,
-      max_tokens: 1000,
+      max_tokens: 2600,
       response_format: { type: 'json_object' },
     });
 
-    const parsed = parseModelJson(aiResponse);
+    // Phase 2D.1: Robust JSON parsing with required field validation
+    let parsed: any;
+    try {
+      parsed = parseModelJson(aiResponse);
+    } catch (parseErr: any) {
+      // JSON parse failed — return intelligence_parse_failed, NOT insufficient_context
+      console.error(`[opportunity-intelligence] JSON parse failed for @${sourceAuthor}: ${parseErr?.message || 'unknown'}`);
+      return {
+        source_summary: `Intelligence parse failed: json_parse_failed`,
+        source_text: sourceText,
+        source_author: sourceAuthor,
+        source_tweet_url: sourceTweetUrl,
+        type,
+        core_observation: '',
+        why_it_matters: '',
+        audience_relevance: '',
+        niche_fit_score: Math.max(1, heuristic.score),
+        originality_potential_score: 1,
+        usefulness_score: 1,
+        evidence_risk_score: 10,
+        viral_context_score: 1,
+        publishability_score: 1,
+        recommended_angle: '',
+        content_format: 'reply',
+        do_not_claim: [],
+        required_context: [],
+        should_craft: false,
+        rejection_reason: 'intelligence_parse_failed',
+        parse_failed: true,
+        intelligence_error_type: 'json_parse_failed' as const,
+        intelligence_error_message_short: (parseErr?.message || 'unknown').slice(0, 100),
+        raw_model_output_preview: (aiResponse || '').slice(0, 200),
+      };
+    }
+
+    // Phase 2D.1: Validate required score fields after parsing
+    // If any critical score field is missing, treat as intelligence_parse_failed
+    const REQUIRED_SCORE_FIELDS = [
+      'niche_fit_score',
+      'originality_potential_score',
+      'usefulness_score',
+      'evidence_risk_score',
+      'viral_context_score',
+      'publishability_score',
+      'recommended_angle',
+      'should_craft',
+    ];
+    const missingFields = REQUIRED_SCORE_FIELDS.filter(f => parsed[f] === undefined || parsed[f] === null);
+    if (missingFields.length > 0) {
+      console.error(`[opportunity-intelligence] Missing required fields for @${sourceAuthor}: ${missingFields.join(', ')}`);
+      return {
+        source_summary: `Intelligence parse failed: missing_required_fields (${missingFields.join(', ')})`,
+        source_text: sourceText,
+        source_author: sourceAuthor,
+        source_tweet_url: sourceTweetUrl,
+        type,
+        core_observation: '',
+        why_it_matters: '',
+        audience_relevance: '',
+        niche_fit_score: Math.max(1, heuristic.score),
+        originality_potential_score: 1,
+        usefulness_score: 1,
+        evidence_risk_score: 10,
+        viral_context_score: 1,
+        publishability_score: 1,
+        recommended_angle: '',
+        content_format: 'reply',
+        do_not_claim: [],
+        required_context: [],
+        should_craft: false,
+        rejection_reason: 'intelligence_parse_failed',
+        parse_failed: true,
+        intelligence_error_type: 'missing_required_fields' as const,
+        intelligence_error_message_short: `Missing: ${missingFields.join(', ')}`,
+        raw_model_output_preview: (aiResponse || '').slice(0, 200),
+      };
+    }
 
     // Build the brief from AI response, with clamping and defaults
     const brief: OpportunityBrief = {
@@ -881,12 +972,14 @@ Produce the Opportunity Brief JSON now.`,
     return brief;
 
   } catch (err: any) {
-    // AI evaluation failed — mark as should_craft=false with rejection reason
+    // Phase 2D.1: AI model call failed — return intelligence_parse_failed, NOT insufficient_context
+    // This is the model call itself failing (network error, API error, timeout, etc.)
     // Do NOT allow the opportunity through without evaluation
-    console.error(`[opportunity-intelligence] AI evaluation failed for @${sourceAuthor}: ${err?.message || 'unknown'}`);
+    const errorMsg = (err?.message || 'unknown').slice(0, 100);
+    console.error(`[opportunity-intelligence] AI model call failed for @${sourceAuthor}: ${errorMsg}`);
 
     return {
-      source_summary: `AI evaluation failed: ${err?.message || 'unknown'}`,
+      source_summary: `Intelligence parse failed: model_call_failed`,
       source_text: sourceText,
       source_author: sourceAuthor,
       source_tweet_url: sourceTweetUrl,
@@ -905,7 +998,10 @@ Produce the Opportunity Brief JSON now.`,
       do_not_claim: [],
       required_context: [],
       should_craft: false,
-      rejection_reason: 'insufficient_context',
+      rejection_reason: 'intelligence_parse_failed',
+      parse_failed: true,
+      intelligence_error_type: 'model_call_failed' as const,
+      intelligence_error_message_short: errorMsg,
     };
   }
 }
@@ -935,6 +1031,8 @@ export async function evaluateOpportunities(
         avg_publishability_score: 0,
         avg_originality_potential_score: 0,
         sampled_rejection_debug: [],
+        intelligence_parse_failed_count: 0,
+        parse_failure_rate: 0,
       },
     };
   }
@@ -981,18 +1079,38 @@ export async function evaluateOpportunities(
     topRejectionReasons[reason] = count;
   }
 
+  // Phase 2D.1: Track parse failures for diagnostics
+  const parseFailedCount = briefs.filter((b: any) => b.parse_failed === true || b.rejection_reason === 'intelligence_parse_failed').length;
+  const parseFailureRate = evaluatedCount > 0 ? Math.round((parseFailedCount / evaluatedCount) * 100) / 100 : 0;
+
+  if (parseFailureRate > 0.5) {
+    console.warn(`[opportunity-intelligence] Parse failure rate high: ${parseFailureRate} (${parseFailedCount}/${evaluatedCount})`);
+  }
+
   // Sampled rejection debug: top 3 rejected items for future audits
+  // Phase 2D.1: Include parse_failed diagnostics in debug samples
   const rejectedBriefs = briefs.filter(b => !b.should_craft);
-  const sampledRejectionDebug: RejectionDebug[] = rejectedBriefs.slice(0, 3).map(b => ({
-    source_author: b.source_author,
-    source_text_preview: b.source_text.slice(0, 120),
-    rejection_reason: b.rejection_reason || 'unknown',
-    publishability_score: b.publishability_score,
-    originality_potential_score: b.originality_potential_score,
-    usefulness_score: b.usefulness_score,
-    niche_fit_score: b.niche_fit_score,
-    recommended_angle: b.recommended_angle,
-  }));
+  const sampledRejectionDebug: RejectionDebug[] = rejectedBriefs.slice(0, 3).map(b => {
+    const debug: RejectionDebug = {
+      source_author: b.source_author,
+      source_text_preview: b.source_text.slice(0, 120),
+      rejection_reason: b.rejection_reason || 'unknown',
+      publishability_score: b.publishability_score,
+      originality_potential_score: b.originality_potential_score,
+      usefulness_score: b.usefulness_score,
+      niche_fit_score: b.niche_fit_score,
+      recommended_angle: b.recommended_angle,
+    };
+    // Add parse failure diagnostics if present
+    const anyBrief = b as any;
+    if (anyBrief.parse_failed) {
+      debug.parse_failed = true;
+      debug.intelligence_error_type = anyBrief.intelligence_error_type;
+      debug.intelligence_error_message_short = anyBrief.intelligence_error_message_short;
+      debug.raw_model_output_preview = anyBrief.raw_model_output_preview;
+    }
+    return debug;
+  });
 
   return {
     briefs,
@@ -1006,6 +1124,8 @@ export async function evaluateOpportunities(
       avg_publishability_score: avgPublishability,
       avg_originality_potential_score: avgOriginalityPotential,
       sampled_rejection_debug: sampledRejectionDebug,
+      intelligence_parse_failed_count: parseFailedCount,
+      parse_failure_rate: parseFailureRate,
     },
   };
 }
