@@ -90,22 +90,44 @@ export function detectNumericClaims(text: string): string[] {
 }
 
 /**
- * Check if the opportunity has a source URL or evidence field.
- * Looks in multiple places: source_tweet_url, evidence, source_url,
- * URLs within the text itself.
+ * Check if the opportunity has explicit source URL or evidence field.
+ *
+ * IMPORTANT: source_tweet_url is NOT accepted as evidence for numeric claims.
+ * source_tweet_url is a content origin/reference (where the opportunity came from),
+ * NOT proof for the numeric claim itself. Almost every opportunity has a
+ * source_tweet_url, so treating it as evidence would let unsourced numeric
+ * claims bypass the guard entirely.
+ *
+ * Accepted evidence fields:
+ * - evidence: string — explicit evidence/citation text
+ * - source_url: string — explicit source URL for the claim
+ * - source_urls: string[] — array of source URLs
+ * - citations: string | string[] — citation field(s)
+ * - references: string | string[] — reference field(s)
+ * - verified_source_url: string — verified source URL
+ * - URLs embedded directly in crafted_text
+ *
+ * source_tweet_url is intentionally EXCLUDED from this list.
  */
 export function hasSourceForClaim(opp: any): boolean {
   // Check for explicit source/evidence fields
   if (opp.evidence && typeof opp.evidence === 'string' && opp.evidence.length > 0) return true;
   if (opp.source_url && typeof opp.source_url === 'string' && opp.source_url.length > 0) return true;
+  if (opp.verified_source_url && typeof opp.verified_source_url === 'string' && opp.verified_source_url.length > 0) return true;
 
-  // Check for URL in crafted_text
+  // Check array evidence fields
+  if (Array.isArray(opp.source_urls) && opp.source_urls.some((u: string) => typeof u === 'string' && u.length > 0)) return true;
+  if (typeof opp.citations === 'string' && opp.citations.length > 0) return true;
+  if (Array.isArray(opp.citations) && opp.citations.some((c: string) => typeof c === 'string' && c.length > 0)) return true;
+  if (typeof opp.references === 'string' && opp.references.length > 0) return true;
+  if (Array.isArray(opp.references) && opp.references.some((r: string) => typeof r === 'string' && r.length > 0)) return true;
+
+  // Check for URL embedded directly in crafted_text
   const text = opp.crafted_text || '';
   if (/https?:\/\//i.test(text)) return true;
 
-  // Check source_tweet_url (it's a reference, not a citation for the claim itself,
-  // but we'll count it as weak evidence)
-  if (opp.source_tweet_url && /^https?:\/\//i.test(opp.source_tweet_url)) return true;
+  // NOTE: source_tweet_url is intentionally NOT checked here.
+  // It is a content origin, not evidence for the numeric claim.
 
   return false;
 }

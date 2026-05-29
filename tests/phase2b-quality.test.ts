@@ -227,12 +227,15 @@ describe('hasSourceForClaim', () => {
     expect(hasSourceForClaim(opp)).toBe(true);
   });
 
-  it('returns true if source_tweet_url exists', () => {
+  it('returns FALSE if only source_tweet_url exists (not evidence for numeric claim)', () => {
+    // source_tweet_url is a content origin, not proof for the numeric claim itself.
+    // Almost every opportunity has source_tweet_url, so treating it as evidence
+    // would let unsourced numeric claims bypass the guard entirely.
     const opp = {
       crafted_text: 'Revenue grew 40%',
       source_tweet_url: 'https://x.com/user/status/123',
     };
-    expect(hasSourceForClaim(opp)).toBe(true);
+    expect(hasSourceForClaim(opp)).toBe(false);
   });
 
   it('returns true if evidence field exists', () => {
@@ -253,6 +256,69 @@ describe('hasSourceForClaim', () => {
     expect(hasSourceForClaim(opp)).toBe(true);
   });
 
+  it('returns true if verified_source_url field exists', () => {
+    const opp = {
+      crafted_text: 'Revenue grew 40%',
+      source_tweet_url: 'https://x.com/user/status/123',
+      verified_source_url: 'https://arxiv.org/paper/456',
+    };
+    expect(hasSourceForClaim(opp)).toBe(true);
+  });
+
+  it('returns true if source_urls array has entries', () => {
+    const opp = {
+      crafted_text: 'Revenue grew 40%',
+      source_tweet_url: 'https://x.com/user/status/123',
+      source_urls: ['https://example.com/study1', 'https://example.com/study2'],
+    };
+    expect(hasSourceForClaim(opp)).toBe(true);
+  });
+
+  it('returns false if source_urls array is empty', () => {
+    const opp = {
+      crafted_text: 'Revenue grew 40%',
+      source_tweet_url: 'https://x.com/user/status/123',
+      source_urls: [],
+    };
+    expect(hasSourceForClaim(opp)).toBe(false);
+  });
+
+  it('returns true if citations string field exists', () => {
+    const opp = {
+      crafted_text: 'Revenue grew 40%',
+      source_tweet_url: '',
+      citations: 'McKinsey Global Institute Report 2024',
+    };
+    expect(hasSourceForClaim(opp)).toBe(true);
+  });
+
+  it('returns true if citations array has entries', () => {
+    const opp = {
+      crafted_text: 'Revenue grew 40%',
+      source_tweet_url: '',
+      citations: ['https://arxiv.org/paper/123'],
+    };
+    expect(hasSourceForClaim(opp)).toBe(true);
+  });
+
+  it('returns true if references string field exists', () => {
+    const opp = {
+      crafted_text: 'Revenue grew 40%',
+      source_tweet_url: '',
+      references: 'Stanford AI Index Report 2024',
+    };
+    expect(hasSourceForClaim(opp)).toBe(true);
+  });
+
+  it('returns true if references array has entries', () => {
+    const opp = {
+      crafted_text: 'Revenue grew 40%',
+      source_tweet_url: '',
+      references: ['https://example.com/ref1'],
+    };
+    expect(hasSourceForClaim(opp)).toBe(true);
+  });
+
   it('returns false if no source anywhere', () => {
     const opp = {
       crafted_text: 'Revenue grew 40%',
@@ -263,6 +329,101 @@ describe('hasSourceForClaim', () => {
 
   it('returns false for empty object', () => {
     expect(hasSourceForClaim({})).toBe(false);
+  });
+
+  it('returns false when source_tweet_url is present but no other evidence', () => {
+    // This is the KEY fix: source_tweet_url alone must NOT be enough
+    const opp = {
+      crafted_text: 'Revenue grew 40%',
+      source_tweet_url: 'https://x.com/someone/status/999',
+    };
+    expect(hasSourceForClaim(opp)).toBe(false);
+  });
+
+  it('returns true when source_tweet_url AND explicit evidence both exist', () => {
+    const opp = {
+      crafted_text: 'Revenue grew 40%',
+      source_tweet_url: 'https://x.com/user/status/123',
+      evidence: 'https://example.com/study',
+    };
+    expect(hasSourceForClaim(opp)).toBe(true);
+  });
+});
+
+// ═══ Numeric Claim Guard: source_tweet_url Exclusion ═══
+
+describe('numeric claim guard: source_tweet_url is not evidence', () => {
+  it('numeric claim + only source_tweet_url => treated as unsourced', () => {
+    const opp = {
+      crafted_text: 'Productivity increased by 40% with this new tool',
+      source_tweet_url: 'https://x.com/user/status/123',
+    };
+    // hasSourceForClaim must return false — source_tweet_url is not evidence
+    expect(hasSourceForClaim(opp)).toBe(false);
+    // The numeric claim is detected
+    expect(detectNumericClaims(opp.crafted_text).length).toBeGreaterThan(0);
+  });
+
+  it('numeric claim + explicit evidence URL => sourced', () => {
+    const opp = {
+      crafted_text: 'Productivity increased by 40% with this new tool',
+      source_tweet_url: 'https://x.com/user/status/123',
+      evidence: 'https://mckinsey.com/report/ai-productivity-2024',
+    };
+    expect(hasSourceForClaim(opp)).toBe(true);
+  });
+
+  it('numeric claim + URL inside crafted_text => sourced', () => {
+    const opp = {
+      crafted_text: 'Productivity increased by 40% — source: https://mckinsey.com/report',
+      source_tweet_url: 'https://x.com/user/status/123',
+    };
+    expect(hasSourceForClaim(opp)).toBe(true);
+  });
+
+  it('numeric claim + no source at all => unsourced (rewrite or reject)', () => {
+    const opp = {
+      crafted_text: 'Productivity increased by 40% with this new tool',
+      source_tweet_url: '',
+    };
+    expect(hasSourceForClaim(opp)).toBe(false);
+    expect(detectNumericClaims(opp.crafted_text).length).toBeGreaterThan(0);
+  });
+
+  it('numeric claim + verified_source_url => sourced', () => {
+    const opp = {
+      crafted_text: 'Revenue grew 40%',
+      source_tweet_url: 'https://x.com/user/status/123',
+      verified_source_url: 'https://arxiv.org/paper/456',
+    };
+    expect(hasSourceForClaim(opp)).toBe(true);
+  });
+
+  it('numeric claim + source_urls array => sourced', () => {
+    const opp = {
+      crafted_text: 'Revenue grew 40%',
+      source_tweet_url: 'https://x.com/user/status/123',
+      source_urls: ['https://arxiv.org/paper/789'],
+    };
+    expect(hasSourceForClaim(opp)).toBe(true);
+  });
+
+  it('numeric claim + citations array => sourced', () => {
+    const opp = {
+      crafted_text: 'Revenue grew 40%',
+      source_tweet_url: 'https://x.com/user/status/123',
+      citations: ['McKinsey AI Report 2024'],
+    };
+    expect(hasSourceForClaim(opp)).toBe(true);
+  });
+
+  it('numeric claim + references array => sourced', () => {
+    const opp = {
+      crafted_text: 'Revenue grew 40%',
+      source_tweet_url: 'https://x.com/user/status/123',
+      references: ['https://stanford.edu/ai-index'],
+    };
+    expect(hasSourceForClaim(opp)).toBe(true);
   });
 });
 
@@ -511,6 +672,57 @@ describe('quality diagnostic fields', () => {
     expect(opp.rewrite_applied).toBeUndefined();
     expect(opp.numeric_claim_removed).toBeUndefined();
     expect(opp.quality_notes).toBeUndefined();
+  });
+});
+
+// ═══ Publish Gate Thresholds Unchanged ═══
+
+describe('publish gate thresholds unchanged after numeric claim guard fix', () => {
+  it('hasSourceForClaim fix does not affect publish gate shield check', () => {
+    // Even though source_tweet_url is no longer evidence for numeric claims,
+    // the publish gate's shield check is independent and unchanged
+    const opp = {
+      type: 'reply',
+      crafted_text: 'Great insight about AI and productivity workflows',
+      source_tweet_url: 'https://x.com/user/status/123',
+      shield_passed: false,
+      shield_issues: ['missing_originality'],
+    };
+    const gate = filterPublishableOpportunities([opp]);
+    expect(gate.rejected.length).toBe(1);
+    expect(gate.rejected[0].reason).toContain('shield_not_passed');
+  });
+
+  it('hasSourceForClaim fix does not lower any publish gate threshold', () => {
+    // This opportunity passes all gate checks (no numeric claims, shield passed, English)
+    const opp = {
+      type: 'reply',
+      crafted_text: 'Built a RAG pipeline with GPT-4 that actually works for my team',
+      source_tweet_url: 'https://x.com/user/status/123',
+      shield_passed: true,
+      shield_issues: [],
+    };
+    const gate = filterPublishableOpportunities([opp]);
+    expect(gate.accepted.length).toBe(1);
+  });
+
+  it('source_tweet_url exclusion only affects hasSourceForClaim, not publish gate', () => {
+    // The publish gate does not check hasSourceForClaim — it checks
+    // shield_passed, English, length, Arabic, AI slop.
+    // hasSourceForClaim is used by the numeric claim guard (quality_enhance step)
+    // which runs BEFORE publish_gate.
+    const opp = {
+      type: 'reply',
+      crafted_text: 'Revenue grew 40% last quarter',
+      source_tweet_url: 'https://x.com/user/status/123',
+      shield_passed: true,
+      shield_issues: [],
+    };
+    // publish gate accepts this (shield passed, English, right length)
+    const gate = filterPublishableOpportunities([opp]);
+    expect(gate.accepted.length).toBe(1);
+    // BUT hasSourceForClaim correctly says it's unsourced
+    expect(hasSourceForClaim(opp)).toBe(false);
   });
 });
 
