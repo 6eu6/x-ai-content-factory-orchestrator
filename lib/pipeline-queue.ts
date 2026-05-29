@@ -35,6 +35,52 @@ export function isValidXHandle(handle: string | null | undefined): boolean {
   return trimmed.length > 0 && VALID_X_HANDLE_REGEX.test(trimmed);
 }
 
+/**
+ * Select valid X handles from a list of candidate accounts, filtering out invalid ones
+ * and slicing to the requested accountLimit. Returns both the valid accounts and
+ * the list of excluded invalid handles.
+ *
+ * This function is extracted for testability — it is the core of the account selection
+ * logic used in createPipelineTasks after the Supabase fetch.
+ */
+export function selectValidAccounts(
+  candidates: { handle: string }[],
+  accountLimit: number,
+  fallbackUsername?: string
+): { validAccounts: { handle: string }[]; excludedInvalidHandles: string[] } {
+  const excludedInvalidHandles: string[] = [];
+  const filtered = candidates.filter(account => {
+    const handle = account.handle?.trim();
+    if (!handle || !isValidXHandle(handle)) {
+      excludedInvalidHandles.push(account.handle);
+      return false;
+    }
+    return true;
+  });
+
+  // Slice to accountLimit
+  const validAccounts = filtered.slice(0, accountLimit);
+
+  // If no valid accounts, fall back to username only if it's valid
+  if (validAccounts.length === 0 && fallbackUsername) {
+    if (isValidXHandle(fallbackUsername)) {
+      return { validAccounts: [{ handle: fallbackUsername }], excludedInvalidHandles };
+    }
+    // Both accounts and username are invalid — return empty, no scan_account tasks
+  }
+
+  return { validAccounts, excludedInvalidHandles };
+}
+
+/**
+ * Calculate the fetch limit for account queries. Fetches more rows than accountLimit
+ * to ensure invalid handles don't consume the limit.
+ * Formula: min(max(accountLimit * 4, accountLimit + 10), 100)
+ */
+export function calculateFetchLimit(accountLimit: number): number {
+  return Math.min(Math.max(accountLimit * 4, accountLimit + 10), 100);
+}
+
 export type EnqueuePipelineRunOptions = {
   source?: string;
   accountLimit?: number;
@@ -202,7 +248,7 @@ export async function enqueuePipelineRun(options: EnqueuePipelineRunOptions = {}
     .eq('id', runId);
 
   // Create all pipeline tasks
-  const taskCount = await createPipelineTasks(runId, {
+  const createResult = await createPipelineTasks(runId, {
     accountLimit,
     tweetsPerAccount,
     notifyTelegram,
@@ -213,15 +259,16 @@ export async function enqueuePipelineRun(options: EnqueuePipelineRunOptions = {}
   // Update run with total_tasks
   await supabase
     .from('pipeline_runs')
-    .update({ total_tasks: taskCount, updated_at: new Date().toISOString() })
+    .update({ total_tasks: createResult.task_count, updated_at: new Date().toISOString() })
     .eq('id', runId);
 
   return {
     ok: true,
     run_id: runId,
     status: 'queued',
-    task_count: taskCount,
-    message: `Pipeline run enqueued with ${taskCount} tasks`
+    task_count: createResult.task_count,
+    message: `Pipeline run enqueued with ${createResult.task_count} tasks`,
+    ...(createResult.excluded_invalid_handles.length > 0 ? { excluded_invalid_handles: createResult.excluded_invalid_handles } : {})
   };
 }
 
@@ -242,8 +289,14 @@ export async function enqueuePipelineRun(options: EnqueuePipelineRunOptions = {}
  *  10. persist_decision (global, step 90)
  *  11. telegram_delivery (global, step 100)
  *
- * Returns the number of tasks created.
+ * Returns { task_count, excluded_invalid_handles } with the number of tasks created
+ * and any invalid handles that were filtered out.
  */
+export type CreatePipelineTasksResult = {
+  task_count: number;
+  excluded_invalid_handles: string[];
+};
+
 export async function createPipelineTasks(
   runId: string,
   options: {
@@ -253,48 +306,41 @@ export async function createPipelineTasks(
     username: string;
     source: string;
   }
-): Promise<number> {
+): Promise<CreatePipelineTasksResult> {
   const supabase = supabaseAdmin();
 
-  // Fetch accounts that will be scanned
-  let accounts: { handle: string }[] = [];
+  // Fetch more candidate rows than accountLimit so invalid handles don't consume the limit.
+  // Invalid handles (Arabic, emoji, UI labels) often have last_checked=null, so they appear
+  // early in the sort order. Without over-fetching, they'd steal slots from valid accounts.
+  const fetchLimit = calculateFetchLimit(options.accountLimit);
+
+  // Fetch candidate accounts that will be scanned
+  let candidates: { handle: string }[] = [];
   try {
     const { data, error } = await supabase
       .from('accounts')
       .select('handle')
       .order('last_checked', { ascending: true, nullsFirst: true })
       .order('tier', { ascending: true })
-      .limit(options.accountLimit);
+      .limit(fetchLimit);
 
     if (!error && data?.length) {
-      accounts = data;
+      candidates = data;
     }
   } catch {}
 
-  // Bug #3 fix: Filter out invalid X handles before creating scan_account tasks.
-  // Valid X handle pattern: 1-15 chars, only A-Za-z0-9_
-  // Exclude Arabic text, emoji, labels, UI strings, URLs, empty handles, spaces/symbols
-  const excludedInvalidHandles: string[] = [];
-  const validAccounts = accounts.filter(account => {
-    const handle = account.handle?.trim();
-    if (!handle || !isValidXHandle(handle)) {
-      excludedInvalidHandles.push(account.handle);
-      return false;
-    }
-    return true;
-  });
+  // Filter, validate, and slice accounts using the extracted logic
+  const { validAccounts, excludedInvalidHandles } = selectValidAccounts(
+    candidates,
+    options.accountLimit,
+    options.username
+  );
 
   if (excludedInvalidHandles.length > 0) {
     console.warn(`[pipeline-queue] Excluded ${excludedInvalidHandles.length} invalid X handles from scan: ${excludedInvalidHandles.slice(0, 5).map(h => JSON.stringify(h)).join(', ')}`);
   }
 
-  // Replace accounts with only valid ones
-  accounts = validAccounts;
-
-  // If no accounts found, still create global tasks (they will detect no accounts and handle gracefully)
-  if (!accounts.length) {
-    accounts = [{ handle: options.username }];
-  }
+  const accounts = validAccounts;
 
   const tasks: Record<string, any>[] = [];
   let stepOrder = 10;
@@ -308,7 +354,9 @@ export async function createPipelineTasks(
     account_handle: options.username,
     payload: {
       username: options.username,
-      source: options.source
+      source: options.source,
+      ...(excludedInvalidHandles.length > 0 ? { excluded_invalid_handles: excludedInvalidHandles } : {}),
+      scan_account_count: accounts.length
     }
   });
   stepOrder += 10;
@@ -452,14 +500,14 @@ export async function createPipelineTasks(
 
     if (error) {
       console.error('[pipeline-queue] createPipelineTasks insert error:', error.message);
-      return 0;
+      return { task_count: 0, excluded_invalid_handles: excludedInvalidHandles };
     }
   } catch (err: any) {
     console.error('[pipeline-queue] createPipelineTasks exception:', err.message);
-    return 0;
+    return { task_count: 0, excluded_invalid_handles: excludedInvalidHandles };
   }
 
-  return tasks.length;
+  return { task_count: tasks.length, excluded_invalid_handles: excludedInvalidHandles };
 }
 
 // ═══ 3. getActivePipelineRun ═══
@@ -775,13 +823,15 @@ async function areGlobalPrerequisitesMet(runId: string, taskType: string): Promi
 
     // All scan_account tasks must be completed (or failed/cancelled) before global steps
     const scanTasks = tasks.filter((t: any) => t.task_type === 'scan_account');
-    if (scanTasks.length === 0) return false;  // No scan tasks created yet
-
-    const allScansDone = scanTasks.every((t: any) =>
-      ['completed', 'failed', 'cancelled'].includes(t.status)
-    );
-
-    if (!allScansDone) return false;
+    if (scanTasks.length === 0) {
+      // No scan tasks exist in this run. This is valid when all account handles were invalid.
+      // Allow global tasks to proceed — merge and downstream will handle zero scan results gracefully.
+    } else {
+      const allScansDone = scanTasks.every((t: any) =>
+        ['completed', 'failed', 'cancelled'].includes(t.status)
+      );
+      if (!allScansDone) return false;
+    }
 
     // For tasks after merge, check merge is done
     if (['opportunity_intelligence', 'enrich_opportunities', 'quality_enhance', 'opportunity_judge', 'publish_gate', 'decision', 'persist_decision', 'telegram_delivery'].includes(taskType)) {

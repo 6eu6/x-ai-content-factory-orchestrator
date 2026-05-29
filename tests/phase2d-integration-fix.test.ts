@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { isValidXHandle, VALID_X_HANDLE_REGEX } from '../lib/pipeline-queue';
+import { isValidXHandle, VALID_X_HANDLE_REGEX, selectValidAccounts, calculateFetchLimit } from '../lib/pipeline-queue';
 import { quickJudgeCheck } from '../lib/opportunity-judge';
 
 // ═══ Bug #1: Intelligence task exists with _opportunities=[] → enrich returns zero, does NOT read merge ═══
@@ -244,11 +244,145 @@ describe('Bug #4: Judge JSON parse hardening', () => {
   });
 });
 
+// ═══ Account Selection Fix: Invalid handles before valid handles do not reduce scan count ═══
+
+describe('Account Selection Fix: invalid handles do not consume accountLimit', () => {
+  // Test 1: invalid handles before valid handles do not reduce scan count if enough valid accounts exist
+  it('invalid handles before valid handles do not reduce scan count if enough valid accounts exist', () => {
+    // Simulate: 3 invalid handles at the top (last_checked=null), then 10 valid handles
+    const candidates = [
+      { handle: '📋' },
+      { handle: 'قائمة' },
+      { handle: 'الحسابات' },
+      ...Array.from({ length: 10 }, (_, i) => ({ handle: `valid_user_${i}` })),
+    ];
+    const accountLimit = 10;
+
+    const result = selectValidAccounts(candidates, accountLimit, 'fallback_user');
+
+    // All 10 valid handles should be selected; 3 invalid excluded
+    expect(result.validAccounts.length).toBe(10);
+    expect(result.excludedInvalidHandles.length).toBe(3);
+    expect(result.validAccounts[0].handle).toBe('valid_user_0');
+  });
+
+  // Test 2: accountLimit=10 with 3 invalid + 10 valid creates 10 scan_account tasks
+  it('accountLimit=10 with 3 invalid + 10 valid creates 10 valid accounts (not 7)', () => {
+    const candidates = [
+      { handle: '📋' },
+      { handle: 'قائمة' },
+      { handle: 'الحسابات' },
+      ...Array.from({ length: 10 }, (_, i) => ({ handle: `user${i}` })),
+    ];
+    const accountLimit = 10;
+
+    const result = selectValidAccounts(candidates, accountLimit, '30piq');
+
+    // Previously this would have returned 7 (10 - 3 invalid consumed slots)
+    // Now it returns 10 because we filter first, then slice
+    expect(result.validAccounts.length).toBe(10);
+    expect(result.excludedInvalidHandles).toEqual(['📋', 'قائمة', 'الحسابات']);
+  });
+
+  // Test 3: all invalid accounts + valid username creates one username scan task
+  it('all invalid accounts + valid username creates one username fallback scan', () => {
+    const candidates = [
+      { handle: '📋' },
+      { handle: 'قائمة' },
+      { handle: 'الحسابات' },
+    ];
+    const accountLimit = 10;
+
+    const result = selectValidAccounts(candidates, accountLimit, '30piq');
+
+    // Falls back to valid username
+    expect(result.validAccounts.length).toBe(1);
+    expect(result.validAccounts[0].handle).toBe('30piq');
+    expect(result.excludedInvalidHandles.length).toBe(3);
+  });
+
+  // Test 4: all invalid accounts + invalid username creates no scan_account tasks
+  it('all invalid accounts + invalid username creates no scan tasks and no invalid handles', () => {
+    const candidates = [
+      { handle: '📋' },
+      { handle: 'قائمة' },
+      { handle: 'الحسابات' },
+    ];
+    const accountLimit = 10;
+
+    // Arabic username is also invalid
+    const result = selectValidAccounts(candidates, accountLimit, 'الحسابات');
+
+    // No valid accounts and invalid username → empty result
+    expect(result.validAccounts.length).toBe(0);
+    expect(result.excludedInvalidHandles.length).toBe(3);
+    // No scan_account task should be created with an invalid handle
+  });
+
+  // Test 5: valid handles remain accepted
+  it('valid handles remain accepted through selectValidAccounts', () => {
+    const candidates = [
+      { handle: '30piq' },
+      { handle: 'elonmusk' },
+      { handle: '_ABC_' },
+      { handle: 'user_name_99' },
+      { handle: 'a' },
+    ];
+    const accountLimit = 10;
+
+    const result = selectValidAccounts(candidates, accountLimit);
+
+    expect(result.validAccounts.length).toBe(5);
+    expect(result.excludedInvalidHandles.length).toBe(0);
+  });
+
+  // Test 6: Arabic/emoji/UI labels remain rejected by selectValidAccounts
+  it('Arabic/emoji/UI labels remain rejected by selectValidAccounts', () => {
+    const candidates = [
+      { handle: 'الحسابات' },
+      { handle: '📋' },
+      { handle: 'قائمة' },
+      { handle: 'hello🎉' },
+      { handle: 'has space' },
+      { handle: 'has-dash' },
+      { handle: 'https://x.com/user' },
+      { handle: 'a_very_long_handle_name' },
+      { handle: '' },
+      { handle: 'validuser' },
+    ];
+    const accountLimit = 10;
+
+    const result = selectValidAccounts(candidates, accountLimit);
+
+    // Only 'validuser' passes
+    expect(result.validAccounts.length).toBe(1);
+    expect(result.validAccounts[0].handle).toBe('validuser');
+    expect(result.excludedInvalidHandles.length).toBe(9);
+  });
+
+  // Test 7: calculateFetchLimit produces expected over-fetch
+  it('calculateFetchLimit produces expected over-fetch values', () => {
+    // accountLimit=10 → max(40, 20) = 40, min(40, 100) = 40
+    expect(calculateFetchLimit(10)).toBe(40);
+
+    // accountLimit=1 → max(4, 11) = 11, min(11, 100) = 11
+    expect(calculateFetchLimit(1)).toBe(11);
+
+    // accountLimit=30 → max(120, 40) = 120, min(120, 100) = 100
+    expect(calculateFetchLimit(30)).toBe(100);
+
+    // accountLimit=25 → max(100, 35) = 100, min(100, 100) = 100
+    expect(calculateFetchLimit(25)).toBe(100);
+  });
+});
+
 // ═══ Build and test pass ═══
 
 describe('Phase 2D integration fix: build/test pass', () => {
   it('all validation functions are importable', () => {
     expect(typeof isValidXHandle).toBe('function');
     expect(typeof quickJudgeCheck).toBe('function');
+    expect(typeof selectValidAccounts).toBe('function');
+    expect(typeof calculateFetchLimit).toBe('function');
   });
 });
