@@ -22,6 +22,8 @@
  * - Apply hard rejection rules after AI evaluation
  * - Produce structured OpportunityBriefs with content guidance
  * - Track summary statistics for the pipeline
+ * - Try to find legitimate adjacent angles before rejecting
+ * - Provide precise rejection reasons (not vague weak_source catch-all)
  */
 
 import { callModel, parseModelJson, TaskType } from './model-router';
@@ -58,6 +60,17 @@ export type OpportunityBrief = {
   rejection_reason?: string;
 };
 
+export type RejectionDebug = {
+  source_author: string;
+  source_text_preview: string;
+  rejection_reason: string;
+  publishability_score: number;
+  originality_potential_score: number;
+  usefulness_score: number;
+  niche_fit_score: number;
+  recommended_angle: string;
+};
+
 export type IntelligenceSummary = {
   raw_opportunity_count: number;
   intelligence_evaluated_count: number;
@@ -67,6 +80,7 @@ export type IntelligenceSummary = {
   top_rejection_reasons: Record<string, number>;
   avg_publishability_score: number;
   avg_originality_potential_score: number;
+  sampled_rejection_debug: RejectionDebug[];
 };
 
 // ═══ Niche Model Constants ═══
@@ -99,11 +113,16 @@ const ALLOWED_TOPICS = [
 /**
  * Adjacent topics — allowed ONLY when they support a specific
  * @30piq-relevant angle. Pure adjacent-topic content is rejected.
+ *
+ * Expanded: also covers tool adoption, product/UX behavior,
+ * work leverage, storytelling mechanics, and distribution.
  */
 const ALLOWED_ADJACENT_TOPICS: Record<string, string> = {
   'entertainment': 'only if supports audience, brand, storytelling, attention economy, creative strategy, or internet culture insight',
   'sports/boxing': 'only if supports personal brand, leverage, distribution, incentives, or attention economy',
   'anime/comics/movies': 'only if supports storytelling, fandom, audience retention, brand symbols, or creator strategy',
+  'internet trends': 'only if supports audience behavior, attention economy, distribution, or internet culture insight',
+  'social media behavior': 'only if supports audience retention, attention economy, creator strategy, or distribution',
 };
 
 /**
@@ -171,6 +190,14 @@ const ALLOWED_TOPIC_PATTERNS = [
   { pattern: /\b(content strategy|distribution|audience|followers|growth)\b/i, topic: 'creator economy' },
   { pattern: /\b(creator|influencer|monetiz|newsletter|podcast)\b/i, topic: 'creator economy' },
   { pattern: /\b(tech culture|silicon valley|tech bubble|hype cycle)\b/i, topic: 'tech culture' },
+
+  // Expanded: tool adoption / product/UX behavior / work leverage
+  { pattern: /\b(tool adoption|adopt.*tool|switch.*tool|try.*tool|tool.*stack|stack.*tool)\b/i, topic: 'software/product workflows' },
+  { pattern: /\b(UX|user experience|user behavior|product behavior|product design|interface)\b/i, topic: 'software/product workflows' },
+  { pattern: /\b(work leverage|work.*leverag|leverage.*work|output.*input|ROI|return on)\b/i, topic: 'personal leverage' },
+  { pattern: /\b(storytelling|narrative|story structure|story arc|plot|hook|cliffhanger)\b/i, topic: 'creator economy' },
+  { pattern: /\b(personal brand|brand.*build|brand.*strategy|positioning|niche down)\b/i, topic: 'creator economy' },
+  { pattern: /\b(distribution|reach|amplif|shareability|word of mouth|referral)\b/i, topic: 'creator economy' },
 ];
 
 /**
@@ -194,6 +221,7 @@ const BLOCKED_TOPIC_PATTERNS = [
 
 /**
  * Adjacent topic patterns — allowed ONLY with a legitimate angle.
+ * Expanded: also covers internet trends and social media behavior.
  */
 const ADJACENT_TOPIC_PATTERNS = [
   {
@@ -211,13 +239,77 @@ const ADJACENT_TOPIC_PATTERNS = [
     topic: 'anime/comics/movies',
     requiredAngle: 'storytelling, fandom, audience retention, brand symbols, or creator strategy',
   },
+  {
+    pattern: /\b(trending|viral trend|internet trend|tiktok trend|social media trend|meme culture|internet phenomenon)\b/i,
+    topic: 'internet trends',
+    requiredAngle: 'audience behavior, attention economy, distribution, or internet culture insight',
+  },
+  {
+    pattern: /\b(social media|Twitter|X platform|Instagram|TikTok|YouTube|Reddit|LinkedIn)\b/i,
+    topic: 'social media behavior',
+    requiredAngle: 'audience retention, attention economy, creator strategy, or distribution',
+  },
 ];
 
 // ═══ Hard Rule Thresholds ═══
 
+/**
+ * publishability_score threshold for initial selection.
+ * Lowered from 7.5 to 7.0 IF originality_potential >= 7.5 and niche_fit >= 5.
+ * This allows genuinely original, on-niche opportunities that the AI scored
+ * slightly lower on publishability to still get crafted.
+ */
 const MIN_PUBLISHABILITY_SCORE = 7.5;
+const MIN_PUBLISHABILITY_SCORE_WITH_STRONG_ORIGINALITY = 7.0;
+const MIN_ORIGINALITY_FOR_PUBLISHABILITY_RELAXATION = 7.5;
+
 const MIN_ORIGINALITY_POTENTIAL_SCORE = 7;
 const MIN_NICHE_FIT_SCORE = 5;
+const MIN_USEFULNESS_SCORE = 6;
+
+/**
+ * If viral_context_score >= 8 and recommended_angle is strong (length >= 30),
+ * usefulness can go as low as 5 instead of 6.
+ */
+const MIN_USEFULNESS_WITH_STRONG_VIRAL = 5;
+const STRONG_VIRAL_CONTEXT_THRESHOLD = 8;
+const STRONG_ANGLE_LENGTH_THRESHOLD = 30;
+
+// ═══ Canonical Rejection Reasons ═══
+
+/**
+ * Canonical rejection reasons — used for diagnostics and tracking.
+ *
+ * weak_source is reserved for truly empty/low-signal sources only.
+ * It should NOT be used as a catch-all fallback.
+ */
+export const CANONICAL_REJECTION_REASONS = [
+  'blocked_topic',
+  'low_originality_potential',
+  'low_niche_fit',
+  'low_usefulness',
+  'unsupported_claim_risk',
+  'generic_only',
+  'no_clear_angle',
+  'language_or_context_mismatch',
+  'insufficient_context',
+  'weak_source',
+] as const;
+
+export type CanonicalRejectionReason = typeof CANONICAL_REJECTION_REASONS[number];
+
+// ═══ Language Detection ═══
+
+/**
+ * Detect if text is primarily Arabic or other non-Latin script
+ * that indicates a language/context mismatch for @30piq's audience.
+ */
+export function isNonLatinDominant(text: string): boolean {
+  if (!text || text.length < 5) return false;
+  const nonLatin = text.replace(/[A-Za-z0-9\s@#.,!?:;'"()\-_/\\&%$+=\[\]{}|<>~`]/g, '');
+  // If more than 40% of characters are non-Latin, consider it non-Latin dominant
+  return nonLatin.length / text.length > 0.4;
+}
 
 // ═══ Pure Heuristic Functions ═══
 
@@ -284,6 +376,8 @@ export function quickNicheFitScore(text: string): {
       /\b(fandom|retention|creator strategy|audience retention|brand symbols)\b/i,
       /\b(creator|content strategy|monetiz|growth|distribution|audience)\b/i,
       /\b(marketing|positioning|niche|differentiation)\b/i,
+      /\b(behavior|psychology|habit|pattern|trend|signal)\b/i,
+      /\b(strategy|system|framework|method|approach)\b/i,
     ];
     return angleSignals.some(signal => signal.test(text));
   });
@@ -351,12 +445,34 @@ export function quickNicheFitScore(text: string): {
  *
  * Priority order matters: more specific reasons first.
  * Returns one of the canonical rejection reason strings.
+ *
+ * IMPORTANT: weak_source is reserved for truly empty/low-signal sources.
+ * It should NOT be used as a catch-all fallback.
  */
 export function determineRejectionReason(brief: OpportunityBrief): string {
   // Check blocked topic first (most severe)
   const heuristic = quickNicheFitScore(brief.source_text);
-  if (heuristic.blocked) {
+  if (heuristic.blocked && !heuristic.adjacent_with_angle) {
     return 'blocked_topic';
+  }
+
+  // Language or context mismatch — text is primarily non-Latin script
+  // (Arabic, etc.) which doesn't match @30piq's English-language audience
+  if (isNonLatinDominant(brief.source_text)) {
+    return 'language_or_context_mismatch';
+  }
+
+  // Weak source — reserved for truly empty/low-signal sources ONLY.
+  // This means the source has almost no substantive content.
+  // Check early, before other reasons, since a truly empty source
+  // shouldn't get a more specific reason.
+  if (brief.source_text.length < 15) {
+    return 'weak_source';
+  }
+
+  // Insufficient context — source is too short or vague to craft from
+  if (brief.source_text.length < 30 && brief.core_observation.length < 15) {
+    return 'insufficient_context';
   }
 
   // Low originality potential
@@ -367,6 +483,12 @@ export function determineRejectionReason(brief: OpportunityBrief): string {
   // Low niche fit (and no legitimate adjacent angle)
   if (brief.niche_fit_score < MIN_NICHE_FIT_SCORE && !heuristic.adjacent_with_angle) {
     return 'low_niche_fit';
+  }
+
+  // Low usefulness — the content wouldn't be actionable or specific enough
+  if (brief.usefulness_score < MIN_USEFULNESS_SCORE &&
+      !(brief.viral_context_score >= STRONG_VIRAL_CONTEXT_THRESHOLD && brief.recommended_angle.length >= STRONG_ANGLE_LENGTH_THRESHOLD)) {
+    return 'low_usefulness';
   }
 
   // Unsupported claims
@@ -383,18 +505,53 @@ export function determineRejectionReason(brief: OpportunityBrief): string {
     return 'generic_only';
   }
 
-  // No clear angle
+  // No clear angle — the AI couldn't produce a specific angle
   if (!brief.recommended_angle || brief.recommended_angle.trim().length < 10) {
     return 'no_clear_angle';
   }
 
-  // Weak source
-  if (brief.publishability_score < MIN_PUBLISHABILITY_SCORE && brief.core_observation.length < 20) {
-    return 'weak_source';
+  // Default fallback: low_niche_fit (not weak_source)
+  return 'low_niche_fit';
+}
+
+// ═══ Adjacent Angle Discovery ═══
+
+/**
+ * Angle keywords for the "candidate but needs angle" middle path.
+ * If a source has engagement signals but no direct AI angle,
+ * check if one of these legitimate adjacent angles can be applied.
+ */
+const ADJACENT_ANGLE_KEYWORDS: Array<{ keywords: RegExp; angle: string }> = [
+  { keywords: /\b(creator|influencer|content creator|YouTuber|streamer)\b/i, angle: 'creator strategy — how creators build and retain audiences' },
+  { keywords: /\b(brand|personal brand|rebrand|image)\b/i, angle: 'personal brand — the intentional positioning behind public perception' },
+  { keywords: /\b(story|narrative|arc|character|plot|hook)\b/i, angle: 'storytelling mechanics — the narrative structures that drive engagement' },
+  { keywords: /\b(algorithm|feed|timeline|recommendation|For You)\b/i, angle: 'distribution — how platform algorithms shape what people see' },
+  { keywords: /\b(app|tool|platform|feature|update|launch|release)\b/i, angle: 'tool adoption — what the adoption pattern reveals about user behavior' },
+  { keywords: /\b(habit|routine|workflow|practice|system|process)\b/i, angle: 'work leverage — how systematic approaches create compounding returns' },
+  { keywords: /\b(learn|course|teach|tutorial|skill|master|practice)\b/i, angle: 'learning systems — the methodology behind effective skill acquisition' },
+  { keywords: /\b(price|cost|pay|revenue|income|profit|monetiz|business model)\b/i, angle: 'online business — the economic model and incentive structure' },
+  { keywords: /\b(viral|trending|going viral|blew up|blew up on|took off)\b/i, angle: 'attention economy — why this captured attention and what it reveals about audience behavior' },
+  { keywords: /\b(million|billions?|views?|followers?|subscribers?|downloads?)\b/i, angle: 'distribution — the mechanics of how content reaches massive audiences' },
+];
+
+/**
+ * Try to discover a legitimate adjacent angle for a source that
+ * doesn't have a direct AI/productivity angle but has engagement
+ * or behavioral signals.
+ *
+ * Returns the angle string if found, or null if no honest angle exists.
+ * The angle must be HONEST and SUPPORTED by the source text.
+ */
+export function discoverAdjacentAngle(sourceText: string): string | null {
+  if (!sourceText || sourceText.length < 30) return null;
+
+  for (const { keywords, angle } of ADJACENT_ANGLE_KEYWORDS) {
+    if (keywords.test(sourceText)) {
+      return angle;
+    }
   }
 
-  // Default fallback
-  return 'low_niche_fit';
+  return null;
 }
 
 // ═══ AI-Powered Evaluation ═══
@@ -402,6 +559,10 @@ export function determineRejectionReason(brief: OpportunityBrief): string {
 /**
  * Build the system prompt for opportunity intelligence evaluation.
  * Includes all niche model rules so the AI can make informed decisions.
+ *
+ * Key change: The prompt now instructs the AI to look for adjacent angles
+ * before rejecting, and to score publishability more generously for
+ * sources with strong originality or engagement signals.
  */
 function buildIntelligenceSystemPrompt(): string {
   const allowedTopicsStr = ALLOWED_TOPICS.map(t => `- ${t}`).join('\n');
@@ -412,7 +573,7 @@ function buildIntelligenceSystemPrompt(): string {
 
   return `You are an Opportunity Intelligence Analyst for @30piq, an X account focused on AI, creators, internet culture, productivity, skills, and modern work.
 
-Your job: Evaluate a raw opportunity and produce a structured "Opportunity Brief" as JSON. You must be ruthlessly honest — most opportunities do NOT deserve content.
+Your job: Evaluate a raw opportunity and produce a structured "Opportunity Brief" as JSON. Be honest but not overly strict — aim to select 2-5 genuinely promising opportunities from every 10-20 raw opportunities.
 
 ═══ NICHE MODEL RULES ═══
 
@@ -431,26 +592,38 @@ ${blockedTopicsStr}
 
 2. ORIGINALITY POTENTIAL: Score 1-10 how much original insight @30piq could add. If the only possible response is "nice" or generic agreement, score 1-3. If there's a unique angle, counterintuitive take, or specific expertise to share, score 7-10.
 
-3. USEFULNESS: Score 1-10 how useful the resulting content would be for @30piq's audience (builders, operators, creators, tech professionals). Actionable + specific = high. Vague + generic = low.
+3. USEFULNESS: Score 1-10 how useful the resulting content would be for @30piq's audience (builders, operators, creators, tech professionals). Actionable + specific = high. Vague + generic = low. A useful observation about internet behavior or audience patterns scores at least 6.
 
 4. EVIDENCE RISK: Score 1-10 (higher = safer) how risky the claims would be. If the source makes unsourced claims that @30piq would need to repeat or endorse, score low. If the claims are self-evident or well-sourced, score high.
 
 5. VIRAL CONTEXT: Score 1-10 the viral potential of the source conversation. High engagement + ongoing discussion = high. Dead conversation = low.
 
-6. PUBLISHABILITY: Score 1-10 the overall likelihood that content crafted from this opportunity would pass all quality gates and be worth publishing. This is your composite judgment.
+6. PUBLISHABILITY: Score 1-10 the overall likelihood that content crafted from this opportunity would pass all quality gates and be worth publishing. This is your composite judgment. IMPORTANT: If originality_potential >= 7.5 and niche_fit >= 5, a publishability score of 7.0 is acceptable (do not default-reject at 7.0). Score 7.0+ for opportunities with a clear, specific, honest angle.
 
-7. If the source does not support a useful angle for the @30piq niche, reject it early. Do NOT force a fake AI angle.
+7. If the source does not support a useful angle for the @30piq niche, reject it. Do NOT force a fake AI angle. BUT: if the source has engagement, behavioral, or internet-culture signals, try to find a legitimate adjacent angle (attention economy, creator strategy, distribution, audience behavior, storytelling mechanics, personal brand, work leverage) BEFORE rejecting.
 
 8. The "do_not_claim" field should list specific claims from the source that @30piq should NOT repeat (unsourced stats, controversial opinions, unverified claims).
 
 9. The "required_context" field should list context that MUST be included for the content to be honest and useful.
 
-10. The "recommended_angle" must be specific and actionable — not "share a thought" or "add perspective". It should describe the EXACT angle @30piq would take.
+10. The "recommended_angle" must be specific and actionable — not "share a thought" or "add perspective". It should describe the EXACT angle @30piq would take. If you can find a legitimate adjacent angle, put it here.
 
 11. "content_format" should be:
     - "reply" if responding directly to the source tweet
     - "quote" if quote-tweeting with added commentary
     - "standalone" if the idea can stand on its own without referencing the source
+
+12. REJECTION REASONS — use ONLY these specific reasons (do NOT use "weak_source" as a catch-all):
+    - "blocked_topic" — content is in the blocked list
+    - "low_originality_potential" — no original insight possible
+    - "low_niche_fit" — does not fit the niche even with adjacent angle
+    - "low_usefulness" — content would not be useful to the audience
+    - "unsupported_claim_risk" — would require repeating unsourced claims
+    - "generic_only" — only generic commentary possible
+    - "no_clear_angle" — no specific, actionable angle exists
+    - "language_or_context_mismatch" — source language doesn't match audience
+    - "insufficient_context" — source is too short or vague
+    - "weak_source" — ONLY for truly empty/low-signal sources (< 15 chars)
 
 ═══ OUTPUT FORMAT ═══
 
@@ -483,8 +656,11 @@ Return valid JSON only:
  *
  * After AI evaluation, hard rules are applied:
  * - should_craft = false if publishability_score < 7.5
+ *   (EXCEPT: >= 7.0 if originality_potential >= 7.5 and niche_fit >= 5)
  * - should_craft = false if originality_potential_score < 7
  * - should_craft = false if niche_fit_score < 5 unless adjacent_with_angle
+ * - should_craft = false if usefulness_score < 6
+ *   (EXCEPT: >= 5 if viral_context_score >= 8 and recommended_angle is strong)
  * - should_craft = false if the opportunity requires unsupported claims
  * - should_craft = false if the only possible output is generic commentary
  *
@@ -522,6 +698,33 @@ export async function evaluateOpportunity(opp: Record<string, any>): Promise<Opp
       required_context: [],
       should_craft: false,
       rejection_reason: 'blocked_topic',
+    };
+  }
+
+  // Language mismatch pre-flight: if source is primarily non-Latin script,
+  // short-circuit with language_or_context_mismatch (no AI call needed)
+  if (isNonLatinDominant(sourceText) && heuristic.matched_topics.length === 0) {
+    return {
+      source_summary: `Non-Latin dominant source: ${sourceText.slice(0, 100)}`,
+      source_text: sourceText,
+      source_author: sourceAuthor,
+      source_tweet_url: sourceTweetUrl,
+      type,
+      core_observation: '',
+      why_it_matters: '',
+      audience_relevance: '',
+      niche_fit_score: Math.max(1, heuristic.score),
+      originality_potential_score: 1,
+      usefulness_score: 1,
+      evidence_risk_score: 10,
+      viral_context_score: 1,
+      publishability_score: 1,
+      recommended_angle: '',
+      content_format: 'reply',
+      do_not_claim: ['Source is in non-Latin script'],
+      required_context: [],
+      should_craft: false,
+      rejection_reason: 'language_or_context_mismatch',
     };
   }
 
@@ -585,10 +788,22 @@ Produce the Opportunity Brief JSON now.`,
     // ═══ Apply hard rules AFTER AI evaluation ═══
     // These cannot be overridden by the AI.
 
-    // Hard rule 1: publishability_score < 7.5 → reject
-    if (brief.publishability_score < MIN_PUBLISHABILITY_SCORE) {
+    // Hard rule 1: publishability_score threshold
+    // Standard: < 7.5 → reject
+    // Relaxed: < 7.0 → reject even with strong originality
+    // Between 7.0-7.4: allowed IF originality_potential >= 7.5 AND niche_fit >= 5
+    if (brief.publishability_score < MIN_PUBLISHABILITY_SCORE_WITH_STRONG_ORIGINALITY) {
+      // Below 7.0 — always reject
       brief.should_craft = false;
       brief.rejection_reason = determineRejectionReason(brief);
+    } else if (brief.publishability_score < MIN_PUBLISHABILITY_SCORE) {
+      // Between 7.0 and 7.4 — allow only with strong originality + niche fit
+      if (brief.originality_potential_score >= MIN_ORIGINALITY_FOR_PUBLISHABILITY_RELAXATION && brief.niche_fit_score >= MIN_NICHE_FIT_SCORE) {
+        // Allow through — the originality and niche fit compensate
+      } else {
+        brief.should_craft = false;
+        brief.rejection_reason = determineRejectionReason(brief);
+      }
     }
 
     // Hard rule 2: originality_potential_score < 7 → reject
@@ -599,17 +814,39 @@ Produce the Opportunity Brief JSON now.`,
 
     // Hard rule 3: niche_fit_score < 5 unless adjacent_with_angle → reject
     if (brief.niche_fit_score < MIN_NICHE_FIT_SCORE && !heuristic.adjacent_with_angle) {
-      brief.should_craft = false;
-      brief.rejection_reason = determineRejectionReason(brief);
+      // Middle path: try to discover an adjacent angle before rejecting
+      const discoveredAngle = discoverAdjacentAngle(sourceText);
+      if (discoveredAngle && brief.recommended_angle.length < 10) {
+        brief.recommended_angle = discoveredAngle;
+        // Don't reject — the discovered angle gives it a niche path
+      } else if (!discoveredAngle) {
+        brief.should_craft = false;
+        brief.rejection_reason = determineRejectionReason(brief);
+      }
+      // If adjacent_with_angle from heuristic OR discovered angle, allow through
     }
 
-    // Hard rule 4: unsupported claims risk → reject
+    // Hard rule 4: usefulness_score threshold
+    // Standard: < 6 → reject
+    // Relaxed: >= 5 if viral_context >= 8 and recommended_angle is strong
+    if (brief.usefulness_score < MIN_USEFULNESS_SCORE) {
+      const hasStrongViralAngle = brief.viral_context_score >= STRONG_VIRAL_CONTEXT_THRESHOLD &&
+        brief.recommended_angle.length >= STRONG_ANGLE_LENGTH_THRESHOLD;
+      if (brief.usefulness_score >= MIN_USEFULNESS_WITH_STRONG_VIRAL && hasStrongViralAngle) {
+        // Allow — viral context + strong angle compensates for lower usefulness
+      } else {
+        brief.should_craft = false;
+        brief.rejection_reason = determineRejectionReason(brief);
+      }
+    }
+
+    // Hard rule 5: unsupported claims risk → reject
     if (brief.evidence_risk_score < 4 && brief.do_not_claim.length >= 2) {
       brief.should_craft = false;
       brief.rejection_reason = 'unsupported_claim_risk';
     }
 
-    // Hard rule 5: generic only → reject
+    // Hard rule 6: generic only → reject
     // The only possible output is generic commentary (no specific angle possible)
     if (
       brief.usefulness_score < 5 &&
@@ -618,6 +855,27 @@ Produce the Opportunity Brief JSON now.`,
     ) {
       brief.should_craft = false;
       brief.rejection_reason = 'generic_only';
+    }
+
+    // Middle path: if still rejected but has engagement signals and no recommended_angle,
+    // try to discover an adjacent angle one more time
+    if (!brief.should_craft &&
+        brief.rejection_reason !== 'blocked_topic' &&
+        brief.rejection_reason !== 'unsupported_claim_risk' &&
+        brief.rejection_reason !== 'language_or_context_mismatch' &&
+        (!brief.recommended_angle || brief.recommended_angle.trim().length < 10) &&
+        brief.viral_context_score >= 5) {
+      const discoveredAngle = discoverAdjacentAngle(sourceText);
+      if (discoveredAngle) {
+        brief.recommended_angle = discoveredAngle;
+        // Re-evaluate: does the discovered angle change the decision?
+        if (brief.originality_potential_score >= MIN_ORIGINALITY_POTENTIAL_SCORE &&
+            brief.publishability_score >= MIN_PUBLISHABILITY_SCORE_WITH_STRONG_ORIGINALITY &&
+            brief.niche_fit_score >= MIN_NICHE_FIT_SCORE) {
+          brief.should_craft = true;
+          brief.rejection_reason = undefined;
+        }
+      }
     }
 
     return brief;
@@ -647,7 +905,7 @@ Produce the Opportunity Brief JSON now.`,
       do_not_claim: [],
       required_context: [],
       should_craft: false,
-      rejection_reason: 'weak_source',
+      rejection_reason: 'insufficient_context',
     };
   }
 }
@@ -676,6 +934,7 @@ export async function evaluateOpportunities(
         top_rejection_reasons: {},
         avg_publishability_score: 0,
         avg_originality_potential_score: 0,
+        sampled_rejection_debug: [],
       },
     };
   }
@@ -722,6 +981,19 @@ export async function evaluateOpportunities(
     topRejectionReasons[reason] = count;
   }
 
+  // Sampled rejection debug: top 3 rejected items for future audits
+  const rejectedBriefs = briefs.filter(b => !b.should_craft);
+  const sampledRejectionDebug: RejectionDebug[] = rejectedBriefs.slice(0, 3).map(b => ({
+    source_author: b.source_author,
+    source_text_preview: b.source_text.slice(0, 120),
+    rejection_reason: b.rejection_reason || 'unknown',
+    publishability_score: b.publishability_score,
+    originality_potential_score: b.originality_potential_score,
+    usefulness_score: b.usefulness_score,
+    niche_fit_score: b.niche_fit_score,
+    recommended_angle: b.recommended_angle,
+  }));
+
   return {
     briefs,
     summary: {
@@ -733,6 +1005,7 @@ export async function evaluateOpportunities(
       top_rejection_reasons: topRejectionReasons,
       avg_publishability_score: avgPublishability,
       avg_originality_potential_score: avgOriginalityPotential,
+      sampled_rejection_debug: sampledRejectionDebug,
     },
   };
 }

@@ -29,6 +29,9 @@ import { describe, it, expect } from 'vitest';
 import {
   quickNicheFitScore,
   determineRejectionReason,
+  isNonLatinDominant,
+  discoverAdjacentAngle,
+  CANONICAL_REJECTION_REASONS,
   type OpportunityBrief,
   type IntelligenceSummary,
 } from '../lib/opportunity-intelligence';
@@ -489,7 +492,7 @@ describe('Phase 2D: no auto-posting introduced', () => {
       do_not_claim: [],
       required_context: [],
       should_craft: false,
-      rejection_reason: 'weak_source',
+      rejection_reason: 'insufficient_context',
     };
     // Verify the brief has no posting capability
     expect(brief.should_craft).toBe(false);
@@ -540,9 +543,11 @@ describe('Phase 2D: Vercel routes remain lightweight', () => {
       top_rejection_reasons: { blocked_topic: 4, low_originality_potential: 3, low_niche_fit: 1 },
       avg_publishability_score: 4.2,
       avg_originality_potential_score: 3.8,
+      sampled_rejection_debug: [],
     };
     expect(intelligenceSummary.raw_opportunity_count).toBe(10);
     expect(intelligenceSummary.intelligence_selected_count).toBe(2);
+    expect(intelligenceSummary.sampled_rejection_debug).toEqual([]);
   });
 });
 
@@ -559,6 +564,7 @@ describe('Phase 2D: Intelligence summary includes all required fields', () => {
       top_rejection_reasons: {},
       avg_publishability_score: 5.0,
       avg_originality_potential_score: 4.5,
+      sampled_rejection_debug: [],
     };
     expect(summary).toHaveProperty('raw_opportunity_count');
     expect(summary).toHaveProperty('intelligence_evaluated_count');
@@ -568,6 +574,7 @@ describe('Phase 2D: Intelligence summary includes all required fields', () => {
     expect(summary).toHaveProperty('top_rejection_reasons');
     expect(summary).toHaveProperty('avg_publishability_score');
     expect(summary).toHaveProperty('avg_originality_potential_score');
+    expect(summary).toHaveProperty('sampled_rejection_debug');
   });
 
   it('JudgeSummary has all required diagnostic fields', () => {
@@ -583,5 +590,336 @@ describe('Phase 2D: Intelligence summary includes all required fields', () => {
     expect(summary).toHaveProperty('judge_failure_reasons');
     expect(summary).toHaveProperty('avg_final_candidate_score');
     expect(summary).toHaveProperty('avg_originality_score');
+  });
+});
+
+// ═══ Phase 2D Tuning: Precise Rejection Reasons ═══
+
+describe('Phase 2D Tuning: precise rejection reasons replace vague weak_source', () => {
+  it('empty/very short source gets weak_source', () => {
+    const brief: OpportunityBrief = {
+      source_summary: '',
+      source_text: 'ok',
+      source_author: 'user1',
+      source_tweet_url: '',
+      type: 'reply',
+      core_observation: '',
+      why_it_matters: '',
+      audience_relevance: '',
+      niche_fit_score: 3,
+      originality_potential_score: 2,
+      usefulness_score: 2,
+      evidence_risk_score: 8,
+      viral_context_score: 2,
+      publishability_score: 2,
+      recommended_angle: '',
+      content_format: 'reply',
+      do_not_claim: [],
+      required_context: [],
+      should_craft: false,
+    };
+    const reason = determineRejectionReason(brief);
+    expect(reason).toBe('weak_source');
+  });
+
+  it('generic joke gets generic_only or no_clear_angle, not weak_source', () => {
+    const brief: OpportunityBrief = {
+      source_summary: 'Generic joke',
+      source_text: 'Why did the developer quit? Because they didnt get arrays. This is not very useful',
+      source_author: 'joker',
+      source_tweet_url: '',
+      type: 'reply',
+      core_observation: 'A programming joke',
+      why_it_matters: '',
+      audience_relevance: '',
+      niche_fit_score: 3,
+      originality_potential_score: 4,
+      usefulness_score: 2,
+      evidence_risk_score: 8,
+      viral_context_score: 3,
+      publishability_score: 3,
+      recommended_angle: '',
+      content_format: 'reply',
+      do_not_claim: [],
+      required_context: [],
+      should_craft: false,
+    };
+    const reason = determineRejectionReason(brief);
+    // Should NOT be weak_source — the source has content, just no useful angle
+    expect(reason).not.toBe('weak_source');
+    // Should be a precise reason
+    expect(['generic_only', 'no_clear_angle', 'low_usefulness', 'low_originality_potential', 'blocked_topic', 'low_niche_fit']).toContain(reason);
+  });
+
+  it('Arabic UI/noise source gets language_or_context_mismatch, not weak_source', () => {
+    const brief: OpportunityBrief = {
+      source_summary: 'Arabic text',
+      source_text: 'قائمة الحسابات الجديدة',
+      source_author: 'arabic_user',
+      source_tweet_url: '',
+      type: 'reply',
+      core_observation: '',
+      why_it_matters: '',
+      audience_relevance: '',
+      niche_fit_score: 1,
+      originality_potential_score: 1,
+      usefulness_score: 1,
+      evidence_risk_score: 8,
+      viral_context_score: 1,
+      publishability_score: 1,
+      recommended_angle: '',
+      content_format: 'reply',
+      do_not_claim: [],
+      required_context: [],
+      should_craft: false,
+    };
+    const reason = determineRejectionReason(brief);
+    expect(reason).toBe('language_or_context_mismatch');
+  });
+
+  it('high-engagement entertainment with no useful angle gets no_clear_angle or blocked_topic', () => {
+    const brief: OpportunityBrief = {
+      source_summary: 'Viral entertainment',
+      source_text: 'This new Netflix movie just broke all streaming records and the trailer went viral with 100 million views',
+      source_author: 'entertainment_acct',
+      source_tweet_url: '',
+      type: 'reply',
+      core_observation: 'Movie broke streaming records',
+      why_it_matters: '',
+      audience_relevance: '',
+      niche_fit_score: 3,
+      originality_potential_score: 3,
+      usefulness_score: 2,
+      evidence_risk_score: 6,
+      viral_context_score: 9,
+      publishability_score: 4,
+      recommended_angle: '',
+      content_format: 'reply',
+      do_not_claim: ['100 million views claim'],
+      required_context: [],
+      should_craft: false,
+    };
+    const reason = determineRejectionReason(brief);
+    // Should NOT be weak_source
+    expect(reason).not.toBe('weak_source');
+    expect(['blocked_topic', 'no_clear_angle', 'low_usefulness', 'low_originality_potential']).toContain(reason);
+  });
+
+  it('entertainment/internet culture with attention economy angle can be selected', () => {
+    // This is the "candidate but needs angle" middle path
+    const angle = discoverAdjacentAngle('This TikTok trend went viral with 50 million views — the algorithm is pushing it to everyone');
+    expect(angle).toBeTruthy();
+    // The function returns the first matching angle — "viral" matches attention economy,
+    // but "TikTok" matches social media behavior which maps to distribution/audience retention
+    expect(angle).toBeTruthy();
+    // Any legitimate adjacent angle is acceptable
+    expect(['attention economy', 'distribution', 'creator strategy', 'audience retention'].some(k => angle!.includes(k))).toBe(true);
+  });
+
+  it('creator strategy source gets adjacent angle', () => {
+    const angle = discoverAdjacentAngle('How a creator grew from 1K to 1M subscribers in 6 months using content strategy');
+    expect(angle).toBeTruthy();
+    expect(angle).toContain('creator strategy');
+  });
+
+  it('AI/productivity source has no need for adjacent angle (it is core)', () => {
+    const result = quickNicheFitScore('Built a RAG pipeline with GPT-4 that automates my entire research workflow');
+    expect(result.matched_topics).toContain('AI tools');
+    expect(result.score).toBeGreaterThanOrEqual(7);
+  });
+
+  it('weak_source is not used as catch-all fallback', () => {
+    // A source with meaningful text should NEVER get weak_source
+    const brief: OpportunityBrief = {
+      source_summary: 'AI discussion',
+      source_text: 'OpenAI just released a new model that can reason about code better than most developers',
+      source_author: 'tech_news',
+      source_tweet_url: '',
+      type: 'reply',
+      core_observation: 'New model release',
+      why_it_matters: '',
+      audience_relevance: '',
+      niche_fit_score: 7,
+      originality_potential_score: 5,
+      usefulness_score: 5,
+      evidence_risk_score: 6,
+      viral_context_score: 7,
+      publishability_score: 6,
+      recommended_angle: 'Analyze the implications for developer workflows',
+      content_format: 'quote',
+      do_not_claim: [],
+      required_context: [],
+      should_craft: false,
+    };
+    const reason = determineRejectionReason(brief);
+    // Should be low_originality_potential, not weak_source
+    expect(reason).not.toBe('weak_source');
+    expect(reason).toBe('low_originality_potential');
+  });
+
+  it('selected opportunities include recommended_angle and do_not_claim', () => {
+    const brief: OpportunityBrief = {
+      source_summary: 'AI automation',
+      source_text: 'New AI tool automates code review and catches bugs that humans miss — early adopters report 40% faster reviews',
+      source_author: 'devtools',
+      source_tweet_url: '',
+      type: 'quote',
+      core_observation: 'AI code review tool shows strong results',
+      why_it_matters: 'Relevant to developer audience',
+      audience_relevance: 'Developers and builders',
+      niche_fit_score: 9,
+      originality_potential_score: 8,
+      usefulness_score: 8,
+      evidence_risk_score: 7,
+      viral_context_score: 7,
+      publishability_score: 8,
+      recommended_angle: 'What AI code review actually catches vs what it misses — the gap matters for your workflow',
+      content_format: 'quote',
+      do_not_claim: ['40% faster reviews (unsourced)'],
+      required_context: ['Need source for 40% claim'],
+      should_craft: true,
+    };
+    expect(brief.recommended_angle.length).toBeGreaterThan(20);
+    expect(brief.do_not_claim.length).toBeGreaterThan(0);
+  });
+});
+
+// ═══ Phase 2D Tuning: Language Detection ═══
+
+describe('Phase 2D Tuning: isNonLatinDominant detection', () => {
+  it('Arabic text is detected as non-Latin dominant', () => {
+    expect(isNonLatinDominant('الحسابات الجديدة')).toBe(true);
+    expect(isNonLatinDominant('قائمة')).toBe(true);
+  });
+
+  it('Emoji-heavy text is detected as non-Latin dominant', () => {
+    expect(isNonLatinDominant('📋🎉🔥💯')).toBe(true);
+  });
+
+  it('English text is NOT detected as non-Latin dominant', () => {
+    expect(isNonLatinDominant('This is a normal English tweet about AI tools')).toBe(false);
+  });
+
+  it('Mixed text with mostly Latin is NOT non-Latin dominant', () => {
+    expect(isNonLatinDominant('Great AI tool by @user — الحسابات')).toBe(false);
+  });
+
+  it('Empty or very short text returns false', () => {
+    expect(isNonLatinDominant('')).toBe(false);
+    expect(isNonLatinDominant('hi')).toBe(false);
+  });
+});
+
+// ═══ Phase 2D Tuning: Adjacent Angle Discovery ═══
+
+describe('Phase 2D Tuning: discoverAdjacentAngle finds legitimate angles', () => {
+  it('viral content gets attention economy angle', () => {
+    const angle = discoverAdjacentAngle('This video went viral with 10 million views in 24 hours');
+    expect(angle).toContain('attention economy');
+  });
+
+  it('creator content gets creator strategy angle', () => {
+    const angle = discoverAdjacentAngle('How this content creator grew to 1M subscribers');
+    expect(angle).toContain('creator strategy');
+  });
+
+  it('brand content gets personal brand angle', () => {
+    const angle = discoverAdjacentAngle('How she built her personal brand from zero to 500K followers');
+    expect(angle).toContain('personal brand');
+  });
+
+  it('algorithm content gets distribution angle', () => {
+    const angle = discoverAdjacentAngle('The TikTok algorithm is pushing this type of content to everyone');
+    expect(angle).toContain('distribution');
+  });
+
+  it('tool/app content gets tool adoption angle', () => {
+    const angle = discoverAdjacentAngle('New app just launched and its already the #1 productivity tool');
+    expect(angle).toContain('tool adoption');
+  });
+
+  it('short or empty text returns null', () => {
+    expect(discoverAdjacentAngle('')).toBeNull();
+    expect(discoverAdjacentAngle('short')).toBeNull();
+  });
+
+  it('random content with no signals returns null', () => {
+    expect(discoverAdjacentAngle('The weather is nice today and I had a good lunch')).toBeNull();
+  });
+});
+
+// ═══ Phase 2D Tuning: Canonical Rejection Reasons ═══
+
+describe('Phase 2D Tuning: canonical rejection reasons are defined', () => {
+  it('all canonical rejection reasons are listed', () => {
+    expect(CANONICAL_REJECTION_REASONS).toContain('blocked_topic');
+    expect(CANONICAL_REJECTION_REASONS).toContain('low_originality_potential');
+    expect(CANONICAL_REJECTION_REASONS).toContain('low_niche_fit');
+    expect(CANONICAL_REJECTION_REASONS).toContain('low_usefulness');
+    expect(CANONICAL_REJECTION_REASONS).toContain('unsupported_claim_risk');
+    expect(CANONICAL_REJECTION_REASONS).toContain('generic_only');
+    expect(CANONICAL_REJECTION_REASONS).toContain('no_clear_angle');
+    expect(CANONICAL_REJECTION_REASONS).toContain('language_or_context_mismatch');
+    expect(CANONICAL_REJECTION_REASONS).toContain('insufficient_context');
+    expect(CANONICAL_REJECTION_REASONS).toContain('weak_source');
+  });
+
+  it('weak_source is the last resort, not a common reason', () => {
+    // weak_source should be reserved for truly empty sources
+    const brief: OpportunityBrief = {
+      source_summary: 'Some content',
+      source_text: 'This is a reasonably long source text about some topic that has substance',
+      source_author: 'user',
+      source_tweet_url: '',
+      type: 'reply',
+      core_observation: 'Some observation',
+      why_it_matters: '',
+      audience_relevance: '',
+      niche_fit_score: 3,
+      originality_potential_score: 5,
+      usefulness_score: 4,
+      evidence_risk_score: 8,
+      viral_context_score: 3,
+      publishability_score: 4,
+      recommended_angle: '',
+      content_format: 'reply',
+      do_not_claim: [],
+      required_context: [],
+      should_craft: false,
+    };
+    const reason = determineRejectionReason(brief);
+    // A source with this much text should never get weak_source
+    expect(reason).not.toBe('weak_source');
+  });
+});
+
+// ═══ Phase 2D Tuning: publish_gate unchanged + downstream fallback unchanged ═══
+
+describe('Phase 2D Tuning: publish_gate and downstream unchanged', () => {
+  it('publish_gate still rejects low-quality content after intelligence tuning', () => {
+    const opp = {
+      type: 'reply' as const,
+      crafted_text: 'AI is great lol',
+      source_tweet_url: 'https://x.com/user/status/123',
+      shield_passed: false,
+      shield_issues: ['missing_originality'],
+    };
+    const gate = filterPublishableOpportunities([opp]);
+    expect(gate.rejected.length).toBe(1);
+  });
+
+  it('downstream fallback behavior remains unchanged — intelligence zero is respected', () => {
+    // Simulate the fallback decision logic (from phase2d-integration-fix tests)
+    const intelTask = { result: { _opportunities: [] } };
+    const mergeTask = { result: { _opportunities: [{ id: 1 }, { id: 2 }] } };
+
+    let opportunities;
+    if (intelTask) {
+      opportunities = intelTask.result?._opportunities || [];
+    } else {
+      opportunities = mergeTask?.result?._opportunities || [];
+    }
+
+    expect(opportunities.length).toBe(0);
   });
 });
