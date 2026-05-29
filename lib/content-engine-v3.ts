@@ -66,6 +66,10 @@ export type ContentOpportunity = {
   pre_gate_rejection_reason?: string;
   final_quality_validation_passed?: boolean;
   final_quality_validation_notes?: string;
+  // Phase 2C.1: rewrite trigger diagnostics
+  rewrite_trigger_reason?: string;
+  rewrite_attempted?: boolean;
+  rewrite_failed_reason?: string;
 };
 
 export type MediaFromTweet = {

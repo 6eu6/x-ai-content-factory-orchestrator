@@ -763,12 +763,19 @@ describe('Phase 2C diagnostic fields', () => {
       pre_gate_rejection_reason: null,
       final_quality_validation_passed: true,
       final_quality_validation_notes: 'All quality validations passed',
+      // Phase 2C.1 fields
+      rewrite_trigger_reason: 'originality_5.6_below_7.8',
+      rewrite_attempted: true,
+      rewrite_failed_reason: undefined,
     };
 
     expect(opp.niche_alignment_score).toBe(8.5);
     expect(opp.cleaned_json_wrapper).toBe(true);
     expect(opp.malformed_json_output).toBe(false);
     expect(opp.final_quality_validation_passed).toBe(true);
+    expect(opp.rewrite_trigger_reason).toBe('originality_5.6_below_7.8');
+    expect(opp.rewrite_attempted).toBe(true);
+    expect(opp.rewrite_failed_reason).toBeUndefined();
   });
 
   it('diagnostic fields default to undefined when not set', () => {
@@ -791,6 +798,9 @@ describe('Phase 2C diagnostic fields', () => {
     expect(opp.pre_gate_rejection_reason).toBeUndefined();
     expect(opp.final_quality_validation_passed).toBeUndefined();
     expect(opp.final_quality_validation_notes).toBeUndefined();
+    expect(opp.rewrite_trigger_reason).toBeUndefined();
+    expect(opp.rewrite_attempted).toBeUndefined();
+    expect(opp.rewrite_failed_reason).toBeUndefined();
   });
 });
 

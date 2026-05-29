@@ -1,18 +1,33 @@
 /**
- * originality-enhancer.ts — Phase 2B: Self-critique/rewrite loop for crafted_text
+ * originality-enhancer.ts — Phase 2B → 2C.1: Self-critique/rewrite loop for crafted_text
  *
  * This module improves the quality of generated opportunities BEFORE publish_gate.
  * It does NOT lower thresholds or bypass any gate.
  *
- * For every opportunity:
- * 1. Score originality 1-10, evidence safety 1-10, usefulness 1-10
- * 2. If originality < 7.8, rewrite once using AI
- * 3. Re-score after rewrite
- * 4. If still below threshold, let publish_gate reject it naturally
+ * Phase 2C.1 fix: The original code only triggered rewrites when
+ * originality_score < 7.8. But opportunities with shield_issues like
+ * missing_originality or slop_forbidden_words, or generic bait text,
+ * also need rewrite attempts. The previous version produced
+ * rewrites_applied=0 because:
  *
- * Diagnostic fields are persisted into the opportunity object for downstream
- * inspection: originality_score_before, originality_score_after,
- * evidence_safety_score, rewrite_applied, quality_notes.
+ * BUG 1: Rewrite was ONLY triggered by originality score, not by
+ *         shield_issues or generic bait detection.
+ * BUG 2: When rewriteForOriginality returned null (model output caught
+ *         by its own AI slop validator), no diagnostic was recorded —
+ *         just "Rewrite returned null or identical text" which tells
+ *         us nothing about WHY.
+ * BUG 3: After a failed rewrite, the original text kept its
+ *         shield_issues (missing_originality, slop_forbidden_words)
+ *         with no second-chance validation.
+ *
+ * Fix:
+ * - shouldTriggerRewrite() checks ALL conditions (score, shield_issues,
+ *   generic bait, slop words)
+ * - rewrite_attempted and rewrite_trigger_reason are always set when a
+ *   rewrite is tried
+ * - rewrite_failed_reason explains exactly why the rewrite was rejected
+ * - After rewrite (success or fail), re-run quickShieldCheck
+ * - Enhanced summary tracks candidates, attempts, failures, skips
  */
 
 import { callModel, parseModelJson, TaskType } from './model-router';
@@ -61,6 +76,10 @@ export type OpportunityWithDiagnostics = {
   pre_gate_rejection_reason?: string;
   final_quality_validation_passed?: boolean;
   final_quality_validation_notes?: string;
+  // Phase 2C.1 diagnostic fields
+  rewrite_trigger_reason?: string;
+  rewrite_attempted?: boolean;
+  rewrite_failed_reason?: string;
   // Existing fields from enrich step
   avg_brain_rule_weight?: number;
   rule_performance_summary?: {
@@ -79,6 +98,22 @@ const ORIGINALITY_THRESHOLD = 7.8;
 
 /** Maximum length for crafted_text to be eligible for rewrite */
 const MAX_REWRITE_LENGTH = 1200;
+
+/** Generic engagement bait patterns that indicate a rewrite is needed */
+const GENERIC_BAIT_PATTERNS = [
+  { pattern: /^yo[,.…!\s]/i, name: 'yo_bait' },
+  { pattern: /^interesting take/i, name: 'interesting_take_bait' },
+  { pattern: /^hot take/i, name: 'hot_take_bait' },
+  { pattern: /^this\.\s*$/i, name: 'this_bait' },
+  { pattern: /^so true/i, name: 'so_true_bait' },
+  { pattern: /^boom\s*$/i, name: 'boom_bait' },
+  { pattern: /^thoughts\?\s*$/i, name: 'thoughts_bait' },
+  { pattern: /\bthis is huge\b/i, name: 'this_is_huge_bait' },
+  { pattern: /\bgame changer\b/i, name: 'game_changer_bait' },
+  { pattern: /\bhere is why\b/i, name: 'here_is_why_bait' },
+  { pattern: /\bthe future of\b/i, name: 'future_of_bait' },
+  { pattern: /\byou need to\b/i, name: 'you_need_to_bait' },
+];
 
 // ═══ Pure Scoring Functions (testable without AI) ═══
 
@@ -203,6 +238,73 @@ export function heuristicUsefulness(text: string): number {
   return Math.max(1, Math.min(10, Math.round(score * 10) / 10));
 }
 
+// ═══ Rewrite Trigger Logic (Phase 2C.1) ═══
+
+/**
+ * Determine whether an opportunity should trigger a rewrite attempt.
+ *
+ * Phase 2C.1: This function expands the rewrite trigger conditions beyond
+ * just originality score. A rewrite should happen if ANY of these are true:
+ * - originality_score_before < 7.8
+ * - shield_issues includes missing_originality
+ * - shield_issues includes slop_forbidden_words
+ * - crafted_text contains generic bait patterns
+ * - crafted_text is clean plain text but still too generic
+ *
+ * Returns the trigger reason(s) or null if no rewrite is needed.
+ */
+export function shouldTriggerRewrite(
+  text: string,
+  scoresBefore: QualityScores,
+  opp: OpportunityWithDiagnostics
+): string | null {
+  const reasons: string[] = [];
+
+  // Condition 1: Originality score below threshold
+  if (scoresBefore.originality < ORIGINALITY_THRESHOLD) {
+    reasons.push(`originality_${scoresBefore.originality}_below_${ORIGINALITY_THRESHOLD}`);
+  }
+
+  // Condition 2: shield_issues include missing_originality
+  const shieldIssues = opp.shield_issues || [];
+  if (shieldIssues.includes('missing_originality')) {
+    reasons.push('shield_missing_originality');
+  }
+
+  // Condition 3: shield_issues include slop_forbidden_words
+  if (shieldIssues.includes('slop_forbidden_words')) {
+    reasons.push('shield_slop_forbidden_words');
+  }
+
+  // Condition 4: Generic engagement bait in text
+  for (const { pattern, name } of GENERIC_BAIT_PATTERNS) {
+    if (pattern.test(text.trim())) {
+      reasons.push(`generic_bait:${name}`);
+      break;  // One match is enough
+    }
+  }
+
+  // Condition 5: Text is clean but still too generic (heuristic check)
+  const heuristicScore = heuristicOriginality(text);
+  if (heuristicScore < 5.0 && scoresBefore.originality < ORIGINALITY_THRESHOLD) {
+    reasons.push('heuristic_generic');
+  }
+
+  return reasons.length > 0 ? reasons.join(',') : null;
+}
+
+/**
+ * Detect generic bait patterns in text. Exported for testing.
+ */
+export function detectGenericBait(text: string): string | null {
+  for (const { pattern, name } of GENERIC_BAIT_PATTERNS) {
+    if (pattern.test(text.trim())) {
+      return name;
+    }
+  }
+  return null;
+}
+
 // ═══ AI-Powered Scoring ═══
 
 /**
@@ -261,7 +363,7 @@ Return JSON only: {"originality": N, "evidence_safety": N, "usefulness": N}`
 
 /**
  * Rewrite crafted_text to improve originality.
- * Phase 2C: Strengthened rewrite that produces genuinely original angles.
+ * Phase 2C.1: Strengthened rewrite that produces genuinely original angles.
  *
  * The rewrite must:
  * - Produce plain text only, NEVER JSON
@@ -273,11 +375,19 @@ Return JSON only: {"originality": N, "evidence_safety": N, "usefulness": N}`
  * - NOT invent unsupported facts or introduce unsourced numeric claims
  * - Sound like a smart builder/operator, not a content mill
  * - If a niche-aligned original angle cannot be produced, return null
+ *
+ * Phase 2C.1 change: Returns { text, failedReason } instead of just string | null
+ * so the caller can diagnose WHY the rewrite failed.
  */
+export type RewriteResult = {
+  text: string | null;
+  failedReason: string | null;
+};
+
 export async function rewriteForOriginality(
   text: string,
   currentScores: QualityScores
-): Promise<string | null> {
+): Promise<RewriteResult> {
   try {
     const response = await callModel('content_crafting' as TaskType, [
       {
@@ -317,49 +427,40 @@ Return the rewritten text ONLY. No explanation, no quotes, no labels, no JSON.`
 
     // Check for safe rewrite signal
     if (/CANNOT_REWRITE_ORIGINALITY/i.test(rewritten)) {
-      return null;
+      return { text: null, failedReason: 'model_declined_cannot_rewrite' };
     }
 
     // Validate rewrite — plain text only
     if (!rewritten || rewritten.length < 10 || rewritten.length > MAX_REWRITE_LENGTH) {
-      return null;
+      return { text: null, failedReason: `invalid_length:${rewritten?.length || 0}` };
     }
 
     // If the rewrite contains Arabic, reject it
     if (containsArabic(rewritten)) {
-      return null;
+      return { text: null, failedReason: 'arabic_content_in_rewrite' };
     }
 
     // If the rewrite looks like JSON/markdown wrapper, reject it
     if (looksLikeJsonWrapper(rewritten)) {
-      return null;
+      return { text: null, failedReason: 'json_wrapper_in_rewrite' };
     }
 
     // If the rewrite looks like AI slop wrapper, reject it
     const slopCheck = isAISlopWrapper(rewritten);
     if (!slopCheck.ok) {
-      return null;
+      return { text: null, failedReason: `ai_slop_in_rewrite:${slopCheck.reason || 'detected'}` };
     }
 
     // Reject generic engagement bait patterns
-    const genericBaitPatterns = [
-      /^yo[,.…!\s]/i,
-      /^interesting take/i,
-      /^hot take/i,
-      /^this\.\s*$/i,
-      /^so true/i,
-      /^boom/i,
-      /^thoughts\?\s*$/i,
-    ];
-    for (const pattern of genericBaitPatterns) {
+    for (const { pattern, name } of GENERIC_BAIT_PATTERNS) {
       if (pattern.test(rewritten.trim())) {
-        return null;
+        return { text: null, failedReason: `generic_bait_in_rewrite:${name}` };
       }
     }
 
-    return rewritten;
-  } catch {
-    return null;
+    return { text: rewritten, failedReason: null };
+  } catch (err: any) {
+    return { text: null, failedReason: `rewrite_exception:${err?.message || 'unknown'}` };
   }
 }
 
@@ -368,11 +469,15 @@ Return the rewritten text ONLY. No explanation, no quotes, no labels, no JSON.`
 /**
  * Enhance a single opportunity's crafted_text.
  *
- * Process:
+ * Phase 2C.1 Process:
  * 1. AI-score the text (originality, evidence_safety, usefulness)
- * 2. If originality < 7.8, attempt one rewrite
- * 3. Re-score after rewrite
- * 4. Return enhanced opportunity with diagnostic fields
+ * 2. Determine if rewrite should be triggered (expanded conditions)
+ * 3. If triggered, attempt one rewrite
+ * 4. Validate rewrite result (plain text, no JSON, no Arabic, no AI slop)
+ * 5. If rewrite passes validation and improves originality, apply it
+ * 6. If rewrite fails validation, keep original but record diagnostics
+ * 7. Re-run quickShieldCheck after any rewrite attempt
+ * 8. Return enhanced opportunity with full diagnostic fields
  *
  * This NEVER bypasses publish_gate. If the rewrite doesn't help,
  * the opportunity goes to publish_gate with its low scores and
@@ -391,6 +496,7 @@ export async function enhanceOpportunity(
       originality_score_after: null,
       evidence_safety_score: 0,
       rewrite_applied: false,
+      rewrite_attempted: false,
       quality_notes: 'Empty or too short to enhance'
     };
   }
@@ -403,7 +509,22 @@ export async function enhanceOpportunity(
       originality_score_after: null,
       evidence_safety_score: 0,
       rewrite_applied: false,
+      rewrite_attempted: false,
       quality_notes: 'Arabic content detected — cannot enhance, will be rejected by publish gate'
+    };
+  }
+
+  // Skip if off-niche pre-gate rejection already set — do not rewrite off-niche content
+  if (opp.pre_gate_rejection_reason === 'off_niche') {
+    return {
+      ...opp,
+      originality_score_before: opp.originality_score_before,
+      originality_score_after: opp.originality_score_after,
+      evidence_safety_score: opp.evidence_safety_score,
+      rewrite_applied: false,
+      rewrite_attempted: false,
+      rewrite_trigger_reason: 'skipped_off_niche',
+      quality_notes: (opp.quality_notes || '') + '; Skipped rewrite: off-niche content'
     };
   }
 
@@ -412,39 +533,63 @@ export async function enhanceOpportunity(
 
   const notes: string[] = [];
 
-  // Step 2: Rewrite if originality is below threshold
+  // Step 2: Determine if rewrite should be triggered (expanded conditions)
+  const triggerReason = shouldTriggerRewrite(text, scoresBefore, opp);
+
   let rewriteApplied = false;
+  let rewriteAttempted = false;
+  let rewriteFailedReason: string | null = null;
   let scoresAfter: QualityScores | null = null;
   let finalText = text;
 
-  if (scoresBefore.originality < ORIGINALITY_THRESHOLD) {
-    notes.push(`Originality ${scoresBefore.originality}/10 < ${ORIGINALITY_THRESHOLD} threshold`);
+  if (triggerReason) {
+    // Rewrite is warranted — attempt exactly one rewrite
+    rewriteAttempted = true;
+    notes.push(`Rewrite triggered: ${triggerReason}`);
 
-    const rewritten = await rewriteForOriginality(text, scoresBefore);
-    if (rewritten && rewritten !== text) {
+    const rewriteResult = await rewriteForOriginality(text, scoresBefore);
+
+    if (rewriteResult.text && rewriteResult.text !== text) {
+      // Rewrite produced a non-null, non-identical result
       // Re-score the rewrite
-      scoresAfter = await scoreWithAI(rewritten);
+      scoresAfter = await scoreWithAI(rewriteResult.text);
 
       if (scoresAfter.originality > scoresBefore.originality) {
-        finalText = rewritten;
+        // Rewrite improved originality — apply it
+        finalText = rewriteResult.text;
         rewriteApplied = true;
         notes.push(`Rewritten: originality ${scoresBefore.originality} → ${scoresAfter.originality}`);
-
-        // Re-run shield check on rewritten text
-        const shieldResult = quickShieldCheck(finalText, opp);
-        opp.shield_passed = shieldResult.safe;
-        opp.shield_issues = shieldResult.reasons;
       } else {
+        // Rewrite didn't improve originality score
+        rewriteFailedReason = `rewrite_no_improvement:${scoresAfter.originality}_<=_${scoresBefore.originality}`;
         notes.push(`Rewrite did not improve originality (${scoresAfter.originality} ≤ ${scoresBefore.originality})`);
       }
+    } else if (rewriteResult.text === text) {
+      // Rewrite returned identical text
+      rewriteFailedReason = 'rewrite_identical_to_original';
+      notes.push('Rewrite returned identical text');
     } else {
-      notes.push('Rewrite returned null or identical text');
+      // Rewrite returned null — record the exact reason
+      rewriteFailedReason = rewriteResult.failedReason || 'rewrite_returned_null';
+      notes.push(`Rewrite failed: ${rewriteFailedReason}`);
+    }
+
+    // Step 3: After rewrite attempt (success or fail), re-run shield check
+    // This updates shield_passed and shield_issues based on the final text
+    const shieldResult = quickShieldCheck(finalText, opp);
+    opp.shield_passed = shieldResult.safe;
+    opp.shield_issues = shieldResult.reasons;
+
+    if (rewriteApplied) {
+      notes.push(`Post-rewrite shield: ${shieldResult.safe ? 'passed' : 'failed'} (${shieldResult.reasons.join(',') || 'no issues'})`);
+    } else {
+      notes.push(`Post-attempt shield on original: ${shieldResult.safe ? 'passed' : 'failed'} (${shieldResult.reasons.join(',') || 'no issues'})`);
     }
   } else {
-    notes.push(`Originality ${scoresBefore.originality}/10 meets threshold`);
+    notes.push(`No rewrite needed (originality ${scoresBefore.originality}/10, no shield issues, no bait)`);
   }
 
-  // Step 3: Track evidence safety
+  // Step 4: Track evidence safety
   if (scoresBefore.evidence_safety < 6) {
     notes.push(`Evidence safety ${scoresBefore.evidence_safety}/10 — numeric claims may need sources`);
   }
@@ -456,6 +601,9 @@ export async function enhanceOpportunity(
     originality_score_after: scoresAfter?.originality ?? null,
     evidence_safety_score: scoresBefore.evidence_safety,
     rewrite_applied: rewriteApplied,
+    rewrite_attempted: rewriteAttempted,
+    rewrite_trigger_reason: triggerReason || undefined,
+    rewrite_failed_reason: rewriteFailedReason || undefined,
     quality_notes: notes.join('; ')
   };
 }
@@ -463,6 +611,9 @@ export async function enhanceOpportunity(
 /**
  * Batch enhance all opportunities.
  * Returns enhanced opportunities with diagnostic fields.
+ *
+ * Phase 2C.1: Enhanced summary includes rewrite candidates, attempts,
+ * failures, and skipped reasons for full diagnostic visibility.
  */
 export async function enhanceOpportunities(
   opportunities: OpportunityWithDiagnostics[]
@@ -477,6 +628,14 @@ export async function enhanceOpportunities(
     below_threshold_before: number;
     below_threshold_after: number;
   };
+  // Phase 2C.1: Rewrite diagnostics summary
+  rewrite_summary: {
+    rewrite_candidates_count: number;
+    rewrites_attempted: number;
+    rewrites_applied: number;
+    rewrites_failed_validation: number;
+    rewrites_skipped_reason: Record<string, number>;
+  };
 }> {
   if (!opportunities?.length) {
     return {
@@ -489,17 +648,47 @@ export async function enhanceOpportunities(
         avg_usefulness: 0,
         below_threshold_before: 0,
         below_threshold_after: 0
+      },
+      rewrite_summary: {
+        rewrite_candidates_count: 0,
+        rewrites_attempted: 0,
+        rewrites_applied: 0,
+        rewrites_failed_validation: 0,
+        rewrites_skipped_reason: {}
       }
     };
   }
 
   const enhanced: OpportunityWithDiagnostics[] = [];
   let rewritesApplied = 0;
+  let rewritesAttempted = 0;
+  let rewritesFailedValidation = 0;
+  let rewriteCandidatesCount = 0;
+  const skippedReasons: Record<string, number> = {};
 
   for (const opp of opportunities) {
     const result = await enhanceOpportunity(opp);
     enhanced.push(result);
-    if (result.rewrite_applied) rewritesApplied++;
+
+    // Track rewrite diagnostics
+    if (result.rewrite_attempted) {
+      rewritesAttempted++;
+      rewriteCandidatesCount++;
+      if (result.rewrite_applied) {
+        rewritesApplied++;
+      } else {
+        rewritesFailedValidation++;
+        // Track the specific failure reason
+        const reason = result.rewrite_failed_reason || 'unknown';
+        const reasonKey = reason.split(':')[0]; // Normalize "ai_slop_in_rewrite:ai_slop_here_is" → "ai_slop_in_rewrite"
+        skippedReasons[reasonKey] = (skippedReasons[reasonKey] || 0) + 1;
+      }
+    } else if (result.rewrite_trigger_reason) {
+      // Trigger reason exists but rewrite wasn't attempted (shouldn't happen, but track it)
+      rewriteCandidatesCount++;
+      const reasonKey = 'triggered_but_not_attempted';
+      skippedReasons[reasonKey] = (skippedReasons[reasonKey] || 0) + 1;
+    }
   }
 
   // Compute summary
@@ -530,6 +719,13 @@ export async function enhanceOpportunities(
       avg_usefulness: Math.round(usefulness * 10) / 10,
       below_threshold_before: belowThresholdBefore,
       below_threshold_after: belowThresholdAfter
+    },
+    rewrite_summary: {
+      rewrite_candidates_count: rewriteCandidatesCount,
+      rewrites_attempted: rewritesAttempted,
+      rewrites_applied: rewritesApplied,
+      rewrites_failed_validation: rewritesFailedValidation,
+      rewrites_skipped_reason: skippedReasons
     }
   };
 }

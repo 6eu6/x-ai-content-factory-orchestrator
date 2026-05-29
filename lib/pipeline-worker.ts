@@ -480,7 +480,7 @@ async function processQualityEnhance(task: PipelineTaskRow): Promise<TaskResult>
     }
 
     // Log summary
-    console.log(`[pipeline-worker] quality_enhance: cleaned ${cleanResult.summary.json_wrappers_cleaned} JSON wrappers, ${nicheResult.summary.off_niche} off-niche, ${enhanceResult.rewrites_applied} rewrites applied, ${guardResult.rejected.length} numeric claims rejected, ${validationResults.summary.failed} failed validation, ${validationResults.summary.passed} passed to publish_gate`);
+    console.log(`[pipeline-worker] quality_enhance: cleaned ${cleanResult.summary.json_wrappers_cleaned} JSON wrappers, ${nicheResult.summary.off_niche} off-niche, rewrite_candidates=${enhanceResult.rewrite_summary.rewrite_candidates_count} attempted=${enhanceResult.rewrite_summary.rewrites_attempted} applied=${enhanceResult.rewrites_applied} failed_validation=${enhanceResult.rewrite_summary.rewrites_failed_validation}, ${guardResult.rejected.length} numeric claims rejected, ${validationResults.summary.failed} failed validation, ${validationResults.summary.passed} passed to publish_gate`);
 
     return {
       ok: true,
@@ -499,6 +499,11 @@ async function processQualityEnhance(task: PipelineTaskRow): Promise<TaskResult>
         validation_passed: validationResults.summary.passed,
         validation_failed: validationResults.summary.failed,
         validation_failure_reasons: validationResults.summary.failure_reasons,
+        // Phase 2C.1: Rewrite diagnostics
+        rewrite_candidates_count: enhanceResult.rewrite_summary.rewrite_candidates_count,
+        rewrites_attempted: enhanceResult.rewrite_summary.rewrites_attempted,
+        rewrites_failed_validation: enhanceResult.rewrite_summary.rewrites_failed_validation,
+        rewrites_skipped_reason: enhanceResult.rewrite_summary.rewrites_skipped_reason,
         _opportunities: validationResults.validated,
         _quality_summary: enhanceResult.scores_summary,
         _numeric_guard_summary: guardResult.summary
