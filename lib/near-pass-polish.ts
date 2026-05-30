@@ -19,6 +19,7 @@
 
 import { callModel, parseModelJson, TaskType } from './model-router';
 import { judgeCraftedCandidate, type JudgeResult } from './opportunity-judge';
+import { buildOriginalityPromptSection } from './originality-context';
 
 // ═══ Types ═══
 
@@ -43,6 +44,8 @@ export type PolishInput = {
   };
   source_text_preview?: string;
   source_author?: string;
+  /** Phase 2G: Optional originality context for originality-focused polish */
+  originality_context?: import('./originality-context').OriginalityContext | null;
 };
 
 export type PolishResult = {
@@ -125,6 +128,19 @@ export function buildPolishPrompt(input: PolishInput): Array<{ role: 'system' | 
 
   const targetedFailuresStr = targetedFailures.join(', ');
 
+  // Phase 2G: If originality failure and context provided, add originality section
+  const isOriginalityFailure = scores.originality_score < 7.8 ||
+    input.judge_failure_reasons.some(r => r.includes('originality') || r.includes('missing_originality'));
+  let originalitySection = '';
+  if (isOriginalityFailure && input.originality_context) {
+    originalitySection = '\n\n' + buildOriginalityPromptSection(input.originality_context);
+  }
+
+  // Phase 2G: Add sharper originality instruction when originality is the failure
+  const originalityInstruction = isOriginalityFailure
+    ? `\n\nCRITICAL: This tweet failed because of LOW ORIGINALITY. Do NOT merely rephrase or slightly adjust wording. Add a SHARPER FRAME using one of the suggested twist types. The frame must change the THINKING STRUCTURE, not just the words. For example, if the source says "X is growing", an original frame is not "X is growing fast" but "the cost of ignoring X is now higher than adopting X" (inversion) or "X works because it eliminates step Y from the old workflow" (mechanism).`
+    : '';
+
   return [
     {
       role: 'system',
@@ -148,7 +164,7 @@ For each failed dimension, here is how to improve:
 - usefulness_score: Add ONE concrete operator/builder takeaway. What can the reader DO with this insight today? Be specific, not vague.
 - brief_alignment_score: Use the recommended angle more directly. The angle is "${recommendedAngle}" — commit to it fully instead of going in a different direction.
 - final_candidate_score: Improve the overall quality by tightening the writing and making the insight sharper.
-
+${originalityInstruction}
 BRIEF CONTEXT:
 - Recommended angle: "${recommendedAngle}"
 - Source summary: "${sourceSummary}"
@@ -165,7 +181,7 @@ CURRENT JUDGE SCORES:
 - evidence_safety_score: ${scores.evidence_safety_score}
 - clarity_score: ${scores.clarity_score}
 
-FAILURE REASONS: ${failureReasons}
+FAILURE REASONS: ${failureReasons}${originalitySection}
 
 Return JSON only:
 {

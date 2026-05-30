@@ -58,6 +58,7 @@ import { evaluateOpportunities, type OpportunityBrief, type IntelligenceSummary 
 import { judgeCraftedCandidates, isNearPass, type JudgeResult, type JudgeSummary } from './opportunity-judge';
 import { attemptNearPassPolish, computeNearPassDiagnostics, MAX_POLISH_CANDIDATES_PER_RUN, type PolishInput, type PolishOutcome, type NearPassDiagnostics } from './near-pass-polish';
 import { callModel, parseModelJson } from './model-router';
+import { getOriginalityContext, buildOriginalityPromptSection, detectOriginalityIndicators, validateOriginalityOutput, type OriginalityContext, type OriginalityDiagnostics } from './originality-context';
 
 // ═══ Types ═══
 
@@ -403,7 +404,8 @@ async function craftFromBrief(
     niche_fit_score: number;
     originality_potential_score: number;
     publishability_score: number;
-  }
+  },
+  originalityContext?: OriginalityContext | null
 ): Promise<{
   crafted_text: string | null;
   format: string;
@@ -415,6 +417,7 @@ async function craftFromBrief(
   _brief_crafting_repair_attempted?: boolean;
   _brief_crafting_repair_applied?: boolean;
   _brief_crafting_failure_reason?: string;
+  _originality_diagnostics?: OriginalityDiagnostics;
 }> {
   const sourceText = String(opp.source_text || opp.text || '').slice(0, 400);
   const sourceAuthor = String(opp.source_author || opp.author || opp.username || '');
@@ -422,7 +425,13 @@ async function craftFromBrief(
   const doNotClaimStr = (brief.do_not_claim || []).map(c => `- "${c}"`).join('\n');
   const requiredContextStr = (brief.required_context || []).map(c => `- ${c}`).join('\n');
 
+  // Phase 2G: Build originality context section if available
+  const originalitySection = originalityContext
+    ? '\n\n' + buildOriginalityPromptSection(originalityContext)
+    : '';
+
   // Phase 2D.3: JSON contract system prompt
+  // Phase 2G: Updated JSON schema to include originality_strategy, twist_type_used, avoided_anti_patterns
   const systemPrompt = `You are a content crafter for @30piq, an X account focused on AI, creators, internet culture, productivity, skills, and modern work.
 
 Your task: Craft a tweet that STRICTLY follows the Opportunity Brief below. The brief was produced by an intelligence analyst who identified this as a promising opportunity with a specific recommended angle.
@@ -454,10 +463,13 @@ Your task: Craft a tweet that STRICTLY follows the Opportunity Brief below. The 
 12. No hashtags, no AI slop words (delve, crucial, leverage, game-changer, unlock, empower, elevate, foster, streamline, harness, cutting-edge, paradigm, synergy).
 
 13. Return a JSON object with this exact schema:
-    { "crafted_text": "string under 280 chars", "format": "quote|reply|standalone", "brief_alignment_score": number, "claims_to_avoid_checked": boolean, "notes": "short string" }
+    { "crafted_text": "string under 280 chars", "format": "quote|reply|standalone", "brief_alignment_score": number, "originality_strategy": "string explaining what makes this original", "twist_type_used": "one of: inversion|mechanism|operator_heuristic|cost_of_being_stale|timeline_shift|capability_map|distribution_positioning|constraint_insight|failure_mode_insight", "avoided_anti_patterns": ["list of anti-patterns you consciously avoided"], "claims_to_avoid_checked": boolean, "notes": "short string" }
     - crafted_text: The tweet text, plain text only (no JSON/markdown inside it).
     - format: The content format.
     - brief_alignment_score: Your self-assessment 1-10 of how well the text follows the recommended_angle.
+    - originality_strategy: Brief explanation of what makes your text original (not just a summary or generic take).
+    - twist_type_used: The twist type you applied from the suggested types (or "none" if none fits).
+    - avoided_anti_patterns: List of anti-patterns you consciously avoided.
     - claims_to_avoid_checked: True if you verified the text avoids all do_not_claim terms.
     - notes: Brief note on your crafting decisions.
 
@@ -481,7 +493,7 @@ ${requiredContextStr || '(none)'}
 
 Niche fit: ${brief.niche_fit_score}/10
 Originality potential: ${brief.originality_potential_score}/10
-Publishability: ${brief.publishability_score}/10`;
+Publishability: ${brief.publishability_score}/10${originalitySection}`;
 
   const userPrompt = `Craft a brief-faithful tweet for this opportunity:
 
@@ -489,7 +501,7 @@ Source by @${sourceAuthor}: "${sourceText}"
 
 Original drafted text (IGNORE its angle — use the brief's angle instead): "${originalCrafted}"
 
-Return a JSON object with crafted_text, format, brief_alignment_score, claims_to_avoid_checked, and notes.`;
+Return a JSON object with crafted_text, format, brief_alignment_score, originality_strategy, twist_type_used, avoided_anti_patterns, claims_to_avoid_checked, and notes.`;
 
   try {
     const response = await callModel('selected_candidate_crafting' as any, [
@@ -636,6 +648,10 @@ Return a repaired JSON object.`,
       }
     }
 
+    // Phase 2G: Parse originality output fields from model response
+    const originalityOutput = validateOriginalityOutput(parsed);
+    const originalityIndicators = detectOriginalityIndicators(crafted);
+
     return {
       crafted_text: crafted,
       format: modelFormat || brief.content_format || 'reply',
@@ -647,6 +663,17 @@ Return a repaired JSON object.`,
       _brief_crafting_repair_attempted: repairAttempted,
       _brief_crafting_repair_applied: repairApplied,
       _brief_crafting_failure_reason: repairFailureReason,
+      _originality_diagnostics: {
+        _originality_context_used: !!originalityContext,
+        _originality_twist_type_used: originalityOutput.twist_type_used || undefined,
+        _originality_strategy: originalityOutput.originality_strategy || undefined,
+        _originality_context_items_count: originalityContext
+          ? originalityContext.angle_patterns.length + originalityContext.rejected_examples.length + originalityContext.successful_frames.length
+          : 0,
+        _avoided_originality_anti_patterns: originalityOutput.avoided_anti_patterns.length > 0
+          ? originalityOutput.avoided_anti_patterns
+          : undefined,
+      },
     };
   } catch (err: any) {
     console.warn(`[craftFromBrief] AI call failed: ${(err?.message || 'unknown').slice(0, 200)}`);
@@ -1175,14 +1202,60 @@ async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskRe
     // Phase 2D.2: Brief-faithful recrafting for selected opportunities that have a _brief.
     // The original crafted_text from content-engine-v3 was generated BEFORE intelligence,
     // so it ignores the recommended_angle. We now recraft using selected_candidate_crafting.
+    // Phase 2G: Fetch originality context ONCE per run, share across all candidates.
     let briefRecraftCount = 0;
     let briefRecraftFailed = 0;
+    let originalityContextUsedCount = 0;
+    let originalityContextFetchFailedCount = 0;
+    const originalityTwistTypeCounts: Record<string, number> = {};
+    const originalityAntiPatternsUsed: string[] = [];
+
+    // Phase 2G: Fetch originality context for the batch (shared, not per-candidate)
+    let batchOriginalityContext: OriginalityContext | null = null;
+    try {
+      // Use the first opportunity's context to seed the batch
+      const firstOpp = opportunities.find((o: any) => o._brief?.recommended_angle?.length >= 10);
+      if (firstOpp) {
+        batchOriginalityContext = await getOriginalityContext({
+          source_text: String((firstOpp as any).source_text || (firstOpp as any).text || ''),
+          source_author: (firstOpp as any).source_author || (firstOpp as any).author,
+          brief: (firstOpp as any)._brief,
+          max_items: 8,
+        });
+        if (batchOriginalityContext) {
+          originalityContextUsedCount++;
+        }
+      }
+    } catch (origCtxErr: any) {
+      console.warn(`[pipeline-worker] originality context fetch failed: ${(origCtxErr?.message || 'unknown').slice(0, 200)}`);
+      originalityContextFetchFailedCount++;
+    }
+
     for (let i = 0; i < opportunities.length; i++) {
       const opp = opportunities[i];
       const brief = opp._brief;
       if (brief && brief.recommended_angle && brief.recommended_angle.length >= 10) {
         try {
-          const recraftResult = await craftFromBrief(opp, brief);
+          // Phase 2G: Get per-candidate originality context (can reuse batch context or refine)
+          let originalityCtx: OriginalityContext | null = batchOriginalityContext;
+          if (originalityCtx && i > 0) {
+            // For candidates after the first, refresh context with their specific source
+            try {
+              originalityCtx = await getOriginalityContext({
+                source_text: String((opp as any).source_text || (opp as any).text || ''),
+                source_author: (opp as any).source_author || (opp as any).author,
+                brief: opp._brief,
+                current_text: (opp as any).crafted_text,
+                failure_reasons: [],
+                max_items: 8,
+              });
+            } catch {
+              // Fall back to batch context
+              originalityCtx = batchOriginalityContext;
+            }
+          }
+
+          const recraftResult = await craftFromBrief(opp, brief, originalityCtx);
           if (recraftResult.crafted_text) {
             opportunities[i] = {
               ...opp,
@@ -1197,8 +1270,23 @@ async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskRe
               _brief_crafting_repair_attempted: recraftResult._brief_crafting_repair_attempted || false,
               _brief_crafting_repair_applied: recraftResult._brief_crafting_repair_applied || false,
               _brief_crafting_failure_reason: recraftResult._brief_crafting_failure_reason,
+              // Phase 2G: Originality diagnostics
+              _originality_context_used: recraftResult._originality_diagnostics?._originality_context_used ?? false,
+              _originality_twist_type_used: recraftResult._originality_diagnostics?._originality_twist_type_used,
+              _originality_strategy: recraftResult._originality_diagnostics?._originality_strategy,
+              _originality_context_items_count: recraftResult._originality_diagnostics?._originality_context_items_count ?? 0,
+              _avoided_originality_anti_patterns: recraftResult._originality_diagnostics?._avoided_originality_anti_patterns,
             };
             briefRecraftCount++;
+
+            // Track twist type counts
+            if (recraftResult._originality_diagnostics?._originality_twist_type_used) {
+              const twist = recraftResult._originality_diagnostics._originality_twist_type_used;
+              originalityTwistTypeCounts[twist] = (originalityTwistTypeCounts[twist] || 0) + 1;
+            }
+            if (recraftResult._originality_diagnostics?._avoided_originality_anti_patterns) {
+              originalityAntiPatternsUsed.push(...recraftResult._originality_diagnostics._avoided_originality_anti_patterns);
+            }
           } else {
             briefRecraftFailed++;
             // Mark the brief as attempted but failed
@@ -1214,6 +1302,12 @@ async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskRe
               _brief_crafting_repair_attempted: recraftResult._brief_crafting_repair_attempted || false,
               _brief_crafting_repair_applied: recraftResult._brief_crafting_repair_applied || false,
               _brief_crafting_failure_reason: recraftResult._brief_crafting_failure_reason,
+              // Phase 2G: Originality diagnostics (even on failure)
+              _originality_context_used: recraftResult._originality_diagnostics?._originality_context_used ?? false,
+              _originality_twist_type_used: recraftResult._originality_diagnostics?._originality_twist_type_used,
+              _originality_strategy: recraftResult._originality_diagnostics?._originality_strategy,
+              _originality_context_items_count: recraftResult._originality_diagnostics?._originality_context_items_count ?? 0,
+              _avoided_originality_anti_patterns: recraftResult._originality_diagnostics?._avoided_originality_anti_patterns,
             };
           }
         } catch (recraftErr: any) {
@@ -1237,6 +1331,11 @@ async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskRe
         // Phase 2D.2: Brief recrafting stats
         brief_recraft_count: briefRecraftCount,
         brief_recraft_failed: briefRecraftFailed,
+        // Phase 2G: Originality context diagnostics
+        originality_context_used_count: originalityContextUsedCount,
+        originality_twist_type_counts: originalityTwistTypeCounts,
+        originality_context_fetch_failed_count: originalityContextFetchFailedCount,
+        originality_anti_patterns_used: originalityAntiPatternsUsed,
         _opportunities: opportunities,
         _rule_performance: rulePerformanceStats
       }
@@ -1607,6 +1706,25 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
           source_text_preview: (opp.source_text || '').slice(0, 200),
           source_author: opp.source_author || '',
         };
+
+        // Phase 2G: If originality failure, fetch originality context for the polish
+        const isOriginalityFailure = judgeResult.originality_score < 7.8 ||
+          judgeResult.failure_reasons.some(r => r.includes('originality') || r.includes('missing_originality'));
+        if (isOriginalityFailure) {
+          try {
+            const originalityCtx = await getOriginalityContext({
+              source_text: String(opp.source_text || opp.text || ''),
+              source_author: opp.source_author,
+              brief: brief,
+              current_text: craftedText,
+              failure_reasons: judgeResult.failure_reasons,
+              max_items: 6,
+            });
+            polishInput.originality_context = originalityCtx;
+          } catch (origCtxErr: any) {
+            console.warn(`[pipeline-worker] originality context fetch for polish failed: ${(origCtxErr?.message || 'unknown').slice(0, 200)}`);
+          }
+        }
 
         try {
           const outcome = await attemptNearPassPolish(polishInput);
