@@ -364,6 +364,9 @@ export function shouldApplyRewrite(params: {
   rewriteValidationPassed: boolean;
   rewriteIsOffNiche: boolean;
   rewriteIntroducesUnsourcedNumericClaims: boolean;
+  hasBrief?: boolean;
+  briefAlignmentScoreBefore?: number;
+  briefAlignmentScoreAfter?: number;
 }): ApplyRewriteDecision {
   const {
     scoresBefore, scoresAfter,
@@ -373,6 +376,9 @@ export function shouldApplyRewrite(params: {
     originalValidationPassed, rewriteValidationPassed,
     rewriteIsOffNiche,
     rewriteIntroducesUnsourcedNumericClaims,
+    hasBrief,
+    briefAlignmentScoreBefore,
+    briefAlignmentScoreAfter,
   } = params;
 
   // ─── Safety checks: reject rewrite if it introduces problems ───
@@ -388,6 +394,11 @@ export function shouldApplyRewrite(params: {
   if (!rewriteValidationPassed) {
     return { shouldApply: false, applyReasons: [], rejectedReason: 'rewrite_fails_quality_validation' };
   }
+
+  // ─── Phase 2D.3: Brief-backed opportunity protection ───
+  // If the opportunity has a _brief, do NOT apply a rewrite that lowers originality
+  // solely due to fewer_shield_issues unless it also improves brief_alignment_score
+  // or removes a hard failure (e.g., shield now passes, removed slop/bait/missing_originality).
 
   // ─── Improvement checks: apply if ANY improvement detected ───
 
@@ -426,6 +437,31 @@ export function shouldApplyRewrite(params: {
   // Condition 7: Rewrite passes quality validation but original did not
   if (!originalValidationPassed && rewriteValidationPassed) {
     applyReasons.push('passes_quality_validation_original_did_not');
+  }
+
+  // Condition 8: Brief alignment score improved (Phase 2D.3)
+  if (hasBrief && briefAlignmentScoreAfter != null && briefAlignmentScoreBefore != null && briefAlignmentScoreAfter > briefAlignmentScoreBefore) {
+    applyReasons.push('brief_alignment_improved');
+  }
+
+  // ─── Phase 2D.3: Brief-backed guard ───
+  // For brief-backed opportunities, if the only improvement is "fewer_shield_issues"
+  // AND originality went DOWN, do NOT apply — this degrades the content.
+  const hasHardFailureRemoval = applyReasons.some(r =>
+    r === 'shield_now_passes' ||
+    r === 'removed_slop_forbidden_words' ||
+    r === 'removed_generic_bait' ||
+    r === 'removed_missing_originality' ||
+    r === 'passes_quality_validation_original_did_not' ||
+    r === 'brief_alignment_improved'
+  );
+
+  if (hasBrief && scoresAfter.originality < scoresBefore.originality) {
+    // Rewrite lowers originality for a brief-backed opportunity.
+    // Only allow if there's a hard failure removal or brief alignment improvement.
+    if (!hasHardFailureRemoval) {
+      return { shouldApply: false, applyReasons: [], rejectedReason: 'brief_backed_rewrite_lowers_originality_without_hard_fix' };
+    }
   }
 
   // ─── Decision ───
@@ -809,6 +845,23 @@ export async function enhanceOpportunity(
         niche_alignment_score: nicheResult.niche_alignment_score,
       });
 
+      // Phase 2D.3: Compute brief alignment scores for the rewrite decision
+      const hasBrief = Boolean(opp._brief);
+      const briefAlignmentScoreBefore = opp._brief_alignment_score;
+      let briefAlignmentScoreAfter: number | undefined;
+      if (hasBrief && opp._brief) {
+        // Import validateBriefAlignment from pipeline-worker for consistency
+        // Since we can't import across modules easily, use a simple heuristic:
+        // check if the rewritten text contains key angle concepts
+        try {
+          const { validateBriefAlignment } = require('./pipeline-worker');
+          const alignmentAfter = validateBriefAlignment(rewriteResult.text, opp._brief, opp.source_text);
+          briefAlignmentScoreAfter = alignmentAfter.score;
+        } catch {
+          // If import fails, leave undefined
+        }
+      }
+
       // Use the pure decision function to determine whether to apply the rewrite
       const decision = shouldApplyRewrite({
         scoresBefore,
@@ -823,6 +876,9 @@ export async function enhanceOpportunity(
         rewriteValidationPassed: rewriteValidation.passed,
         rewriteIsOffNiche: nicheResult.is_off_niche,
         rewriteIntroducesUnsourcedNumericClaims: rewriteIntroducesUnsourcedClaims,
+        hasBrief,
+        briefAlignmentScoreBefore,
+        briefAlignmentScoreAfter,
       });
 
       if (decision.shouldApply) {

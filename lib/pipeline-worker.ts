@@ -179,7 +179,7 @@ export async function processPipelineTaskBatch(options: ProcessBatchOptions): Pr
  * Patterns indicating invented personal experience that is NOT supported by the source.
  * These should NEVER appear in crafted text unless the source explicitly supports them.
  */
-const INVENTED_EXPERIENCE_PATTERNS = [
+export const INVENTED_EXPERIENCE_PATTERNS = [
   /\bI tried\b/i,
   /\bI found\b/i,
   /\bmy experience\b/i,
@@ -199,7 +199,7 @@ const INVENTED_EXPERIENCE_PATTERNS = [
  * Generic praise patterns that should not appear in crafted text.
  * These indicate low-quality, non-analytical content.
  */
-const GENERIC_PRAISE_PATTERNS = [
+export const GENERIC_PRAISE_PATTERNS = [
   /\bbrilliant minds?\b/i,
   /\bgame changer\b/i,
   /\bthis is huge\b/i,
@@ -207,6 +207,11 @@ const GENERIC_PRAISE_PATTERNS = [
   /\bso inspiring\b/i,
   /\bamazing (new|update|feature)\b/i,
   /\bgroundbreaking\b/i,
+  /\bhype cycle\b/i,
+  /\blabs get serious\b/i,
+  /\bfoundational breakthroughs\b/i,
+  /\baitract elite\b/i,
+  /\bgives me hope\b/i,
 ];
 
 /**
@@ -314,12 +319,75 @@ export function validateBriefAlignment(
 }
 
 /**
+ * Phase 2D.3: Local quality checks for crafted text before accepting.
+ * Returns failure reasons if any check fails, or empty array if all pass.
+ */
+function localCraftingChecks(
+  craftedText: string,
+  brief: { do_not_claim: string[] },
+  sourceText?: string
+): string[] {
+  const failures: string[] = [];
+
+  // Check: not JSON-looking
+  if (/^\s*\{/.test(craftedText) || /^```/.test(craftedText)) {
+    failures.push('text_looks_jsonish');
+  }
+
+  // Check: no invented personal experience
+  for (const pattern of INVENTED_EXPERIENCE_PATTERNS) {
+    if (pattern.test(craftedText)) {
+      const sourceLower = (sourceText || '').toLowerCase();
+      if (!sourceLower.includes('i tried') && !sourceLower.includes('i found') && !sourceLower.includes('i tested') && !sourceLower.includes('i used')) {
+        failures.push(`invented_personal_experience:${pattern.source}`);
+        break;
+      }
+    }
+  }
+
+  // Check: no generic praise
+  for (const pattern of GENERIC_PRAISE_PATTERNS) {
+    if (pattern.test(craftedText)) {
+      failures.push(`generic_praise:${pattern.source}`);
+      break;
+    }
+  }
+
+  // Check: no do_not_claim terms
+  if (brief.do_not_claim && brief.do_not_claim.length > 0) {
+    const craftedLower = craftedText.toLowerCase();
+    for (const claim of brief.do_not_claim) {
+      const claimLower = claim.toLowerCase();
+      if (craftedLower.includes(claimLower) && claimLower.length > 3) {
+        failures.push(`do_not_claim_violation:${claim.slice(0, 30)}`);
+        break;
+      }
+    }
+  }
+
+  // Check: length 40–280
+  if (craftedText.length < 40) {
+    failures.push('too_short_under_40');
+  }
+  if (craftedText.length > 280) {
+    failures.push('too_long_over_280');
+  }
+
+  return failures;
+}
+
+/**
  * Craft content from a brief using the selected_candidate_crafting model route.
  *
- * This replaces the original crafted_text (from content-engine-v3) with a
- * brief-faithful version that follows the recommended_angle, avoids
- * do_not_claim terms, includes required_context, and does not invent
- * personal experience.
+ * Phase 2D.3: JSON contract — the model MUST return a JSON object:
+ *   { "crafted_text": "...", "format": "...", "brief_alignment_score": N,
+ *     "claims_to_avoid_checked": bool, "notes": "..." }
+ *
+ * If JSON parse fails or crafted_text is missing, we return crafted_text=null
+ * with brief_alignment_score=1 and a selected_candidate_crafting_parse_failed note.
+ *
+ * After successful parse, run local quality checks + validateBriefAlignment.
+ * If checks fail, make ONE repair attempt.
  */
 async function craftFromBrief(
   opp: Record<string, any>,
@@ -342,6 +410,10 @@ async function craftFromBrief(
   brief_alignment_notes: string[];
   invented_personal_experience_flag: boolean;
   ignored_recommended_angle_flag: boolean;
+  _brief_crafting_parse_failed?: boolean;
+  _brief_crafting_repair_attempted?: boolean;
+  _brief_crafting_repair_applied?: boolean;
+  _brief_crafting_failure_reason?: string;
 }> {
   const sourceText = String(opp.source_text || opp.text || '').slice(0, 400);
   const sourceAuthor = String(opp.source_author || opp.author || opp.username || '');
@@ -349,11 +421,8 @@ async function craftFromBrief(
   const doNotClaimStr = (brief.do_not_claim || []).map(c => `- "${c}"`).join('\n');
   const requiredContextStr = (brief.required_context || []).map(c => `- ${c}`).join('\n');
 
-  try {
-    const response = await callModel('selected_candidate_crafting' as any, [
-      {
-        role: 'system',
-        content: `You are a content crafter for @30piq, an X account focused on AI, creators, internet culture, productivity, skills, and modern work.
+  // Phase 2D.3: JSON contract system prompt
+  const systemPrompt = `You are a content crafter for @30piq, an X account focused on AI, creators, internet culture, productivity, skills, and modern work.
 
 Your task: Craft a tweet that STRICTLY follows the Opportunity Brief below. The brief was produced by an intelligence analyst who identified this as a promising opportunity with a specific recommended angle.
 
@@ -363,21 +432,33 @@ Your task: Craft a tweet that STRICTLY follows the Opportunity Brief below. The 
 
 2. DO NOT invent personal experience. Never write "I tried", "I found", "I tested", "my experience", "I used", "I built", "I discovered", "I learned", "I noticed" — unless the source tweet is FROM @30piq themselves confirming this experience.
 
-3. DO NOT use generic praise: no "brilliant minds", "game changer", "this is huge", "seeing X gives me hope", "so inspiring".
+3. DO NOT use vague or grand phrases: no "brilliant minds", "game changer", "this is huge", "seeing X gives me hope", "so inspiring", "hype cycle", "labs get serious", "foundational breakthroughs attract elite builders", "groundbreaking".
 
 4. AVOID all do_not_claim terms listed below — these are claims the source does NOT support and must not be repeated.
 
 5. INCLUDE all required_context items — these are facts/points that MUST be present for the content to be honest.
 
-6. Sound analytical, useful, specific, and @30piq-like: a smart builder/operator perspective, not a content mill or life coach.
+6. INCLUDE at least one concrete takeaway for builders/operators. Not just a broad interpretation — give a specific, actionable signal or insight.
 
-7. Keep it under 280 characters.
+7. Keep claims as interpretations, not facts: prefer "A useful signal is..." over "This proves..."; prefer "One way to read this..." over "This means...".
 
-8. Return PLAIN TEXT ONLY — no JSON, no markdown, no code fences, no labels.
+8. Do NOT invent historical parallels unless the source or required_context directly supports them.
 
-9. English ONLY.
+9. Sound analytical, specific, and calm — not a hype account, not a content mill, not a life coach.
 
-10. No hashtags, no AI slop words (delve, crucial, leverage, game-changer, unlock, empower, elevate, foster, streamline, harness, cutting-edge, paradigm, synergy).
+10. Keep crafted_text under 280 characters. It must be at least 40 characters.
+
+11. English ONLY.
+
+12. No hashtags, no AI slop words (delve, crucial, leverage, game-changer, unlock, empower, elevate, foster, streamline, harness, cutting-edge, paradigm, synergy).
+
+13. Return a JSON object with this exact schema:
+    { "crafted_text": "string under 280 chars", "format": "quote|reply|standalone", "brief_alignment_score": number, "claims_to_avoid_checked": boolean, "notes": "short string" }
+    - crafted_text: The tweet text, plain text only (no JSON/markdown inside it).
+    - format: The content format.
+    - brief_alignment_score: Your self-assessment 1-10 of how well the text follows the recommended_angle.
+    - claims_to_avoid_checked: True if you verified the text avoids all do_not_claim terms.
+    - notes: Brief note on your crafting decisions.
 
 ═══ OPPORTUNITY BRIEF ═══
 
@@ -399,38 +480,61 @@ ${requiredContextStr || '(none)'}
 
 Niche fit: ${brief.niche_fit_score}/10
 Originality potential: ${brief.originality_potential_score}/10
-Publishability: ${brief.publishability_score}/10`,
-      },
-      {
-        role: 'user',
-        content: `Craft a brief-faithful tweet for this opportunity:
+Publishability: ${brief.publishability_score}/10`;
+
+  const userPrompt = `Craft a brief-faithful tweet for this opportunity:
 
 Source by @${sourceAuthor}: "${sourceText}"
 
 Original drafted text (IGNORE its angle — use the brief's angle instead): "${originalCrafted}"
 
-Craft the tweet now following the recommended angle.`,
-      },
-    ], { temperature: 0.2, max_tokens: 800 });
+Return a JSON object with crafted_text, format, brief_alignment_score, claims_to_avoid_checked, and notes.`;
 
-    let crafted = String(response || '').trim();
+  try {
+    const response = await callModel('selected_candidate_crafting' as any, [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ], { temperature: 0.18, max_tokens: 900, response_format: { type: 'json_object' } });
 
-    // Clean JSON wrapper if model returns JSON
-    if (crafted.startsWith('{') || crafted.startsWith('```')) {
-      try {
-        const parsed = parseModelJson(crafted);
-        if (parsed.crafted_text && typeof parsed.crafted_text === 'string') {
-          crafted = parsed.crafted_text.trim();
-        } else if (parsed.text && typeof parsed.text === 'string') {
-          crafted = parsed.text.trim();
-        }
-      } catch {
-        // Not JSON — use as-is
-      }
+    // Phase 2D.3: Strict JSON parse — the contract requires a JSON object
+    let parsed: any;
+    try {
+      parsed = parseModelJson(String(response || ''));
+    } catch {
+      parsed = null;
     }
 
-    // Strip code fences
-    crafted = crafted.replace(/^```(?:json|text)?\s*\n?/i, '').replace(/\n?\s*```$/i, '').trim();
+    // Require crafted_text field in parsed JSON
+    if (!parsed || typeof parsed !== 'object' || typeof parsed.crafted_text !== 'string' || !parsed.crafted_text.trim()) {
+      return {
+        crafted_text: null,
+        format: brief.content_format || 'reply',
+        brief_alignment_score: 1,
+        brief_alignment_notes: ['selected_candidate_crafting_parse_failed: JSON missing crafted_text or parse error'],
+        invented_personal_experience_flag: false,
+        ignored_recommended_angle_flag: true,
+        _brief_crafting_parse_failed: true,
+        _brief_crafting_failure_reason: 'json_missing_crafted_text',
+      };
+    }
+
+    let crafted = parsed.crafted_text.trim();
+    const modelFormat = parsed.format || brief.content_format || 'reply';
+    const modelBriefScore = typeof parsed.brief_alignment_score === 'number' ? parsed.brief_alignment_score : undefined;
+
+    // Do NOT use raw model output if it still looks like JSON/malformed
+    if (/^\s*\{/.test(crafted) || /^```/.test(crafted)) {
+      return {
+        crafted_text: null,
+        format: brief.content_format || 'reply',
+        brief_alignment_score: 1,
+        brief_alignment_notes: ['selected_candidate_crafting_parse_failed: crafted_text field contains JSON wrapper'],
+        invented_personal_experience_flag: false,
+        ignored_recommended_angle_flag: true,
+        _brief_crafting_parse_failed: true,
+        _brief_crafting_failure_reason: 'crafted_text_is_json_wrapper',
+      };
+    }
 
     if (!crafted || crafted.length < 10) {
       return {
@@ -440,19 +544,108 @@ Craft the tweet now following the recommended angle.`,
         brief_alignment_notes: ['Crafting produced empty or too short text'],
         invented_personal_experience_flag: false,
         ignored_recommended_angle_flag: true,
+        _brief_crafting_parse_failed: false,
+        _brief_crafting_failure_reason: 'text_too_short',
       };
     }
 
-    // Validate brief alignment
+    // Phase 2D.3: Pre-judge self-check — local quality checks + validateBriefAlignment
     const alignment = validateBriefAlignment(crafted, brief, sourceText);
+    const localFailures = localCraftingChecks(crafted, brief, sourceText);
+    const allNotes = [...alignment.notes, ...localFailures];
+
+    // If local checks fail, attempt ONE repair
+    let repairAttempted = false;
+    let repairApplied = false;
+    let repairFailureReason: string | undefined;
+
+    if (localFailures.length > 0 || alignment.score < 7.0) {
+      repairAttempted = true;
+      console.log(`[craftFromBrief] Local checks failed (${localFailures.join(', ')}), brief_alignment_score=${alignment.score}. Attempting one repair.`);
+
+      try {
+        const repairResponse = await callModel('selected_candidate_crafting' as any, [
+          {
+            role: 'system',
+            content: `You are a content crafter for @30piq. Your previous draft had quality issues that must be fixed.
+
+Fix these specific problems:
+${localFailures.map(f => `- ${f}`).join('\n')}
+${alignment.score < 7.0 ? `- brief_alignment_score is only ${alignment.score}/10 — must better follow the recommended angle` : ''}
+
+MANDATORY RULES (same as before):
+- Follow the recommended_angle exactly: ${brief.recommended_angle}
+- No invented personal experience
+- No generic/vague praise ("brilliant minds", "game changer", "hype cycle", "gives me hope")
+- Avoid do_not_claim terms
+- Include at least one concrete takeaway for builders/operators
+- Keep claims as interpretations, not facts
+- Under 280 chars, at least 40 chars
+- English only, no hashtags, no AI slop
+
+Return a JSON object: { "crafted_text": "...", "format": "...", "brief_alignment_score": N, "claims_to_avoid_checked": bool, "notes": "..." }`,
+          },
+          {
+            role: 'user',
+            content: `Previous draft that needs repair:
+"${crafted}"
+
+Source by @${sourceAuthor}: "${sourceText}"
+
+Return a repaired JSON object.`,
+          },
+        ], { temperature: 0.18, max_tokens: 900, response_format: { type: 'json_object' } });
+
+        let repairParsed: any;
+        try {
+          repairParsed = parseModelJson(String(repairResponse || ''));
+        } catch {
+          repairParsed = null;
+        }
+
+        if (repairParsed && typeof repairParsed.crafted_text === 'string' && repairParsed.crafted_text.trim()) {
+          const repairedText = repairParsed.crafted_text.trim();
+          // Verify repair doesn't look like JSON
+          if (!/^\s*\{/.test(repairedText) && !/^```/.test(repairedText)) {
+            // Re-validate repaired text
+            const repairAlignment = validateBriefAlignment(repairedText, brief, sourceText);
+            const repairLocalFailures = localCraftingChecks(repairedText, brief, sourceText);
+
+            // Accept repair if it improves the situation (fewer failures or better alignment)
+            if (repairLocalFailures.length < localFailures.length || repairAlignment.score > alignment.score) {
+              crafted = repairedText;
+              repairApplied = true;
+              // Update alignment info to the repaired version
+              alignment.score = repairAlignment.score;
+              alignment.notes = [...repairAlignment.notes, ...repairLocalFailures, 'repair_applied'];
+              alignment.invented_personal_experience = repairAlignment.invented_personal_experience;
+              alignment.ignored_recommended_angle = repairAlignment.ignored_recommended_angle;
+            } else {
+              repairFailureReason = 'repair_no_improvement';
+            }
+          } else {
+            repairFailureReason = 'repair_crafted_text_is_json_wrapper';
+          }
+        } else {
+          repairFailureReason = 'repair_json_missing_crafted_text';
+        }
+      } catch (repairErr: any) {
+        console.warn(`[craftFromBrief] Repair attempt failed: ${(repairErr?.message || 'unknown').slice(0, 200)}`);
+        repairFailureReason = `repair_exception:${(repairErr?.message || 'unknown').slice(0, 50)}`;
+      }
+    }
 
     return {
       crafted_text: crafted,
-      format: brief.content_format || 'reply',
+      format: modelFormat || brief.content_format || 'reply',
       brief_alignment_score: alignment.score,
       brief_alignment_notes: alignment.notes,
       invented_personal_experience_flag: alignment.invented_personal_experience,
       ignored_recommended_angle_flag: alignment.ignored_recommended_angle,
+      _brief_crafting_parse_failed: false,
+      _brief_crafting_repair_attempted: repairAttempted,
+      _brief_crafting_repair_applied: repairApplied,
+      _brief_crafting_failure_reason: repairFailureReason,
     };
   } catch (err: any) {
     console.warn(`[craftFromBrief] AI call failed: ${(err?.message || 'unknown').slice(0, 200)}`);
@@ -463,6 +656,8 @@ Craft the tweet now following the recommended angle.`,
       brief_alignment_notes: [`AI call failed: ${(err?.message || 'unknown').slice(0, 100)}`],
       invented_personal_experience_flag: false,
       ignored_recommended_angle_flag: true,
+      _brief_crafting_parse_failed: true,
+      _brief_crafting_failure_reason: `ai_call_failed:${(err?.message || 'unknown').slice(0, 50)}`,
     };
   }
 }
@@ -862,6 +1057,11 @@ async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskRe
               _brief_alignment_notes: recraftResult.brief_alignment_notes,
               _invented_personal_experience_flag: recraftResult.invented_personal_experience_flag,
               _ignored_recommended_angle_flag: recraftResult.ignored_recommended_angle_flag,
+              // Phase 2D.3 diagnostics
+              _brief_crafting_parse_failed: recraftResult._brief_crafting_parse_failed || false,
+              _brief_crafting_repair_attempted: recraftResult._brief_crafting_repair_attempted || false,
+              _brief_crafting_repair_applied: recraftResult._brief_crafting_repair_applied || false,
+              _brief_crafting_failure_reason: recraftResult._brief_crafting_failure_reason,
             };
             briefRecraftCount++;
           } else {
@@ -874,6 +1074,11 @@ async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskRe
               _brief_alignment_notes: recraftResult.brief_alignment_notes,
               _invented_personal_experience_flag: recraftResult.invented_personal_experience_flag,
               _ignored_recommended_angle_flag: recraftResult.ignored_recommended_angle_flag,
+              // Phase 2D.3 diagnostics
+              _brief_crafting_parse_failed: recraftResult._brief_crafting_parse_failed || false,
+              _brief_crafting_repair_attempted: recraftResult._brief_crafting_repair_attempted || false,
+              _brief_crafting_repair_applied: recraftResult._brief_crafting_repair_applied || false,
+              _brief_crafting_failure_reason: recraftResult._brief_crafting_failure_reason,
             };
           }
         } catch (recraftErr: any) {
@@ -1166,9 +1371,11 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
     }
 
     // Build judge candidates with their briefs
+    // Phase 2D.3: Prefer opp._brief directly over intelBriefs source_text lookup
     const candidates = opportunities.map(opp => {
-      const key = (opp.source_text || '').slice(0, 100);
-      const brief = intelBriefs[key] || {};
+      const oppBrief = (opp as any)._brief;
+      const brief = (oppBrief && oppBrief.recommended_angle) ? oppBrief
+        : intelBriefs[(opp.source_text || '').slice(0, 100)] || {};
       return {
         crafted_text: opp.crafted_text || '',
         brief,
