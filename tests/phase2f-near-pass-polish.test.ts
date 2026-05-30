@@ -551,10 +551,138 @@ describe('Threshold Integrity (unchanged from Phase 2D)', () => {
     expect(source).toContain("'opportunity_judge'");
     expect(source).toContain("'near_pass_polish'");
 
-    // Verify near_pass_polish routes to a capable model (not a downgrade)
-    expect(source).toMatch(/near_pass_polish.*anthropic\/claude-sonnet/s);
+    // Verify near_pass_polish routes to the correct model
+    expect(source).toContain("model: 'anthropic/claude-sonnet-4.6'");
 
     // Verify the temperature is set correctly for near_pass_polish
     expect(source).toMatch(/near_pass_polish.*temperature.*0\.15/s);
+  });
+});
+
+// ═══ Shield Issue Selective Removal Tests (Phase 2F hotfix) ═══
+
+describe('Shield Issue Selective Removal', () => {
+  // Simulate the shield issue filtering logic from pipeline-worker.ts
+  // This mirrors the exact logic used in processOpportunityJudge near-pass polish
+
+  function computeRemainingShieldIssues(
+    shieldIssues: string[],
+    afterJudge: {
+      brief_alignment_score?: number;
+      originality_score?: number;
+    } | null
+  ): { remaining: string[]; shield_passed: boolean } {
+    const remaining = shieldIssues.filter(issue => {
+      // Remove judge_failed:* — the re-judge passed, so judge failure is resolved
+      if (issue.startsWith('judge_failed:')) return false;
+      // Remove brief_alignment_failed only if the re-judge confirms brief_alignment_score >= 7.5
+      if (issue === 'brief_alignment_failed' && (afterJudge?.brief_alignment_score ?? 0) >= 7.5) return false;
+      // Remove missing_originality only if the re-judge confirms originality_score >= 7.8
+      if (issue === 'missing_originality' && (afterJudge?.originality_score ?? 0) >= 7.8) return false;
+      // Keep all other issues (numeric, non-judge, etc.)
+      return true;
+    });
+    return { remaining, shield_passed: remaining.length === 0 };
+  }
+
+  // ═══ Test 27: Passed polish does NOT set shield_passed=true if unresolved shield issue remains ═══
+
+  it('does NOT set shield_passed=true when unresolved non-judge shield issue remains', () => {
+    const shieldIssues = [
+      'judge_failed:originality_score_7_below_7.8',
+      'numeric_claim_unsourced',
+    ];
+    const afterJudge = {
+      brief_alignment_score: 8,
+      originality_score: 8,
+    };
+
+    const { remaining, shield_passed } = computeRemainingShieldIssues(shieldIssues, afterJudge);
+
+    // judge_failed should be removed, but numeric_claim_unsourced should remain
+    expect(remaining).toContain('numeric_claim_unsourced');
+    expect(remaining).not.toContain('judge_failed:originality_score_7_below_7.8');
+    expect(shield_passed).toBe(false); // Still has unresolved issue
+  });
+
+  // ═══ Test 28: Passed polish removes judge_failed but keeps unrelated shield issues ═══
+
+  it('removes judge_failed issues but preserves unrelated shield issues', () => {
+    const shieldIssues = [
+      'judge_failed:originality_score_7_below_7.8',
+      'judge_failed:usefulness_score_6_below_7',
+      'content_too_short',
+    ];
+    const afterJudge = {
+      brief_alignment_score: 8,
+      originality_score: 8,
+    };
+
+    const { remaining, shield_passed } = computeRemainingShieldIssues(shieldIssues, afterJudge);
+
+    // All judge_failed removed
+    expect(remaining).not.toContain('judge_failed:originality_score_7_below_7.8');
+    expect(remaining).not.toContain('judge_failed:usefulness_score_6_below_7');
+    // Unrelated issue preserved
+    expect(remaining).toContain('content_too_short');
+    expect(shield_passed).toBe(false);
+  });
+
+  // ═══ Test 29: Passed polish can remove missing_originality only when after_judge.originality_score >= 7.8 ═══
+
+  it('removes missing_originality only when after_judge.originality_score >= 7.8', () => {
+    // Case 1: after_judge.originality_score >= 7.8 → missing_originality removed
+    const case1 = computeRemainingShieldIssues(
+      ['judge_failed:originality_score_7_below_7.8', 'missing_originality'],
+      { originality_score: 8 }
+    );
+    expect(case1.remaining).not.toContain('missing_originality');
+    expect(case1.shield_passed).toBe(true); // All issues resolved
+
+    // Case 2: after_judge.originality_score < 7.8 → missing_originality kept
+    const case2 = computeRemainingShieldIssues(
+      ['judge_failed:originality_score_7_below_7.8', 'missing_originality'],
+      { originality_score: 7.5 }
+    );
+    expect(case2.remaining).toContain('missing_originality');
+    expect(case2.shield_passed).toBe(false);
+  });
+
+  // ═══ Test 30: Passed polish can remove brief_alignment_failed only when after_judge.brief_alignment_score >= 7.5 ═══
+
+  it('removes brief_alignment_failed only when after_judge.brief_alignment_score >= 7.5', () => {
+    // Case 1: after_judge.brief_alignment_score >= 7.5 → brief_alignment_failed removed
+    const case1 = computeRemainingShieldIssues(
+      ['judge_failed:brief_alignment_score_7_below_7.5', 'brief_alignment_failed'],
+      { brief_alignment_score: 8 }
+    );
+    expect(case1.remaining).not.toContain('brief_alignment_failed');
+    expect(case1.shield_passed).toBe(true); // All issues resolved
+
+    // Case 2: after_judge.brief_alignment_score < 7.5 → brief_alignment_failed kept
+    const case2 = computeRemainingShieldIssues(
+      ['judge_failed:brief_alignment_score_7_below_7.5', 'brief_alignment_failed'],
+      { brief_alignment_score: 7.0 }
+    );
+    expect(case2.remaining).toContain('brief_alignment_failed');
+    expect(case2.shield_passed).toBe(false);
+  });
+
+  // ═══ Test 31: When all shield issues are resolved, shield_passed becomes true ═══
+
+  it('sets shield_passed=true when all shield issues are resolved', () => {
+    const shieldIssues = [
+      'judge_failed:originality_score_7_below_7.8',
+      'brief_alignment_failed',
+    ];
+    const afterJudge = {
+      brief_alignment_score: 8,
+      originality_score: 8,
+    };
+
+    const { remaining, shield_passed } = computeRemainingShieldIssues(shieldIssues, afterJudge);
+
+    expect(remaining).toHaveLength(0);
+    expect(shield_passed).toBe(true);
   });
 });

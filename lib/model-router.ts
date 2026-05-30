@@ -180,7 +180,7 @@ const DEFAULT_ROUTING: Record<TaskType, ModelConfig> = {
   },
   // Phase 2F: Near-pass polish — targeted rewrite for judge-failed candidates close to threshold
   near_pass_polish: {
-    model: 'anthropic/claude-sonnet-4-20250514',
+    model: 'anthropic/claude-sonnet-4.6',
     temperature: 0.15,
     max_tokens: 900,
     response_format: { type: 'json_object' },

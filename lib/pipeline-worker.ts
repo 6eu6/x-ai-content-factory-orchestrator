@@ -1517,14 +1517,29 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
             const polishedOpp = judgedOpportunities[idx];
 
             if (outcome.passed) {
-              // Polish succeeded — re-judge passed! Replace crafted_text, restore shield_passed
+              // Polish succeeded — re-judge passed! Replace crafted_text, selectively resolve shield issues.
+              // DO NOT blindly set shield_passed=true — only remove issues that the polish actually resolved.
+              // - Remove old judge_failed:* issues (the re-judge passed)
+              // - Optionally remove brief_alignment_failed only if after_judge.brief_alignment_score >= 7.5
+              // - Optionally remove missing_originality only if after_judge.originality_score >= 7.8
+              // - Keep all other shield issues (numeric, non-judge, etc.)
+              const afterJudgeScores = outcome.after_judge;
+              const remainingShieldIssues = (polishedOpp.shield_issues || []).filter((issue: string) => {
+                // Remove judge_failed:* — the re-judge passed, so judge failure is resolved
+                if (issue.startsWith('judge_failed:')) return false;
+                // Remove brief_alignment_failed only if the re-judge confirms brief_alignment_score >= 7.5
+                if (issue === 'brief_alignment_failed' && (afterJudgeScores?.brief_alignment_score ?? 0) >= 7.5) return false;
+                // Remove missing_originality only if the re-judge confirms originality_score >= 7.8
+                if (issue === 'missing_originality' && (afterJudgeScores?.originality_score ?? 0) >= 7.8) return false;
+                // Keep all other issues (numeric, non-judge, etc.)
+                return true;
+              });
+
               judgedOpportunities[idx] = {
                 ...polishedOpp,
                 crafted_text: outcome.polished_text,
-                shield_passed: polishedOpp.shield_passed !== false ? true : true, // Override judge failure
-                shield_issues: (polishedOpp.shield_issues || []).filter(
-                  (issue: string) => !issue.startsWith('judge_failed:')
-                ),
+                shield_passed: remainingShieldIssues.length === 0,
+                shield_issues: remainingShieldIssues,
                 _judge_result: {
                   ...(polishedOpp as any)._judge_result,
                   passed: true,
