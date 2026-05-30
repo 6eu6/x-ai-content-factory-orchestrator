@@ -1,0 +1,20 @@
+CREATE TABLE IF NOT EXISTS source_quality_scores (
+  source_handle TEXT PRIMARY KEY,
+  scans_count INT DEFAULT 0,
+  tweets_analyzed INT DEFAULT 0,
+  raw_opportunities_count INT DEFAULT 0,
+  selected_count INT DEFAULT 0,
+  rescued_count INT DEFAULT 0,
+  judge_passed_count INT DEFAULT 0,
+  publish_gate_accepted_count INT DEFAULT 0,
+  rejection_reason_counts JSONB DEFAULT '{}',
+  avg_publishability_score NUMERIC DEFAULT 0,
+  avg_originality_potential_score NUMERIC DEFAULT 0,
+  avg_niche_fit_score NUMERIC DEFAULT 0,
+  avg_usefulness_score NUMERIC DEFAULT 0,
+  opportunity_yield_rate NUMERIC DEFAULT 0,
+  selected_rate NUMERIC DEFAULT 0,
+  rejection_rate NUMERIC DEFAULT 0,
+  source_quality_score NUMERIC DEFAULT 0,
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);

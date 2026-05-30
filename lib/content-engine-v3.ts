@@ -15,6 +15,7 @@ import { learnFromCrawlerItems } from './learning-memory';
 import { shieldCheck, quickShieldCheck } from './account-shield';
 import { insertIfMissing } from './db-helpers';
 import { queryBrainForContent } from './brain-query';
+import { scoreAndPrefilterTweets, normalizedTweetToCandidate } from './tweet-candidate-scorer';
 
 /**
  * Content Engine v3 — Crawl-based content engine, not generation-based
@@ -74,6 +75,15 @@ export type ContentOpportunity = {
   rewrite_raw_was_json_wrapper?: boolean;
   rewrite_cleaned_json_wrapper?: boolean;
   rewrite_cleaning_notes?: string;
+  // Phase 2E.1: discovery metadata
+  tweet_type?: 'original' | 'reply' | 'quote' | 'retweet';
+  parent_context?: string;
+  quote_context?: string;
+  engagement_score?: number;
+  discovery_score?: number;
+  discovery_reason?: string;
+  source_quality_score?: number;
+  account_source_quality?: number;
 };
 
 export type MediaFromTweet = {
@@ -1238,6 +1248,8 @@ async function discoverOpportunities(
       const crafted = await craftEngagement('quote', tweet, algoRules || [], stylePatterns || [], rulesUsed);
       if (crafted) {
         const shieldResult = quickShieldCheck(crafted);
+        // Phase 2E.1: Determine tweet type for metadata
+        const tweetType = tweet.is_quote_tweet ? 'quote' : (tweet.is_reply ? 'reply' : 'original');
         opportunities.push({
           type: 'quote',
           source_tweet_url: tweet.tweet_url,
@@ -1249,7 +1261,14 @@ async function discoverOpportunities(
           why: tweet.has_question ? 'Question sparks discussion' : `High engagement (${tweet.score})`,
           brain_rules_used: rulesUsed,
           shield_passed: shieldResult.safe,
-          shield_issues: shieldResult.reasons
+          shield_issues: shieldResult.reasons,
+          // Phase 2E.1: discovery metadata
+          tweet_type: tweetType as 'original' | 'reply' | 'quote' | 'retweet',
+          parent_context: tweet.in_reply_to_tweet_id ? `Reply to tweet ${tweet.in_reply_to_tweet_id}` : undefined,
+          quote_context: tweet.quoted_tweet_text ? `QT by @${tweet.quoted_tweet_author || '?'}: ${tweet.quoted_tweet_text.slice(0, 200)}` : undefined,
+          engagement_score: tweet.score || tweet.engagement_score,
+          discovery_score: tweet.score || 0,
+          discovery_reason: tweet.has_question ? 'question_sparks_discussion' : 'high_engagement',
         });
       }
     }
@@ -1258,6 +1277,8 @@ async function discoverOpportunities(
       const crafted = await craftEngagement('reply', tweet, algoRules || [], stylePatterns || [], rulesUsed);
       if (crafted) {
         const shieldResult = quickShieldCheck(crafted);
+        // Phase 2E.1: Determine tweet type for metadata
+        const tweetType = tweet.is_quote_tweet ? 'quote' : (tweet.is_reply ? 'reply' : 'original');
         opportunities.push({
           type: 'reply',
           source_tweet_url: tweet.tweet_url,
@@ -1269,7 +1290,14 @@ async function discoverOpportunities(
           why: 'Valuable tweet worth adding a useful reply',
           brain_rules_used: rulesUsed,
           shield_passed: shieldResult.safe,
-          shield_issues: shieldResult.reasons
+          shield_issues: shieldResult.reasons,
+          // Phase 2E.1: discovery metadata
+          tweet_type: tweetType as 'original' | 'reply' | 'quote' | 'retweet',
+          parent_context: tweet.in_reply_to_tweet_id ? `Reply to tweet ${tweet.in_reply_to_tweet_id}` : undefined,
+          quote_context: tweet.quoted_tweet_text ? `QT by @${tweet.quoted_tweet_author || '?'}: ${tweet.quoted_tweet_text.slice(0, 200)}` : undefined,
+          engagement_score: tweet.score || tweet.engagement_score,
+          discovery_score: tweet.score || 0,
+          discovery_reason: 'valuable_tweet_reply',
         });
       }
     }
@@ -1962,6 +1990,15 @@ export type SingleAccountScanResult = {
    * This is NOT an error — downstream steps should skip this account gracefully.
    */
   empty_reason?: AccountScanEmptyReason;
+  // Phase 2E.1: prefilter diagnostics
+  tweets_fetched?: number;
+  tweets_after_prefilter?: number;
+  tweets_selected_for_analysis?: number;
+  skipped_retweets?: number;
+  skipped_replies?: number;
+  skipped_low_engagement?: number;
+  skipped_off_niche?: number;
+  top_candidate_scores?: number[];
 };
 
 /**
@@ -2009,12 +2046,26 @@ export async function scanSingleAccountForPipeline(
   let viralFound = 0;
   let totalAnalyzed = 0;
 
+  // Phase 2E.1: prefilter diagnostics
+  let prefilterDiagnostics = {
+    tweets_fetched: 0,
+    tweets_after_prefilter: 0,
+    tweets_selected_for_analysis: 0,
+    skipped_retweets: 0,
+    skipped_replies: 0,
+    skipped_low_engagement: 0,
+    skipped_off_niche: 0,
+    top_candidate_scores: [] as number[],
+  };
+
   console.log(`[scanSingleAccountForPipeline] Scanning @${accountHandle}...`);
 
   // ═══ Fetch timeline — API/network errors MUST propagate, not get swallowed ═══
+  // Phase 2E.1: Fetch MORE tweets (up to API cap of 20), then prefilter to select best
+  const fetchCount = Math.min(tweetsPerAccount * 3, 20);
   let tweets: any[];
   try {
-    tweets = await getXUserTimeline(accountHandle, tweetsPerAccount, true);
+    tweets = await getXUserTimeline(accountHandle, fetchCount, true);
   } catch (apiErr: any) {
     // Distinguish protected/suspended accounts from transient API failures
     const msg = (apiErr.message || '').toLowerCase();
@@ -2065,8 +2116,33 @@ export async function scanSingleAccountForPipeline(
 
   debugLog.push(`[scan] @${accountHandle}: got ${tweets.length} tweets`);
 
+  // ═══ Phase 2E.1: Smart tweet prefiltering ═══
+  // Convert normalized tweets to TweetCandidate format and score them
+  const candidates = tweets.map(normalizedTweetToCandidate);
+  const prefilterResult = scoreAndPrefilterTweets(candidates, { maxAnalyze: tweetsPerAccount });
+
+  // Store prefilter diagnostics
+  prefilterDiagnostics = {
+    tweets_fetched: prefilterResult.fetched,
+    tweets_after_prefilter: prefilterResult.after_prefilter,
+    tweets_selected_for_analysis: prefilterResult.selected_for_analysis,
+    skipped_retweets: prefilterResult.skipped_retweets,
+    skipped_replies: prefilterResult.skipped_replies,
+    skipped_low_engagement: prefilterResult.skipped_low_engagement,
+    skipped_off_niche: prefilterResult.skipped_off_niche,
+    top_candidate_scores: prefilterResult.top_candidate_scores,
+  };
+
+  debugLog.push(`[scan] @${accountHandle}: prefilter ${prefilterResult.fetched} → ${prefilterResult.after_prefilter} eligible → ${prefilterResult.selected_for_analysis} selected for analysis (skipped: ${prefilterResult.skipped_retweets} RT, ${prefilterResult.skipped_replies} replies, ${prefilterResult.skipped_low_engagement} low-eng, ${prefilterResult.skipped_off_niche} off-niche)`);
+
+  // Build a set of selected tweet IDs for efficient lookup
+  const selectedIds = new Set(prefilterResult.selected.map(c => c.id));
+
+  // Only process selected candidates through the expensive AI analysis loop
+  const selectedTweets = tweets.filter(t => selectedIds.has(String(t.id || '')));
+
   try {
-    for (const tweet of tweets) {
+    for (const tweet of selectedTweets) {
       totalAnalyzed++;
       const user = { username: accountHandle, followers_count: 0, public_metrics: { followers_count: 0 } };
       const analysis = analyzeXTweet(tweet, user);
@@ -2294,7 +2370,16 @@ JSON format: {"viral_reason":"...","style_pattern":"...","media_impact":"...","t
       style_patterns: brainUpdates.stylePatterns,
       media_patterns: allMedia.length
     },
-    debug_log: debugLog
+    debug_log: debugLog,
+    // Phase 2E.1: prefilter diagnostics
+    tweets_fetched: prefilterDiagnostics.tweets_fetched,
+    tweets_after_prefilter: prefilterDiagnostics.tweets_after_prefilter,
+    tweets_selected_for_analysis: prefilterDiagnostics.tweets_selected_for_analysis,
+    skipped_retweets: prefilterDiagnostics.skipped_retweets,
+    skipped_replies: prefilterDiagnostics.skipped_replies,
+    skipped_low_engagement: prefilterDiagnostics.skipped_low_engagement,
+    skipped_off_niche: prefilterDiagnostics.skipped_off_niche,
+    top_candidate_scores: prefilterDiagnostics.top_candidate_scores,
   };
 }
 
@@ -2315,6 +2400,19 @@ export type MergeAndDiscoverResult = {
   };
   media_downloaded: number;
   debug_log: string[];
+  // Phase 2E.1: discovery diagnostics
+  accounts_scanned_count: number;
+  tweets_fetched_total: number;
+  tweets_after_prefilter_total: number;
+  tweets_selected_for_analysis_total: number;
+  top_source_accounts: string[];
+  top_discovery_reasons: string[];
+  skipped_counts: {
+    retweets: number;
+    replies: number;
+    low_engagement: number;
+    off_niche: number;
+  };
 };
 
 /**
@@ -2526,6 +2624,41 @@ ${tweetsForConcept.map((t, i) => `${i + 1}. @${t.handle} (engagement: ${t.score}
     debugLog.push(`[self-improve] failed: ${e.message}`);
   }
 
+  // ═══ Phase 2E.1: Compute discovery diagnostics ═══
+  const tweetsFetchedTotal = accountScanResults.reduce((sum, r) => sum + (r.tweets_fetched || r.tweets_analyzed || 0), 0);
+  const tweetsAfterPrefilterTotal = accountScanResults.reduce((sum, r) => sum + (r.tweets_after_prefilter || r.tweets_analyzed || 0), 0);
+  const tweetsSelectedForAnalysisTotal = accountScanResults.reduce((sum, r) => sum + (r.tweets_selected_for_analysis || r.tweets_analyzed || 0), 0);
+
+  // Top source accounts by number of opportunities
+  const sourceCounts = new Map<string, number>();
+  for (const opp of opportunities) {
+    const author = opp.source_author || '';
+    sourceCounts.set(author, (sourceCounts.get(author) || 0) + 1);
+  }
+  const topSourceAccounts = [...sourceCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([handle]) => handle);
+
+  // Top discovery reasons
+  const reasonCounts = new Map<string, number>();
+  for (const opp of opportunities) {
+    const reason = opp.discovery_reason || opp.why || 'unknown';
+    reasonCounts.set(reason, (reasonCounts.get(reason) || 0) + 1);
+  }
+  const topDiscoveryReasons = [...reasonCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([reason]) => reason);
+
+  // Skipped counts
+  const skippedCounts = {
+    retweets: accountScanResults.reduce((sum, r) => sum + (r.skipped_retweets || 0), 0),
+    replies: accountScanResults.reduce((sum, r) => sum + (r.skipped_replies || 0), 0),
+    low_engagement: accountScanResults.reduce((sum, r) => sum + (r.skipped_low_engagement || 0), 0),
+    off_niche: accountScanResults.reduce((sum, r) => sum + (r.skipped_off_niche || 0), 0),
+  };
+
   return {
     accounts_scanned: accountScanResults.length,
     tweets_analyzed: totalTweetsAnalyzed,
@@ -2538,6 +2671,14 @@ ${tweetsForConcept.map((t, i) => `${i + 1}. @${t.handle} (engagement: ${t.score}
       media_patterns: allMedia.length
     },
     media_downloaded: allMedia.length,
-    debug_log: debugLog
+    debug_log: debugLog,
+    // Phase 2E.1: discovery diagnostics
+    accounts_scanned_count: accountScanResults.length,
+    tweets_fetched_total: tweetsFetchedTotal,
+    tweets_after_prefilter_total: tweetsAfterPrefilterTotal,
+    tweets_selected_for_analysis_total: tweetsSelectedForAnalysisTotal,
+    top_source_accounts: topSourceAccounts,
+    top_discovery_reasons: topDiscoveryReasons,
+    skipped_counts: skippedCounts,
   };
 }

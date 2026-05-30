@@ -762,7 +762,16 @@ async function processScanAccount(task: PipelineTaskRow): Promise<TaskResult> {
       // Store the full analyzed_data for merge step — this is critical
       _analyzed_data: scanResult.analyzed_data,
       _media: scanResult.media,
-      _debug_log: scanResult.debug_log
+      _debug_log: scanResult.debug_log,
+      // Phase 2E.1: prefilter diagnostics
+      tweets_fetched: scanResult.tweets_fetched,
+      tweets_after_prefilter: scanResult.tweets_after_prefilter,
+      tweets_selected_for_analysis: scanResult.tweets_selected_for_analysis,
+      skipped_retweets: scanResult.skipped_retweets,
+      skipped_replies: scanResult.skipped_replies,
+      skipped_low_engagement: scanResult.skipped_low_engagement,
+      skipped_off_niche: scanResult.skipped_off_niche,
+      top_candidate_scores: scanResult.top_candidate_scores,
     };
 
     // If the account had a legitimate empty result, include the reason
@@ -824,7 +833,16 @@ async function processMergeScanResults(task: PipelineTaskRow): Promise<TaskResul
         brain_updates: r.brain_updates || { algorithm_rules: 0, style_patterns: 0, media_patterns: 0 },
         debug_log: r._debug_log || [],
         // Preserve empty_reason so mergeAndDiscoverOpportunities can skip empty accounts if needed
-        empty_reason: emptyReason
+        empty_reason: emptyReason,
+        // Phase 2E.1: Preserve prefilter diagnostics from scan_account
+        tweets_fetched: r.tweets_fetched || undefined,
+        tweets_after_prefilter: r.tweets_after_prefilter || undefined,
+        tweets_selected_for_analysis: r.tweets_selected_for_analysis || undefined,
+        skipped_retweets: r.skipped_retweets || undefined,
+        skipped_replies: r.skipped_replies || undefined,
+        skipped_low_engagement: r.skipped_low_engagement || undefined,
+        skipped_off_niche: r.skipped_off_niche || undefined,
+        top_candidate_scores: r.top_candidate_scores || undefined,
       });
     }
 
@@ -841,7 +859,15 @@ async function processMergeScanResults(task: PipelineTaskRow): Promise<TaskResul
       media_downloaded: mergeResult.media_downloaded,
       // Store the FULL opportunities for subsequent steps
       _opportunities: mergeResult.opportunities,
-      _debug_log: mergeResult.debug_log
+      _debug_log: mergeResult.debug_log,
+      // Phase 2E.1: Discovery diagnostics
+      accounts_scanned_count: mergeResult.accounts_scanned_count,
+      tweets_fetched_total: mergeResult.tweets_fetched_total,
+      tweets_after_prefilter_total: mergeResult.tweets_after_prefilter_total,
+      tweets_selected_for_analysis_total: mergeResult.tweets_selected_for_analysis_total,
+      top_source_accounts: mergeResult.top_source_accounts,
+      top_discovery_reasons: mergeResult.top_discovery_reasons,
+      skipped_counts: mergeResult.skipped_counts,
     };
 
     // Include info about legitimately empty accounts for downstream visibility
@@ -1777,6 +1803,12 @@ async function processTelegramDelivery(task: PipelineTaskRow): Promise<TaskResul
       intelligence_rejected_count: intelTask.result.intelligence_rejected_count ?? 0,
       top_rejection_reasons: intelTask.result.top_rejection_reasons ?? {},
     } : null;
+
+    // Phase 2E.1: Attach discovery summary for Telegram
+    const tweetsFetched = mergeTask?.result?.tweets_fetched_total ?? mergeTask?.result?.tweets_analyzed ?? 0;
+    const tweetsAnalyzed = mergeTask?.result?.tweets_selected_for_analysis_total ?? mergeTask?.result?.tweets_analyzed ?? 0;
+    const rawOpportunities = mergeTask?.result?.raw_opportunities ?? 0;
+    (decision as any)._discoverySummary = `Discovery: fetched ${tweetsFetched} → analyzed ${tweetsAnalyzed} → raw ${rawOpportunities}`;
 
     (decision as any)._judgeDiagnostics = judgeTask?.result ? {
       judge_passed_count: judgeTask.result.judge_passed_count ?? 0,

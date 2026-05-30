@@ -72,6 +72,13 @@ export type OpportunityBrief = {
   rescue_originality_before?: number;
   rescue_originality_after?: number;
   rescue_angle_notes?: string;
+  // Phase 2E.1: Discovery metadata from tweet prefiltering
+  tweet_type?: 'original' | 'reply' | 'quote' | 'retweet';
+  engagement_score?: number;
+  discovery_score?: number;
+  discovery_reason?: string;
+  source_quality_score?: number;
+  account_source_quality?: number;
 };
 
 export type RejectionDebug = {
@@ -768,6 +775,13 @@ export async function evaluateOpportunity(opp: Record<string, any>): Promise<Opp
       required_context: [],
       should_craft: false,
       rejection_reason: 'blocked_topic',
+      // Phase 2E.1: Copy discovery metadata from opportunity input
+      tweet_type: opp.tweet_type as 'original' | 'reply' | 'quote' | 'retweet' | undefined,
+      engagement_score: typeof opp.engagement_score === 'number' ? opp.engagement_score : undefined,
+      discovery_score: typeof opp.discovery_score === 'number' ? opp.discovery_score : undefined,
+      discovery_reason: opp.discovery_reason || undefined,
+      source_quality_score: typeof opp.source_quality_score === 'number' ? opp.source_quality_score : undefined,
+      account_source_quality: typeof opp.account_source_quality === 'number' ? opp.account_source_quality : undefined,
     };
   }
 
@@ -795,6 +809,13 @@ export async function evaluateOpportunity(opp: Record<string, any>): Promise<Opp
       required_context: [],
       should_craft: false,
       rejection_reason: 'language_or_context_mismatch',
+      // Phase 2E.1: Copy discovery metadata from opportunity input
+      tweet_type: opp.tweet_type as 'original' | 'reply' | 'quote' | 'retweet' | undefined,
+      engagement_score: typeof opp.engagement_score === 'number' ? opp.engagement_score : undefined,
+      discovery_score: typeof opp.discovery_score === 'number' ? opp.discovery_score : undefined,
+      discovery_reason: opp.discovery_reason || undefined,
+      source_quality_score: typeof opp.source_quality_score === 'number' ? opp.source_quality_score : undefined,
+      account_source_quality: typeof opp.account_source_quality === 'number' ? opp.account_source_quality : undefined,
     };
   }
 
@@ -857,6 +878,13 @@ Produce the Opportunity Brief JSON now.`,
         intelligence_error_type: 'json_parse_failed' as const,
         intelligence_error_message_short: (parseErr?.message || 'unknown').slice(0, 100),
         raw_model_output_preview: (aiResponse || '').slice(0, 200),
+        // Phase 2E.1: Copy discovery metadata from opportunity input
+        tweet_type: opp.tweet_type as 'original' | 'reply' | 'quote' | 'retweet' | undefined,
+        engagement_score: typeof opp.engagement_score === 'number' ? opp.engagement_score : undefined,
+        discovery_score: typeof opp.discovery_score === 'number' ? opp.discovery_score : undefined,
+        discovery_reason: opp.discovery_reason || undefined,
+        source_quality_score: typeof opp.source_quality_score === 'number' ? opp.source_quality_score : undefined,
+        account_source_quality: typeof opp.account_source_quality === 'number' ? opp.account_source_quality : undefined,
       };
     }
 
@@ -900,6 +928,13 @@ Produce the Opportunity Brief JSON now.`,
         intelligence_error_type: 'missing_required_fields' as const,
         intelligence_error_message_short: `Missing: ${missingFields.join(', ')}`,
         raw_model_output_preview: (aiResponse || '').slice(0, 200),
+        // Phase 2E.1: Copy discovery metadata from opportunity input
+        tweet_type: opp.tweet_type as 'original' | 'reply' | 'quote' | 'retweet' | undefined,
+        engagement_score: typeof opp.engagement_score === 'number' ? opp.engagement_score : undefined,
+        discovery_score: typeof opp.discovery_score === 'number' ? opp.discovery_score : undefined,
+        discovery_reason: opp.discovery_reason || undefined,
+        source_quality_score: typeof opp.source_quality_score === 'number' ? opp.source_quality_score : undefined,
+        account_source_quality: typeof opp.account_source_quality === 'number' ? opp.account_source_quality : undefined,
       };
     }
 
@@ -929,6 +964,13 @@ Produce the Opportunity Brief JSON now.`,
         : [],
       should_craft: Boolean(parsed.should_craft),
       rejection_reason: parsed.rejection_reason || undefined,
+      // Phase 2E.1: Copy discovery metadata from opportunity input
+      tweet_type: opp.tweet_type as 'original' | 'reply' | 'quote' | 'retweet' | undefined,
+      engagement_score: typeof opp.engagement_score === 'number' ? opp.engagement_score : undefined,
+      discovery_score: typeof opp.discovery_score === 'number' ? opp.discovery_score : undefined,
+      discovery_reason: opp.discovery_reason || undefined,
+      source_quality_score: typeof opp.source_quality_score === 'number' ? opp.source_quality_score : undefined,
+      account_source_quality: typeof opp.account_source_quality === 'number' ? opp.account_source_quality : undefined,
     };
 
     // ═══ Apply hard rules AFTER AI evaluation ═══
@@ -1057,6 +1099,13 @@ Produce the Opportunity Brief JSON now.`,
       parse_failed: true,
       intelligence_error_type: 'model_call_failed' as const,
       intelligence_error_message_short: errorMsg,
+      // Phase 2E.1: Copy discovery metadata from opportunity input
+      tweet_type: opp.tweet_type as 'original' | 'reply' | 'quote' | 'retweet' | undefined,
+      engagement_score: typeof opp.engagement_score === 'number' ? opp.engagement_score : undefined,
+      discovery_score: typeof opp.discovery_score === 'number' ? opp.discovery_score : undefined,
+      discovery_reason: opp.discovery_reason || undefined,
+      source_quality_score: typeof opp.source_quality_score === 'number' ? opp.source_quality_score : undefined,
+      account_source_quality: typeof opp.account_source_quality === 'number' ? opp.account_source_quality : undefined,
     };
   }
 }
