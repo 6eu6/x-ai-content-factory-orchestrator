@@ -205,6 +205,12 @@ describe('Phase 2D.1: IntelligenceSummary includes parse failure tracking', () =
       sampled_rejection_debug: [],
       intelligence_parse_failed_count: 3,
       parse_failure_rate: 0.3,
+      rescue_attempted_count: 0,
+      rescue_succeeded_count: 0,
+      rescue_failed_count: 0,
+      rescued_opportunity_count: 0,
+      rescue_reasons: [],
+      sampled_rescue_debug: [],
     };
     expect(summary.intelligence_parse_failed_count).toBe(3);
     expect(summary.parse_failure_rate).toBe(0.3);

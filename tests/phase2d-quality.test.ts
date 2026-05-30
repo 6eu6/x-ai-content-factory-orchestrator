@@ -31,9 +31,12 @@ import {
   determineRejectionReason,
   isNonLatinDominant,
   discoverAdjacentAngle,
+  isEligibleForRescue,
   CANONICAL_REJECTION_REASONS,
   type OpportunityBrief,
   type IntelligenceSummary,
+  type RescueDebug,
+  type RescueEvaluationResult,
 } from '../lib/opportunity-intelligence';
 import {
   quickJudgeCheck,
@@ -544,6 +547,14 @@ describe('Phase 2D: Vercel routes remain lightweight', () => {
       avg_publishability_score: 4.2,
       avg_originality_potential_score: 3.8,
       sampled_rejection_debug: [],
+      intelligence_parse_failed_count: 0,
+      parse_failure_rate: 0,
+      rescue_attempted_count: 0,
+      rescue_succeeded_count: 0,
+      rescue_failed_count: 0,
+      rescued_opportunity_count: 0,
+      rescue_reasons: [],
+      sampled_rescue_debug: [],
     };
     expect(intelligenceSummary.raw_opportunity_count).toBe(10);
     expect(intelligenceSummary.intelligence_selected_count).toBe(2);
@@ -565,6 +576,14 @@ describe('Phase 2D: Intelligence summary includes all required fields', () => {
       avg_publishability_score: 5.0,
       avg_originality_potential_score: 4.5,
       sampled_rejection_debug: [],
+      intelligence_parse_failed_count: 0,
+      parse_failure_rate: 0,
+      rescue_attempted_count: 0,
+      rescue_succeeded_count: 0,
+      rescue_failed_count: 0,
+      rescued_opportunity_count: 0,
+      rescue_reasons: [],
+      sampled_rescue_debug: [],
     };
     expect(summary).toHaveProperty('raw_opportunity_count');
     expect(summary).toHaveProperty('intelligence_evaluated_count');
@@ -575,6 +594,15 @@ describe('Phase 2D: Intelligence summary includes all required fields', () => {
     expect(summary).toHaveProperty('avg_publishability_score');
     expect(summary).toHaveProperty('avg_originality_potential_score');
     expect(summary).toHaveProperty('sampled_rejection_debug');
+    expect(summary).toHaveProperty('intelligence_parse_failed_count');
+    expect(summary).toHaveProperty('parse_failure_rate');
+    // Phase 2D.4: Rescue diagnostics
+    expect(summary).toHaveProperty('rescue_attempted_count');
+    expect(summary).toHaveProperty('rescue_succeeded_count');
+    expect(summary).toHaveProperty('rescue_failed_count');
+    expect(summary).toHaveProperty('rescued_opportunity_count');
+    expect(summary).toHaveProperty('rescue_reasons');
+    expect(summary).toHaveProperty('sampled_rescue_debug');
   });
 
   it('JudgeSummary has all required diagnostic fields', () => {
@@ -921,5 +949,322 @@ describe('Phase 2D Tuning: publish_gate and downstream unchanged', () => {
     }
 
     expect(opportunities.length).toBe(0);
+  });
+});
+
+// ═══ Phase 2D.4: Borderline Rescue Tests ═══
+
+/**
+ * Helper: build a borderline-eligible brief (high-niche, low-originality)
+ * that would be a candidate for rescue.
+ */
+function makeBorderlineEligibleBrief(overrides: Partial<OpportunityBrief> = {}): OpportunityBrief {
+  return {
+    source_summary: 'Karpathy joins Anthropic — talent flow signal',
+    source_text: 'Andrej Karpathy announced he is joining Anthropic to work on AI safety and alignment research, bringing his deep learning expertise from OpenAI and Tesla to the safety-focused lab',
+    source_author: 'karpathy_anthropic_source',
+    source_tweet_url: 'https://x.com/test/status/karpathy',
+    type: 'quote',
+    core_observation: 'Top AI researcher moves to safety-focused lab',
+    why_it_matters: 'Talent migration signals shift in AI industry priorities',
+    audience_relevance: 'Builders and operators watching AI industry dynamics',
+    niche_fit_score: 8,
+    originality_potential_score: 6,
+    usefulness_score: 6,
+    evidence_risk_score: 7,
+    viral_context_score: 8,
+    publishability_score: 7,
+    recommended_angle: 'Talent flow as leading indicator — what Karpathy joining Anthropic signals about AI industry priorities',
+    content_format: 'quote',
+    do_not_claim: [],
+    required_context: [],
+    should_craft: false,
+    rejection_reason: 'low_originality_potential',
+    ...overrides,
+  };
+}
+
+describe('Phase 2D.4: isEligibleForRescue', () => {
+  it('low_originality high-niche borderline candidate is eligible', () => {
+    const brief = makeBorderlineEligibleBrief();
+    expect(isEligibleForRescue(brief)).toBe(true);
+  });
+
+  it('blocked_topic is never rescued', () => {
+    const brief = makeBorderlineEligibleBrief({
+      rejection_reason: 'blocked_topic',
+      source_text: 'Kardashian drama update about celebrity gossip',
+    });
+    expect(isEligibleForRescue(brief)).toBe(false);
+  });
+
+  it('generic_only is never rescued', () => {
+    const brief = makeBorderlineEligibleBrief({
+      rejection_reason: 'generic_only',
+    });
+    expect(isEligibleForRescue(brief)).toBe(false);
+  });
+
+  it('unsupported_claim_risk is never rescued', () => {
+    const brief = makeBorderlineEligibleBrief({
+      rejection_reason: 'unsupported_claim_risk',
+    });
+    expect(isEligibleForRescue(brief)).toBe(false);
+  });
+
+  it('intelligence_parse_failed is never rescued', () => {
+    const brief = makeBorderlineEligibleBrief({
+      rejection_reason: 'intelligence_parse_failed',
+      parse_failed: true,
+    });
+    expect(isEligibleForRescue(brief)).toBe(false);
+  });
+
+  it('low_niche_fit is never rescued (wrong rejection reason)', () => {
+    const brief = makeBorderlineEligibleBrief({
+      rejection_reason: 'low_niche_fit',
+      niche_fit_score: 3,
+    });
+    expect(isEligibleForRescue(brief)).toBe(false);
+  });
+
+  it('brief with niche_fit < 8 is not eligible', () => {
+    const brief = makeBorderlineEligibleBrief({
+      niche_fit_score: 7,
+    });
+    expect(isEligibleForRescue(brief)).toBe(false);
+  });
+
+  it('brief with publishability < 7 is not eligible', () => {
+    const brief = makeBorderlineEligibleBrief({
+      publishability_score: 6,
+    });
+    expect(isEligibleForRescue(brief)).toBe(false);
+  });
+
+  it('brief with usefulness < 6 is not eligible', () => {
+    const brief = makeBorderlineEligibleBrief({
+      usefulness_score: 5,
+    });
+    expect(isEligibleForRescue(brief)).toBe(false);
+  });
+
+  it('brief with originality < 5.5 is not eligible', () => {
+    const brief = makeBorderlineEligibleBrief({
+      originality_potential_score: 5,
+    });
+    expect(isEligibleForRescue(brief)).toBe(false);
+  });
+
+  it('brief with evidence_risk < 7 is not eligible', () => {
+    const brief = makeBorderlineEligibleBrief({
+      evidence_risk_score: 6,
+    });
+    expect(isEligibleForRescue(brief)).toBe(false);
+  });
+
+  it('brief with recommended_angle < 40 chars is not eligible', () => {
+    const brief = makeBorderlineEligibleBrief({
+      recommended_angle: 'Talent flow signal',
+    });
+    expect(isEligibleForRescue(brief)).toBe(false);
+  });
+
+  it('brief with source_text < 60 chars is not eligible', () => {
+    const brief = makeBorderlineEligibleBrief({
+      source_text: 'Short text that is under 60 characters long',
+    });
+    expect(isEligibleForRescue(brief)).toBe(false);
+  });
+
+  it('brief with should_craft=true is not eligible (already selected)', () => {
+    const brief = makeBorderlineEligibleBrief({
+      should_craft: true,
+      rejection_reason: undefined,
+    });
+    expect(isEligibleForRescue(brief)).toBe(false);
+  });
+
+  it('parse_failed brief is not eligible even with low_originality reason', () => {
+    const brief = makeBorderlineEligibleBrief({
+      parse_failed: true,
+      rejection_reason: 'low_originality_potential',
+    });
+    expect(isEligibleForRescue(brief)).toBe(false);
+  });
+});
+
+describe('Phase 2D.4: Rescue metadata fields on OpportunityBrief', () => {
+  it('OpportunityBrief supports rescue_applied field', () => {
+    const brief: OpportunityBrief = {
+      source_summary: 'Rescued opportunity',
+      source_text: 'Karpathy joins Anthropic to work on AI safety research — talent migration signal',
+      source_author: 'karpathy',
+      source_tweet_url: 'https://x.com/test/status/1',
+      type: 'quote',
+      core_observation: 'Talent migration',
+      why_it_matters: 'Signal for AI industry',
+      audience_relevance: 'Builders',
+      niche_fit_score: 8,
+      originality_potential_score: 7.5,
+      usefulness_score: 6,
+      evidence_risk_score: 7,
+      viral_context_score: 8,
+      publishability_score: 7.5,
+      recommended_angle: 'Talent migration as leading indicator — what top researchers moving to safety labs signals',
+      content_format: 'quote',
+      do_not_claim: [],
+      required_context: [],
+      should_craft: true,
+      rescue_applied: true,
+      rescue_reason: 'borderline_low_originality',
+      original_rejection_reason: 'low_originality_potential',
+      rescue_originality_before: 6,
+      rescue_originality_after: 7.5,
+      rescue_angle_notes: 'Reframed from generic AI news to talent migration as leading indicator',
+    };
+    expect(brief.rescue_applied).toBe(true);
+    expect(brief.rescue_reason).toBe('borderline_low_originality');
+    expect(brief.original_rejection_reason).toBe('low_originality_potential');
+    expect(brief.rescue_originality_before).toBe(6);
+    expect(brief.rescue_originality_after).toBe(7.5);
+    expect(brief.rescue_angle_notes).toBeTruthy();
+  });
+});
+
+describe('Phase 2D.4: RescueDebug type shape', () => {
+  it('RescueDebug has all required diagnostic fields', () => {
+    const debug: RescueDebug = {
+      source_author: 'karpathy',
+      source_text_preview: 'Andrej Karpathy announced he is joining Anthropic...',
+      original_rejection_reason: 'low_originality_potential',
+      before_scores: {
+        niche_fit: 8,
+        originality_potential: 6,
+        publishability: 7,
+        usefulness: 6,
+        evidence_risk: 7,
+      },
+      after_scores: {
+        originality_potential: 7.5,
+        publishability: 7.5,
+      },
+      rescue_passed: true,
+      recommended_angle: 'Talent migration as leading indicator',
+    };
+    expect(debug).toHaveProperty('source_author');
+    expect(debug).toHaveProperty('source_text_preview');
+    expect(debug).toHaveProperty('original_rejection_reason');
+    expect(debug).toHaveProperty('before_scores');
+    expect(debug).toHaveProperty('after_scores');
+    expect(debug).toHaveProperty('rescue_passed');
+    expect(debug).toHaveProperty('recommended_angle');
+    expect(debug.rescue_passed).toBe(true);
+  });
+});
+
+describe('Phase 2D.4: RescueEvaluationResult type shape', () => {
+  it('RescueEvaluationResult has all required fields', () => {
+    const result: RescueEvaluationResult = {
+      rescue_passed: true,
+      originality_potential_score: 7.5,
+      publishability_score: 7.5,
+      recommended_angle: 'Talent migration as leading indicator — what Karpathy joining Anthropic signals',
+      why_this_is_now_original: 'Reframed from generic talent move to talent migration as industry signal',
+      do_not_claim: ['Karpathy specific role details'],
+      required_context: ['Karpathy confirmed joining Anthropic'],
+    };
+    expect(result.rescue_passed).toBe(true);
+    expect(result.originality_potential_score).toBeGreaterThanOrEqual(7);
+    expect(result.recommended_angle.length).toBeGreaterThan(20);
+    expect(result.why_this_is_now_original.length).toBeGreaterThan(10);
+  });
+});
+
+describe('Phase 2D.4: IntelligenceSummary includes rescue diagnostics', () => {
+  it('IntelligenceSummary rescue fields default to zero', () => {
+    const summary: IntelligenceSummary = {
+      raw_opportunity_count: 0,
+      intelligence_evaluated_count: 0,
+      intelligence_rejected_count: 0,
+      intelligence_selected_count: 0,
+      selected_opportunity_scores: [],
+      top_rejection_reasons: {},
+      avg_publishability_score: 0,
+      avg_originality_potential_score: 0,
+      sampled_rejection_debug: [],
+      intelligence_parse_failed_count: 0,
+      parse_failure_rate: 0,
+      rescue_attempted_count: 0,
+      rescue_succeeded_count: 0,
+      rescue_failed_count: 0,
+      rescued_opportunity_count: 0,
+      rescue_reasons: [],
+      sampled_rescue_debug: [],
+    };
+    expect(summary.rescue_attempted_count).toBe(0);
+    expect(summary.rescue_succeeded_count).toBe(0);
+    expect(summary.rescue_failed_count).toBe(0);
+    expect(summary.rescued_opportunity_count).toBe(0);
+    expect(summary.rescue_reasons).toEqual([]);
+    expect(summary.sampled_rescue_debug).toEqual([]);
+  });
+
+  it('IntelligenceSummary rescue fields reflect rescue activity', () => {
+    const summary: IntelligenceSummary = {
+      raw_opportunity_count: 20,
+      intelligence_evaluated_count: 20,
+      intelligence_rejected_count: 13,
+      intelligence_selected_count: 1,
+      selected_opportunity_scores: [
+        { publishability: 7.5, originality_potential: 7.5, niche_fit: 8 },
+      ],
+      top_rejection_reasons: { low_originality_potential: 3 },
+      avg_publishability_score: 5.0,
+      avg_originality_potential_score: 4.5,
+      sampled_rejection_debug: [],
+      intelligence_parse_failed_count: 1,
+      parse_failure_rate: 0.05,
+      rescue_attempted_count: 2,
+      rescue_succeeded_count: 1,
+      rescue_failed_count: 1,
+      rescued_opportunity_count: 1,
+      rescue_reasons: ['rescued:karpathy:borderline_low_originality', 'rescue_failed:other:angle_not_sharper'],
+      sampled_rescue_debug: [{
+        source_author: 'karpathy',
+        source_text_preview: 'Andrej Karpathy announced...',
+        original_rejection_reason: 'low_originality_potential',
+        before_scores: { niche_fit: 8, originality_potential: 6, publishability: 7, usefulness: 6, evidence_risk: 7 },
+        after_scores: { originality_potential: 7.5, publishability: 7.5 },
+        rescue_passed: true,
+        recommended_angle: 'Talent migration as leading indicator',
+      }],
+    };
+    expect(summary.rescue_attempted_count).toBe(2);
+    expect(summary.rescue_succeeded_count).toBe(1);
+    expect(summary.rescue_failed_count).toBe(1);
+    expect(summary.rescued_opportunity_count).toBe(1);
+    expect(summary.rescue_reasons).toHaveLength(2);
+    expect(summary.sampled_rescue_debug).toHaveLength(1);
+    expect(summary.sampled_rescue_debug[0].rescue_passed).toBe(true);
+  });
+});
+
+describe('Phase 2D.4: publish_gate thresholds unchanged after rescue', () => {
+  it('rescue does not bypass publish_gate — gate still rejects shield_passed=false', () => {
+    const opp = {
+      type: 'reply' as const,
+      crafted_text: 'Some rescued content about AI talent migration',
+      source_tweet_url: 'https://x.com/user/status/123',
+      shield_passed: false,
+      shield_issues: ['missing_originality'],
+    };
+    const gate = filterPublishableOpportunities([opp]);
+    expect(gate.rejected.length).toBe(1);
+  });
+
+  it('rescue does not change content policy — blocked topics still blocked', () => {
+    const result = quickNicheFitScore('Kardashian drama with Travis Kelce and Taylor Swift');
+    expect(result.blocked).toBe(true);
   });
 });

@@ -974,6 +974,13 @@ async function processOpportunityIntelligence(task: PipelineTaskRow): Promise<Ta
         selected_opportunities_count: selectedOpportunitiesCount,
         selected_count_mismatch_detected: selectedCountMismatch,
         duplicate_source_count: duplicateSourceCount,
+        // Phase 2D.4: Borderline rescue diagnostics
+        rescue_attempted_count: summary.rescue_attempted_count,
+        rescue_succeeded_count: summary.rescue_succeeded_count,
+        rescue_failed_count: summary.rescue_failed_count,
+        rescued_opportunity_count: summary.rescued_opportunity_count,
+        rescue_reasons: summary.rescue_reasons,
+        sampled_rescue_debug: summary.sampled_rescue_debug,
         _opportunities: selectedOpportunities,
         _intelligence_summary: summary,
       }

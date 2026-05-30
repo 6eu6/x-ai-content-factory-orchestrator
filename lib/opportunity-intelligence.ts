@@ -64,6 +64,14 @@ export type OpportunityBrief = {
   intelligence_error_type?: 'model_call_failed' | 'json_parse_failed' | 'missing_required_fields';
   intelligence_error_message_short?: string;
   raw_model_output_preview?: string;
+
+  // Phase 2D.4: Borderline rescue fields (only set when rescue was applied)
+  rescue_applied?: boolean;
+  rescue_reason?: string;
+  original_rejection_reason?: string;
+  rescue_originality_before?: number;
+  rescue_originality_after?: number;
+  rescue_angle_notes?: string;
 };
 
 export type RejectionDebug = {
@@ -82,6 +90,25 @@ export type RejectionDebug = {
   raw_model_output_preview?: string;
 };
 
+export type RescueDebug = {
+  source_author: string;
+  source_text_preview: string;
+  original_rejection_reason: string;
+  before_scores: {
+    niche_fit: number;
+    originality_potential: number;
+    publishability: number;
+    usefulness: number;
+    evidence_risk: number;
+  };
+  after_scores: {
+    originality_potential: number;
+    publishability: number;
+  } | null;
+  rescue_passed: boolean;
+  recommended_angle: string;
+};
+
 export type IntelligenceSummary = {
   raw_opportunity_count: number;
   intelligence_evaluated_count: number;
@@ -95,6 +122,13 @@ export type IntelligenceSummary = {
   // Phase 2D.1: Parse failure tracking
   intelligence_parse_failed_count: number;
   parse_failure_rate: number;
+  // Phase 2D.4: Borderline rescue tracking
+  rescue_attempted_count: number;
+  rescue_succeeded_count: number;
+  rescue_failed_count: number;
+  rescued_opportunity_count: number;
+  rescue_reasons: string[];
+  sampled_rescue_debug: RescueDebug[];
 };
 
 // ═══ Niche Model Constants ═══
@@ -288,6 +322,27 @@ const MIN_USEFULNESS_SCORE = 6;
 const MIN_USEFULNESS_WITH_STRONG_VIRAL = 5;
 const STRONG_VIRAL_CONTEXT_THRESHOLD = 8;
 const STRONG_ANGLE_LENGTH_THRESHOLD = 30;
+
+// ═══ Phase 2D.4: Borderline Rescue Thresholds ═══
+
+/**
+ * Rescue eligibility thresholds for high-niche borderline originality items.
+ * These are MORE restrictive than the initial selection thresholds.
+ * Rescue is only for items that are close to passing but need a sharper angle.
+ */
+const RESCUE_MIN_NICHE_FIT = 8;
+const RESCUE_MIN_PUBLISHABILITY = 7;
+const RESCUE_MIN_USEFULNESS = 6;
+const RESCUE_MIN_ORIGINALITY_POTENTIAL = 5.5;
+const RESCUE_MIN_RECOMMENDED_ANGLE_LENGTH = 40;
+const RESCUE_MIN_EVIDENCE_RISK = 7;
+const RESCUE_MIN_SOURCE_TEXT_LENGTH = 60;
+const RESCUE_MAX_ATTEMPTS_PER_RUN = 2;
+
+/**
+ * Rescue must raise originality_potential_score to at least this to pass.
+ */
+const RESCUE_MIN_ORIGINALITY_POTENTIAL_AFTER = 7;
 
 // ═══ Canonical Rejection Reasons ═══
 
@@ -1006,10 +1061,219 @@ Produce the Opportunity Brief JSON now.`,
   }
 }
 
+// ═══ Phase 2D.4: Borderline Rescue ═══
+
+/**
+ * Rescue result returned by the rescue model call.
+ */
+export type RescueEvaluationResult = {
+  rescue_passed: boolean;
+  originality_potential_score: number;
+  publishability_score: number;
+  recommended_angle: string;
+  why_this_is_now_original: string;
+  do_not_claim: string[];
+  required_context: string[];
+};
+
+/**
+ * Check if a rejected brief is eligible for borderline rescue.
+ *
+ * Eligible rescue candidates must meet ALL of the following:
+ * - rejection_reason === 'low_originality_potential'
+ * - niche_fit_score >= 8
+ * - publishability_score >= 7
+ * - usefulness_score >= 6
+ * - originality_potential_score >= 5.5
+ * - recommended_angle length >= 40
+ * - not parse_failed
+ * - not blocked topic
+ * - evidence_risk_score >= 7
+ * - source_text length >= 60
+ *
+ * Excluded rejection reasons (never rescued):
+ * - blocked_topic
+ * - generic_only
+ * - unsupported_claim_risk
+ * - intelligence_parse_failed
+ */
+export function isEligibleForRescue(brief: OpportunityBrief): boolean {
+  // Must have been rejected with low_originality_potential
+  if (brief.rejection_reason !== 'low_originality_potential') {
+    return false;
+  }
+
+  // Not eligible if parse failed
+  if ((brief as any).parse_failed === true) {
+    return false;
+  }
+
+  // Not eligible if blocked topic
+  const heuristic = quickNicheFitScore(brief.source_text);
+  if (heuristic.blocked && !heuristic.adjacent_with_angle) {
+    return false;
+  }
+
+  // Score thresholds
+  if (brief.niche_fit_score < RESCUE_MIN_NICHE_FIT) return false;
+  if (brief.publishability_score < RESCUE_MIN_PUBLISHABILITY) return false;
+  if (brief.usefulness_score < RESCUE_MIN_USEFULNESS) return false;
+  if (brief.originality_potential_score < RESCUE_MIN_ORIGINALITY_POTENTIAL) return false;
+  if (brief.evidence_risk_score < RESCUE_MIN_EVIDENCE_RISK) return false;
+
+  // Must have a meaningful recommended angle
+  if (!brief.recommended_angle || brief.recommended_angle.length < RESCUE_MIN_RECOMMENDED_ANGLE_LENGTH) return false;
+
+  // Must have enough source text to work with
+  if (!brief.source_text || brief.source_text.length < RESCUE_MIN_SOURCE_TEXT_LENGTH) return false;
+
+  return true;
+}
+
+/**
+ * Build the rescue evaluation system prompt.
+ * This is a second-pass evaluation specifically designed to find a sharper angle
+ * for borderline originality items that are otherwise high-quality.
+ */
+function buildRescueSystemPrompt(): string {
+  return `You are an Opportunity Rescue Analyst for @30piq, an X account focused on AI, creators, internet culture, productivity, skills, and modern work.
+
+You previously rejected an opportunity because its originality was borderline. Your task now: try to find a sharper, non-obvious operator/builder angle that makes this worth crafting.
+
+If you CANNOT find a genuinely sharper angle, reject it. Do not pass generic commentary.
+
+═══ RULES ═══
+
+1. The original angle was too generic or obvious. You must find a MATERIALLY DIFFERENT angle — not just rephrase the same take.
+
+2. Valid rescue angles include:
+   - Talent migration as a leading indicator (who is moving where, and what it signals)
+   - Incentive structure analysis (what incentives are driving behavior, and what breaks)
+   - Second-order effects (what happens downstream that nobody is talking about)
+   - Operator/playbook framing (specific action steps from a general trend)
+   - Counter-signal analysis (why the obvious take is wrong or incomplete)
+   - Cross-domain pattern matching (applying a framework from one domain to another)
+
+3. INVALID rescue angles (will be rejected):
+   - Repeating the original angle with different words
+   - Generic contrarianism ("actually this is bad/good")
+   - Vague "implications" without specifics
+   - Fake contrarianism that just agrees from a different starting point
+
+4. No unsupported claims. Do not invent statistics, studies, or facts.
+
+5. originality_potential_score must be >= 7 for rescue to pass.
+
+6. recommended_angle must be specific and actionable — describe the EXACT angle @30piq would take.
+
+═══ OUTPUT FORMAT ═══
+
+Return valid JSON only:
+{
+  "rescue_passed": boolean,
+  "originality_potential_score": number,
+  "publishability_score": number,
+  "recommended_angle": "string — the new, sharper angle",
+  "why_this_is_now_original": "string — explain why this angle is materially different from the common take",
+  "do_not_claim": ["claims that must not be repeated"],
+  "required_context": ["context that must be included"]
+}`;
+}
+
+/**
+ * Evaluate a borderline candidate for rescue using a second AI call.
+ *
+ * This is only called when:
+ * - selectedBriefs.length === 0
+ * - The candidate is eligible for rescue (isEligibleForRescue returns true)
+ *
+ * Returns the rescue evaluation result, or null if the AI call fails.
+ */
+export async function evaluateRescueCandidate(
+  brief: OpportunityBrief
+): Promise<RescueEvaluationResult | null> {
+  try {
+    const response = await callModel('opportunity_intelligence' as TaskType, [
+      {
+        role: 'system',
+        content: buildRescueSystemPrompt(),
+      },
+      {
+        role: 'user',
+        content: `You previously rejected this opportunity because originality was borderline. Try to find a sharper, non-obvious operator/builder angle. If you cannot, reject it. Do not pass generic commentary.
+
+Source text: "${brief.source_text.slice(0, 600)}"
+Source author: @${brief.source_author}
+Original recommended_angle: "${brief.recommended_angle}"
+Original scores: niche_fit=${brief.niche_fit_score}, originality_potential=${brief.originality_potential_score}, publishability=${brief.publishability_score}, usefulness=${brief.usefulness_score}, evidence_risk=${brief.evidence_risk_score}
+
+Return the rescue evaluation JSON now.`,
+      },
+    ], {
+      temperature: 0.12,
+      max_tokens: 1200,
+      response_format: { type: 'json_object' },
+    });
+
+    let parsed: any;
+    try {
+      parsed = parseModelJson(response);
+    } catch {
+      console.warn(`[opportunity-intelligence] Rescue JSON parse failed for @${brief.source_author}`);
+      return null;
+    }
+
+    if (!parsed || typeof parsed !== 'object') {
+      return null;
+    }
+
+    // Validate required fields
+    if (typeof parsed.rescue_passed !== 'boolean') return null;
+    if (typeof parsed.originality_potential_score !== 'number') return null;
+    if (typeof parsed.publishability_score !== 'number') return null;
+    if (typeof parsed.recommended_angle !== 'string') return null;
+    if (typeof parsed.why_this_is_now_original !== 'string') return null;
+
+    const result: RescueEvaluationResult = {
+      rescue_passed: parsed.rescue_passed && parsed.originality_potential_score >= RESCUE_MIN_ORIGINALITY_POTENTIAL_AFTER,
+      originality_potential_score: clampScore(parsed.originality_potential_score),
+      publishability_score: clampScore(parsed.publishability_score),
+      recommended_angle: String(parsed.recommended_angle || ''),
+      why_this_is_now_original: String(parsed.why_this_is_now_original || ''),
+      do_not_claim: Array.isArray(parsed.do_not_claim) ? parsed.do_not_claim.map(String) : [],
+      required_context: Array.isArray(parsed.required_context) ? parsed.required_context.map(String) : [],
+    };
+
+    // Additional validation: if the new angle is basically the same as the original, reject
+    if (result.rescue_passed && brief.recommended_angle.length >= 10) {
+      const originalWords = brief.recommended_angle.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length > 3);
+      const newWords = result.recommended_angle.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length > 3);
+      if (originalWords.length > 0 && newWords.length > 0) {
+        const overlap = newWords.filter(w => originalWords.includes(w)).length;
+        const overlapRatio = overlap / Math.max(newWords.length, 1);
+        // If >80% of significant words are the same, the angle is not materially different
+        if (overlapRatio > 0.8) {
+          console.log(`[opportunity-intelligence] Rescue rejected: angle not materially different (${(overlapRatio * 100).toFixed(0)}% overlap) for @${brief.source_author}`);
+          result.rescue_passed = false;
+        }
+      }
+    }
+
+    return result;
+  } catch (err: any) {
+    console.warn(`[opportunity-intelligence] Rescue evaluation failed for @${brief.source_author}: ${(err?.message || 'unknown').slice(0, 200)}`);
+    return null;
+  }
+}
+
 // ═══ Batch Evaluation ═══
 
 /**
  * Evaluate a batch of opportunities and produce OpportunityBriefs.
+ *
+ * After initial evaluation, if selectedBriefs.length === 0, runs a
+ * borderline rescue pass for high-niche items rejected only for
+ * low_originality_potential (Phase 2D.4).
  *
  * Returns:
  * - briefs: All evaluated briefs (both selected and rejected)
@@ -1018,23 +1282,28 @@ Produce the Opportunity Brief JSON now.`,
 export async function evaluateOpportunities(
   opportunities: Record<string, any>[]
 ): Promise<{ briefs: OpportunityBrief[]; summary: IntelligenceSummary }> {
+  const emptySummary: IntelligenceSummary = {
+    raw_opportunity_count: 0,
+    intelligence_evaluated_count: 0,
+    intelligence_rejected_count: 0,
+    intelligence_selected_count: 0,
+    selected_opportunity_scores: [],
+    top_rejection_reasons: {},
+    avg_publishability_score: 0,
+    avg_originality_potential_score: 0,
+    sampled_rejection_debug: [],
+    intelligence_parse_failed_count: 0,
+    parse_failure_rate: 0,
+    rescue_attempted_count: 0,
+    rescue_succeeded_count: 0,
+    rescue_failed_count: 0,
+    rescued_opportunity_count: 0,
+    rescue_reasons: [],
+    sampled_rescue_debug: [],
+  };
+
   if (!opportunities?.length) {
-    return {
-      briefs: [],
-      summary: {
-        raw_opportunity_count: 0,
-        intelligence_evaluated_count: 0,
-        intelligence_rejected_count: 0,
-        intelligence_selected_count: 0,
-        selected_opportunity_scores: [],
-        top_rejection_reasons: {},
-        avg_publishability_score: 0,
-        avg_originality_potential_score: 0,
-        sampled_rejection_debug: [],
-        intelligence_parse_failed_count: 0,
-        parse_failure_rate: 0,
-      },
-    };
+    return { briefs: [], summary: emptySummary };
   }
 
   const briefs: OpportunityBrief[] = [];
@@ -1053,11 +1322,129 @@ export async function evaluateOpportunities(
 
   // Compute summary statistics
   const evaluatedCount = briefs.length;
-  const rejectedCount = briefs.filter(b => !b.should_craft).length;
-  const selectedCount = briefs.filter(b => b.should_craft).length;
+  let rejectedCount = briefs.filter(b => !b.should_craft).length;
+  let selectedCount = briefs.filter(b => b.should_craft).length;
+
+  // Phase 2D.4: Borderline rescue — only when selectedBriefs === 0
+  let rescueAttemptedCount = 0;
+  let rescueSucceededCount = 0;
+  let rescueFailedCount = 0;
+  const rescueReasons: string[] = [];
+  const rescueDebugEntries: RescueDebug[] = [];
 
   const selectedBriefs = briefs.filter(b => b.should_craft);
-  const selectedOpportunityScores = selectedBriefs.map(b => ({
+
+  if (selectedBriefs.length === 0) {
+    // Find eligible rescue candidates
+    const rescueCandidates = briefs.filter(b => !b.should_craft && isEligibleForRescue(b));
+
+    if (rescueCandidates.length > 0) {
+      console.log(`[opportunity-intelligence] No selected opportunities. Found ${rescueCandidates.length} borderline rescue candidate(s). Attempting up to ${RESCUE_MAX_ATTEMPTS_PER_RUN}.`);
+
+      // Sort by originality_potential_score descending (best candidates first)
+      rescueCandidates.sort((a, b) => b.originality_potential_score - a.originality_potential_score);
+
+      // Attempt rescue on up to RESCUE_MAX_ATTEMPTS_PER_RUN candidates
+      const candidatesToAttempt = rescueCandidates.slice(0, RESCUE_MAX_ATTEMPTS_PER_RUN);
+
+      for (const candidate of candidatesToAttempt) {
+        rescueAttemptedCount++;
+
+        const rescueResult = await evaluateRescueCandidate(candidate);
+
+        if (rescueResult && rescueResult.rescue_passed) {
+          // Rescue succeeded — flip should_craft
+          const originalRejectionReason = candidate.rejection_reason || 'low_originality_potential';
+          const originalityBefore = candidate.originality_potential_score;
+
+          candidate.should_craft = true;
+          candidate.rejection_reason = undefined;
+          candidate.rescue_applied = true;
+          candidate.rescue_reason = 'borderline_low_originality';
+          candidate.original_rejection_reason = originalRejectionReason;
+          candidate.rescue_originality_before = originalityBefore;
+          candidate.rescue_originality_after = rescueResult.originality_potential_score;
+          candidate.rescue_angle_notes = rescueResult.why_this_is_now_original;
+
+          // Update scores from rescue evaluation
+          candidate.originality_potential_score = rescueResult.originality_potential_score;
+          candidate.publishability_score = rescueResult.publishability_score;
+
+          // Update recommended angle to the new sharper angle
+          if (rescueResult.recommended_angle && rescueResult.recommended_angle.length >= 10) {
+            candidate.recommended_angle = rescueResult.recommended_angle;
+          }
+
+          // Merge do_not_claim and required_context
+          if (rescueResult.do_not_claim.length > 0) {
+            candidate.do_not_claim = [...new Set([...candidate.do_not_claim, ...rescueResult.do_not_claim])];
+          }
+          if (rescueResult.required_context.length > 0) {
+            candidate.required_context = [...new Set([...candidate.required_context, ...rescueResult.required_context])];
+          }
+
+          rescueSucceededCount++;
+          rescueReasons.push(`rescued:${candidate.source_author}:borderline_low_originality`);
+
+          rescueDebugEntries.push({
+            source_author: candidate.source_author,
+            source_text_preview: candidate.source_text.slice(0, 120),
+            original_rejection_reason: originalRejectionReason,
+            before_scores: {
+              niche_fit: candidate.niche_fit_score,
+              originality_potential: originalityBefore,
+              publishability: candidate.publishability_score,
+              usefulness: candidate.usefulness_score,
+              evidence_risk: candidate.evidence_risk_score,
+            },
+            after_scores: {
+              originality_potential: rescueResult.originality_potential_score,
+              publishability: rescueResult.publishability_score,
+            },
+            rescue_passed: true,
+            recommended_angle: rescueResult.recommended_angle,
+          });
+
+          // Update counts
+          selectedCount++;
+          rejectedCount--;
+
+          console.log(`[opportunity-intelligence] Rescue SUCCEEDED for @${candidate.source_author}: originality ${originalityBefore} → ${rescueResult.originality_potential_score}, angle: ${rescueResult.recommended_angle.slice(0, 80)}`);
+        } else {
+          // Rescue failed
+          rescueFailedCount++;
+          rescueReasons.push(`rescue_failed:${candidate.source_author}:angle_not_sharper`);
+
+          rescueDebugEntries.push({
+            source_author: candidate.source_author,
+            source_text_preview: candidate.source_text.slice(0, 120),
+            original_rejection_reason: candidate.rejection_reason || 'unknown',
+            before_scores: {
+              niche_fit: candidate.niche_fit_score,
+              originality_potential: candidate.originality_potential_score,
+              publishability: candidate.publishability_score,
+              usefulness: candidate.usefulness_score,
+              evidence_risk: candidate.evidence_risk_score,
+            },
+            after_scores: rescueResult ? {
+              originality_potential: rescueResult.originality_potential_score,
+              publishability: rescueResult.publishability_score,
+            } : null,
+            rescue_passed: false,
+            recommended_angle: rescueResult?.recommended_angle || '',
+          });
+
+          console.log(`[opportunity-intelligence] Rescue FAILED for @${candidate.source_author}: could not find sharper angle`);
+        }
+      }
+    } else {
+      console.log(`[opportunity-intelligence] No selected opportunities and no eligible rescue candidates.`);
+    }
+  }
+
+  // Recompute after potential rescue
+  const finalSelectedBriefs = briefs.filter(b => b.should_craft);
+  const selectedOpportunityScores = finalSelectedBriefs.map(b => ({
     publishability: b.publishability_score,
     originality_potential: b.originality_potential_score,
     niche_fit: b.niche_fit_score,
@@ -1126,6 +1513,13 @@ export async function evaluateOpportunities(
       sampled_rejection_debug: sampledRejectionDebug,
       intelligence_parse_failed_count: parseFailedCount,
       parse_failure_rate: parseFailureRate,
+      // Phase 2D.4: Rescue diagnostics
+      rescue_attempted_count: rescueAttemptedCount,
+      rescue_succeeded_count: rescueSucceededCount,
+      rescue_failed_count: rescueFailedCount,
+      rescued_opportunity_count: rescueSucceededCount,
+      rescue_reasons: rescueReasons,
+      sampled_rescue_debug: rescueDebugEntries.slice(0, 3),
     },
   };
 }
