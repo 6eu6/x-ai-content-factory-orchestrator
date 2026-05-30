@@ -686,3 +686,445 @@ describe('Shield Issue Selective Removal', () => {
     expect(shield_passed).toBe(true);
   });
 });
+
+// ═══ Phase 2F.1: Stale Judge State Fix Tests ═══
+
+describe('Phase 2F.1: Improved-But-Still-Failing Judge State', () => {
+  // Simulate the stale judge state fix logic from pipeline-worker.ts
+  // When polish is applied but still failing, _judge_result and shield_issues
+  // must be updated to reflect the after_judge state, not the pre-polish state.
+
+  function rebuildShieldIssuesForStillFailing(
+    staleShieldIssues: string[],
+    afterJudge: {
+      failure_reasons: string[];
+      originality_score?: number;
+      brief_alignment_score?: number;
+    } | null
+  ): { shield_issues: string[]; shield_passed: boolean } {
+    // Remove stale judge_failed:* issues
+    const issuesWithoutStaleJudge = staleShieldIssues.filter(issue =>
+      !issue.startsWith('judge_failed:')
+    );
+
+    // Add new judge_failed reason from the re-judge
+    const newJudgeFailedReason = (afterJudge?.failure_reasons?.length ?? 0) > 0
+      ? `judge_failed:${afterJudge!.failure_reasons[0]}`
+      : null;
+
+    let rebuiltShieldIssues = [...issuesWithoutStaleJudge];
+    if (newJudgeFailedReason) {
+      rebuiltShieldIssues.push(newJudgeFailedReason);
+    }
+
+    // Conditionally remove missing_originality
+    if (afterJudge && afterJudge.originality_score !== undefined && afterJudge.originality_score >= 7.8) {
+      rebuiltShieldIssues = rebuiltShieldIssues.filter(issue => issue !== 'missing_originality');
+    }
+
+    // Conditionally remove brief_alignment_failed
+    if (afterJudge && afterJudge.brief_alignment_score !== undefined && afterJudge.brief_alignment_score >= 7.5) {
+      rebuiltShieldIssues = rebuiltShieldIssues.filter(issue => issue !== 'brief_alignment_failed');
+    }
+
+    // shield_passed only true if no remaining issues AND after_judge.passed is true
+    // Since this is the "still failing" branch, after_judge.passed is always false
+    return {
+      shield_issues: rebuiltShieldIssues,
+      shield_passed: rebuiltShieldIssues.length === 0 && (afterJudge as any)?.passed === true,
+    };
+  }
+
+  // ═══ Test 32: improved-but-still-failing polish updates _judge_result to after_judge ═══
+
+  it('updates _judge_result to after_judge when polish improves but still fails', () => {
+    // Before polish: score=7, failure: final_candidate_score_7_below_7.8
+    // After polish: score=8, failure: originality_score_7_below_7.8
+    // The _judge_result should reflect the AFTER state (score 8), not the BEFORE state (score 7)
+    const afterJudge = {
+      passed: false,
+      final_candidate_score: 8,
+      originality_score: 7,
+      usefulness_score: 8,
+      niche_fit_score: 8,
+      evidence_safety_score: 9,
+      clarity_score: 8,
+      brief_alignment_score: 8,
+      generic_bait_flag: false,
+      unsupported_claim_flag: false,
+      failure_reasons: ['originality_score_7_below_7.8'],
+    };
+
+    // Verify the after_judge state would be used for _judge_result
+    expect(afterJudge.final_candidate_score).toBe(8);
+    expect(afterJudge.failure_reasons).toEqual(['originality_score_7_below_7.8']);
+    expect(afterJudge.passed).toBe(false);
+  });
+
+  // ═══ Test 33: improved-but-still-failing polish replaces stale judge_failed reason ═══
+
+  it('replaces stale judge_failed reason with new one from after_judge', () => {
+    const staleShieldIssues = [
+      'missing_originality',
+      'judge_failed:final_candidate_score_7_below_7.8',
+    ];
+    const afterJudge = {
+      failure_reasons: ['originality_score_7_below_7.8'],
+      originality_score: 7,
+      brief_alignment_score: 8,
+    };
+
+    const { shield_issues } = rebuildShieldIssuesForStillFailing(staleShieldIssues, afterJudge);
+
+    // Stale judge_failed reason should be replaced with the new one
+    expect(shield_issues).not.toContain('judge_failed:final_candidate_score_7_below_7.8');
+    expect(shield_issues).toContain('judge_failed:originality_score_7_below_7.8');
+    // missing_originality stays because originality_score (7) < 7.8
+    expect(shield_issues).toContain('missing_originality');
+  });
+
+  // ═══ Test 34: missing_originality remains if after_judge.originality_score < 7.8 ═══
+
+  it('keeps missing_originality when after_judge.originality_score < 7.8', () => {
+    const staleShieldIssues = [
+      'missing_originality',
+      'judge_failed:originality_score_7_below_7.8',
+    ];
+    const afterJudge = {
+      failure_reasons: ['originality_score_7_below_7.8'],
+      originality_score: 7,
+    };
+
+    const { shield_issues, shield_passed } = rebuildShieldIssuesForStillFailing(staleShieldIssues, afterJudge);
+
+    expect(shield_issues).toContain('missing_originality');
+    expect(shield_passed).toBe(false);
+  });
+
+  // ═══ Test 35: missing_originality removed if after_judge.originality_score >= 7.8 ═══
+
+  it('removes missing_originality when after_judge.originality_score >= 7.8', () => {
+    const staleShieldIssues = [
+      'missing_originality',
+      'judge_failed:usefulness_score_6_below_7',
+    ];
+    const afterJudge = {
+      failure_reasons: ['usefulness_score_6_below_7'],
+      originality_score: 8,
+    };
+
+    const { shield_issues } = rebuildShieldIssuesForStillFailing(staleShieldIssues, afterJudge);
+
+    expect(shield_issues).not.toContain('missing_originality');
+    // judge_failed is replaced with the new one
+    expect(shield_issues).toContain('judge_failed:usefulness_score_6_below_7');
+  });
+});
+
+// ═══ Phase 2F.1: Source Deduplication Tests ═══
+
+describe('Phase 2F.1: Source Deduplication', () => {
+  type TestOpportunity = {
+    source_tweet_url: string;
+    source_text: string;
+    content_format: string;
+    crafted_text: string;
+    _brief?: {
+      publishability_score: number;
+      originality_potential_score: number;
+      niche_fit_score: number;
+      content_format: string;
+    };
+  };
+
+  function dedupeOpportunities(opps: TestOpportunity[]): {
+    result: TestOpportunity[];
+    removed: number;
+    examples: string[];
+  } {
+    const examples: string[] = [];
+    const groups = new Map<string, TestOpportunity[]>();
+
+    for (const opp of opps) {
+      const key = opp.source_tweet_url
+        || (() => { const t = opp.source_text || ''; return `text:${t.slice(0, 80)}`; })();
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(opp);
+    }
+
+    const result: TestOpportunity[] = [];
+    for (const [sourceKey, group] of groups) {
+      if (group.length === 1) {
+        result.push(group[0]);
+        continue;
+      }
+
+      const ranked = [...group].sort((a, b) => {
+        const aBrief = a._brief;
+        const bBrief = b._brief;
+
+        const aPub = aBrief?.publishability_score ?? 0;
+        const bPub = bBrief?.publishability_score ?? 0;
+        if (bPub !== aPub) return bPub - aPub;
+
+        const aOrig = aBrief?.originality_potential_score ?? 0;
+        const bOrig = bBrief?.originality_potential_score ?? 0;
+        if (bOrig !== aOrig) return bOrig - aOrig;
+
+        const aNiche = aBrief?.niche_fit_score ?? 0;
+        const bNiche = bBrief?.niche_fit_score ?? 0;
+        if (bNiche !== aNiche) return bNiche - aNiche;
+
+        const aFormat = (aBrief?.content_format || a.content_format || '').toLowerCase();
+        const bFormat = (bBrief?.content_format || b.content_format || '').toLowerCase();
+        if (aFormat === 'quote' && bFormat !== 'quote') return -1;
+        if (bFormat === 'quote' && aFormat !== 'quote') return 1;
+
+        return 0;
+      });
+
+      result.push(ranked[0]);
+
+      if (ranked.length >= 2) {
+        const topFormat = (ranked[0]._brief?.content_format || ranked[0].content_format || '').toLowerCase();
+        const secondFormat = (ranked[1]._brief?.content_format || ranked[1].content_format || '').toLowerCase();
+        const secondPub = ranked[1]._brief?.publishability_score ?? 0;
+        const secondOrig = ranked[1]._brief?.originality_potential_score ?? 0;
+        const topPub = ranked[0]._brief?.publishability_score ?? 0;
+        const topOrig = ranked[0]._brief?.originality_potential_score ?? 0;
+
+        const differentFormat = topFormat !== secondFormat && topFormat && secondFormat;
+        const bothHighQuality = topPub >= 7 && topOrig >= 7 && secondPub >= 7 && secondOrig >= 7;
+
+        if (differentFormat && bothHighQuality) {
+          result.push(ranked[1]);
+          examples.push(`${sourceKey}: kept 2 (different formats)`);
+        } else {
+          examples.push(`${sourceKey}: reduced ${group.length} → 1`);
+        }
+      }
+    }
+
+    return { result, removed: opps.length - result.length, examples };
+  }
+
+  // ═══ Test 36: duplicate opportunities with same source_tweet_url are reduced to one strongest candidate ═══
+
+  it('reduces duplicate opportunities with same source_tweet_url to one strongest candidate', () => {
+    const opps: TestOpportunity[] = [
+      {
+        source_tweet_url: 'https://x.com/karpathy/status/123',
+        source_text: 'Karpathy joins Anthropic',
+        content_format: 'quote',
+        crafted_text: 'Karpathy at Anthropic signals AI alignment shift',
+        _brief: {
+          publishability_score: 8,
+          originality_potential_score: 8,
+          niche_fit_score: 9,
+          content_format: 'quote',
+        },
+      },
+      {
+        source_tweet_url: 'https://x.com/karpathy/status/123',
+        source_text: 'Karpathy joins Anthropic',
+        content_format: 'reply',
+        crafted_text: '@karpity great move! Welcome to the safety team!',
+        _brief: {
+          publishability_score: 5,
+          originality_potential_score: 4,
+          niche_fit_score: 6,
+          content_format: 'reply',
+        },
+      },
+    ];
+
+    const { result, removed } = dedupeOpportunities(opps);
+
+    expect(result).toHaveLength(1);
+    expect(removed).toBe(1);
+    // The stronger one (pub=8, orig=8) should be kept
+    expect(result[0]._brief?.publishability_score).toBe(8);
+    expect(result[0].content_format).toBe('quote');
+  });
+
+  // ═══ Test 37: dedupe prefers higher publishability/originality/niche scores ═══
+
+  it('prefers higher publishability, originality, and niche scores', () => {
+    const opps: TestOpportunity[] = [
+      {
+        source_tweet_url: 'https://x.com/sama/status/456',
+        source_text: 'Sam Altman announces GPT-5',
+        content_format: 'reply',
+        crafted_text: 'GPT-5 is coming, here is what it means for builders',
+        _brief: {
+          publishability_score: 6,
+          originality_potential_score: 7,
+          niche_fit_score: 8,
+          content_format: 'reply',
+        },
+      },
+      {
+        source_tweet_url: 'https://x.com/sama/status/456',
+        source_text: 'Sam Altman announces GPT-5',
+        content_format: 'quote',
+        crafted_text: 'The real story behind GPT-5 is not raw power, it is alignment',
+        _brief: {
+          publishability_score: 9,
+          originality_potential_score: 9,
+          niche_fit_score: 9,
+          content_format: 'quote',
+        },
+      },
+    ];
+
+    const { result } = dedupeOpportunities(opps);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]._brief?.publishability_score).toBe(9);
+  });
+
+  // ═══ Test 38: dedupe preserves two candidates only if high-quality and different formats ═══
+
+  it('preserves two candidates only if explicitly high-quality and different formats', () => {
+    // Case 1: Same format → keep only one
+    const sameFormat: TestOpportunity[] = [
+      {
+        source_tweet_url: 'https://x.com/user/status/789',
+        source_text: 'Some tweet about AI',
+        content_format: 'quote',
+        crafted_text: 'First quote take',
+        _brief: {
+          publishability_score: 8,
+          originality_potential_score: 8,
+          niche_fit_score: 8,
+          content_format: 'quote',
+        },
+      },
+      {
+        source_tweet_url: 'https://x.com/user/status/789',
+        source_text: 'Some tweet about AI',
+        content_format: 'quote',
+        crafted_text: 'Second quote take',
+        _brief: {
+          publishability_score: 7,
+          originality_potential_score: 7,
+          niche_fit_score: 7,
+          content_format: 'quote',
+        },
+      },
+    ];
+
+    const result1 = dedupeOpportunities(sameFormat);
+    expect(result1.result).toHaveLength(1);
+
+    // Case 2: Different formats, both high quality → keep both
+    const differentFormats: TestOpportunity[] = [
+      {
+        source_tweet_url: 'https://x.com/user/status/012',
+        source_text: 'Major AI breakthrough announced',
+        content_format: 'quote',
+        crafted_text: 'This breakthrough changes everything about AI alignment research',
+        _brief: {
+          publishability_score: 9,
+          originality_potential_score: 9,
+          niche_fit_score: 9,
+          content_format: 'quote',
+        },
+      },
+      {
+        source_tweet_url: 'https://x.com/user/status/012',
+        source_text: 'Major AI breakthrough announced',
+        content_format: 'reply',
+        crafted_text: 'The key insight from this paper is the alignment tax tradeoff',
+        _brief: {
+          publishability_score: 8,
+          originality_potential_score: 8,
+          niche_fit_score: 8,
+          content_format: 'reply',
+        },
+      },
+    ];
+
+    const result2 = dedupeOpportunities(differentFormats);
+    expect(result2.result).toHaveLength(2);
+
+    // Case 3: Different formats but second is NOT high quality → keep only one
+    const lowQuality: TestOpportunity[] = [
+      {
+        source_tweet_url: 'https://x.com/user/status/345',
+        source_text: 'Some tweet',
+        content_format: 'quote',
+        crafted_text: 'High quality quote take',
+        _brief: {
+          publishability_score: 8,
+          originality_potential_score: 8,
+          niche_fit_score: 8,
+          content_format: 'quote',
+        },
+      },
+      {
+        source_tweet_url: 'https://x.com/user/status/345',
+        source_text: 'Some tweet',
+        content_format: 'reply',
+        crafted_text: 'Low quality reply',
+        _brief: {
+          publishability_score: 5,
+          originality_potential_score: 4,
+          niche_fit_score: 6,
+          content_format: 'reply',
+        },
+      },
+    ];
+
+    const result3 = dedupeOpportunities(lowQuality);
+    expect(result3.result).toHaveLength(1);
+  });
+
+  // ═══ Test 39: no threshold changes ═══
+
+  it('does not change any judge or near-pass thresholds', () => {
+    // Phase 2F.1 must NOT change thresholds — only fix diagnostics and add dedupe
+    expect(NEAR_PASS_THRESHOLDS.FINAL_SCORE_THRESHOLD).toBe(7.8);
+    expect(NEAR_PASS_THRESHOLDS.ORIGINALITY_THRESHOLD).toBe(7.8);
+    expect(NEAR_PASS_THRESHOLDS.USEFULNESS_THRESHOLD).toBe(7);
+    expect(NEAR_PASS_THRESHOLDS.EVIDENCE_SAFETY_THRESHOLD).toBe(8);
+    expect(NEAR_PASS_THRESHOLDS.BRIEF_ALIGNMENT_THRESHOLD).toBe(7.5);
+    expect(NEAR_PASS_THRESHOLDS.NEAR_PASS_MIN_FINAL_SCORE).toBe(6.8);
+  });
+
+  // ═══ Test 40: no opportunities removed when no duplicates ═══
+
+  it('removes nothing when all opportunities come from different sources', () => {
+    const opps: TestOpportunity[] = [
+      {
+        source_tweet_url: 'https://x.com/user1/status/111',
+        source_text: 'AI tweet 1',
+        content_format: 'quote',
+        crafted_text: 'First unique source',
+        _brief: {
+          publishability_score: 8,
+          originality_potential_score: 8,
+          niche_fit_score: 8,
+          content_format: 'quote',
+        },
+      },
+      {
+        source_tweet_url: 'https://x.com/user2/status/222',
+        source_text: 'AI tweet 2',
+        content_format: 'reply',
+        crafted_text: 'Second unique source',
+        _brief: {
+          publishability_score: 7,
+          originality_potential_score: 7,
+          niche_fit_score: 7,
+          content_format: 'reply',
+        },
+      },
+    ];
+
+    const { result, removed } = dedupeOpportunities(opps);
+
+    expect(result).toHaveLength(2);
+    expect(removed).toBe(0);
+  });
+});

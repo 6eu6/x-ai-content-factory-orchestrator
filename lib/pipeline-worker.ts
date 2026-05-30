@@ -969,9 +969,106 @@ async function processOpportunityIntelligence(task: PipelineTaskRow): Promise<Ta
         } : undefined,
       }));
 
+    // ═══ Phase 2F.1: Source Deduplication ═══
+    // Group opportunities by source_tweet_url (or source_text hash as fallback).
+    // If multiple opportunities share the same source, keep only the strongest one
+    // UNLESS both have clearly different content_format AND both have high initial quality.
+    // Preference order: higher publishability_score > higher originality_potential_score >
+    // higher niche_fit_score > quote over reply if scores tied and source tweet is strong.
+    const duplicateSourceExamples: string[] = [];
+    const dedupedOpportunities = (() => {
+      // Group by source_tweet_url (primary) or source_text (fallback)
+      // Use `as any` for fields that come from the original opportunity via spread
+      const groups = new Map<string, typeof selectedOpportunities>();
+      for (const opp of selectedOpportunities) {
+        const oppAny = opp as any;
+        const key = oppAny.source_tweet_url || oppAny.tweet_url || oppAny.url
+          || (() => { const t = oppAny.source_text || oppAny.text || ''; return `text:${t.slice(0, 80)}`; })();
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key)!.push(opp);
+      }
+
+      const result: typeof selectedOpportunities = [];
+      for (const [sourceKey, group] of groups) {
+        if (group.length === 1) {
+          result.push(group[0]);
+          continue;
+        }
+
+        // Multiple opportunities from same source — apply ranking
+        // Sort by: publishability_score DESC → originality_potential_score DESC →
+        // niche_fit_score DESC → content_format 'quote' over 'reply' if tied
+        const ranked = [...group].sort((a, b) => {
+          const aBrief = (a as any)._brief;
+          const bBrief = (b as any)._brief;
+
+          // 1. Higher publishability_score
+          const aPub = aBrief?.publishability_score ?? 0;
+          const bPub = bBrief?.publishability_score ?? 0;
+          if (bPub !== aPub) return bPub - aPub;
+
+          // 2. Higher originality_potential_score
+          const aOrig = aBrief?.originality_potential_score ?? 0;
+          const bOrig = bBrief?.originality_potential_score ?? 0;
+          if (bOrig !== aOrig) return bOrig - aOrig;
+
+          // 3. Higher niche_fit_score
+          const aNiche = aBrief?.niche_fit_score ?? 0;
+          const bNiche = bBrief?.niche_fit_score ?? 0;
+          if (bNiche !== aNiche) return bNiche - aNiche;
+
+          // 4. Prefer 'quote' over 'reply' if scores tied and source tweet is strong
+          const aFormat = (aBrief?.content_format || (a as any).content_format || '').toLowerCase();
+          const bFormat = (bBrief?.content_format || (b as any).content_format || '').toLowerCase();
+          if (aFormat === 'quote' && bFormat !== 'quote') return -1;
+          if (bFormat === 'quote' && aFormat !== 'quote') return 1;
+
+          return 0;
+        });
+
+        // Always keep the top-ranked opportunity
+        result.push(ranked[0]);
+
+        // Consider keeping a second opportunity ONLY if:
+        // - It has a DIFFERENT content_format from the top-ranked one
+        // - AND both have high initial quality (publishability_score >= 7 AND originality_potential_score >= 7)
+        if (ranked.length >= 2) {
+          const topFormat = ((ranked[0] as any)._brief?.content_format || (ranked[0] as any).content_format || '').toLowerCase();
+          const secondFormat = ((ranked[1] as any)._brief?.content_format || (ranked[1] as any).content_format || '').toLowerCase();
+          const secondPub = (ranked[1] as any)._brief?.publishability_score ?? 0;
+          const secondOrig = (ranked[1] as any)._brief?.originality_potential_score ?? 0;
+          const topPub = (ranked[0] as any)._brief?.publishability_score ?? 0;
+          const topOrig = (ranked[0] as any)._brief?.originality_potential_score ?? 0;
+
+          const differentFormat = topFormat !== secondFormat && topFormat && secondFormat;
+          const bothHighQuality = topPub >= 7 && topOrig >= 7 && secondPub >= 7 && secondOrig >= 7;
+
+          if (differentFormat && bothHighQuality) {
+            result.push(ranked[1]);
+            duplicateSourceExamples.push(`${sourceKey}: kept 2 (different formats: ${topFormat}/${secondFormat}, both high quality)`);
+          } else {
+            duplicateSourceExamples.push(`${sourceKey}: reduced ${group.length} → 1 (top: pub=${topPub}, orig=${topOrig})`);
+          }
+        } else {
+          duplicateSourceExamples.push(`${sourceKey}: reduced ${group.length} → 1`);
+        }
+      }
+
+      return result;
+    })();
+
+    const duplicateSourceOpportunitiesCount = selectedOpportunities.length - dedupedOpportunities.length > 0
+      ? selectedOpportunities.length
+      : 0;
+    const duplicateSourceOpportunitiesRemoved = selectedOpportunities.length - dedupedOpportunities.length;
+
+    if (duplicateSourceOpportunitiesRemoved > 0) {
+      console.log(`[pipeline-worker] source_dedup: removed ${duplicateSourceOpportunitiesRemoved} duplicate-source opportunities. Examples: ${duplicateSourceExamples.slice(0, 3).join('; ')}`);
+    }
+
     // Phase 2D.2: Diagnostic — detect count mismatch
     const selectedBriefsCount = selectedBriefs.length;
-    const selectedOpportunitiesCount = selectedOpportunities.length;
+    const selectedOpportunitiesCount = dedupedOpportunities.length;
     const duplicateSourceCount = (() => {
       const seen = new Map<string, number>();
       for (const opp of opportunities) {
@@ -1001,6 +1098,10 @@ async function processOpportunityIntelligence(task: PipelineTaskRow): Promise<Ta
         selected_opportunities_count: selectedOpportunitiesCount,
         selected_count_mismatch_detected: selectedCountMismatch,
         duplicate_source_count: duplicateSourceCount,
+        // Phase 2F.1: Source deduplication diagnostics
+        duplicate_source_opportunities_count: duplicateSourceOpportunitiesCount,
+        duplicate_source_opportunities_removed: duplicateSourceOpportunitiesRemoved,
+        duplicate_source_examples: duplicateSourceExamples.slice(0, 5),
         // Phase 2D.4: Borderline rescue diagnostics
         rescue_attempted_count: summary.rescue_attempted_count,
         rescue_succeeded_count: summary.rescue_succeeded_count,
@@ -1008,7 +1109,7 @@ async function processOpportunityIntelligence(task: PipelineTaskRow): Promise<Ta
         rescued_opportunity_count: summary.rescued_opportunity_count,
         rescue_reasons: summary.rescue_reasons,
         sampled_rescue_debug: summary.sampled_rescue_debug,
-        _opportunities: selectedOpportunities,
+        _opportunities: dedupedOpportunities,
         _intelligence_summary: summary,
       }
     };
@@ -1562,16 +1663,66 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
               console.log(`[pipeline-worker] near_pass_polish: candidate ${idx} PASSED after polish. Before: ${outcome.before_judge?.final_candidate_score}, After: ${outcome.after_judge?.final_candidate_score}`);
             } else {
               // Polish applied but still failing — keep polished text only if it improved
+              // IMPORTANT (Phase 2F.1): Update _judge_result and shield_issues to reflect
+              // the after_judge state, NOT the stale pre-polish state.
+              // Without this, diagnostics show the old score (e.g. 7) even though
+              // the polished text now scores 8, and shield_issues show stale reasons.
+              const afterJudge = outcome.after_judge;
+              const staleShieldIssues = polishedOpp.shield_issues || [];
+
+              // Remove stale judge_failed:* issues (they reflect the pre-polish judge, not the re-judge)
+              const issuesWithoutStaleJudge = staleShieldIssues.filter((issue: string) =>
+                !issue.startsWith('judge_failed:')
+              );
+
+              // Add new judge_failed reason from the re-judge (if any failure reasons)
+              const newJudgeFailedReason = (afterJudge?.failure_reasons?.length ?? 0) > 0
+                ? `judge_failed:${afterJudge!.failure_reasons[0]}`
+                : null;
+
+              // Rebuild shield_issues: stale judge_failed removed, new one added
+              let rebuiltShieldIssues = [...issuesWithoutStaleJudge];
+              if (newJudgeFailedReason) {
+                rebuiltShieldIssues.push(newJudgeFailedReason);
+              }
+
+              // Conditionally remove missing_originality if after_judge.originality_score >= 7.8
+              if (afterJudge && afterJudge.originality_score >= 7.8) {
+                rebuiltShieldIssues = rebuiltShieldIssues.filter((issue: string) => issue !== 'missing_originality');
+              }
+
+              // Conditionally remove brief_alignment_failed if after_judge.brief_alignment_score >= 7.5
+              if (afterJudge && afterJudge.brief_alignment_score >= 7.5) {
+                rebuiltShieldIssues = rebuiltShieldIssues.filter((issue: string) => issue !== 'brief_alignment_failed');
+              }
+
               judgedOpportunities[idx] = {
                 ...polishedOpp,
                 crafted_text: outcome.polished_text,
                 // Still shield_passed=false since re-judge didn't pass
+                // (unless remainingShieldIssues.length === 0 AND after_judge.passed is true)
+                shield_passed: rebuiltShieldIssues.length === 0 && (afterJudge?.passed ?? false),
+                shield_issues: rebuiltShieldIssues,
+                _judge_result: {
+                  ...(polishedOpp as any)._judge_result,
+                  passed: afterJudge?.passed ?? false,
+                  final_candidate_score: afterJudge?.final_candidate_score ?? (polishedOpp as any)._judge_result?.final_candidate_score,
+                  originality_score: afterJudge?.originality_score ?? (polishedOpp as any)._judge_result?.originality_score,
+                  usefulness_score: afterJudge?.usefulness_score ?? (polishedOpp as any)._judge_result?.usefulness_score,
+                  niche_fit_score: afterJudge?.niche_fit_score ?? (polishedOpp as any)._judge_result?.niche_fit_score,
+                  evidence_safety_score: afterJudge?.evidence_safety_score ?? (polishedOpp as any)._judge_result?.evidence_safety_score,
+                  clarity_score: afterJudge?.clarity_score ?? (polishedOpp as any)._judge_result?.clarity_score,
+                  brief_alignment_score: afterJudge?.brief_alignment_score ?? (polishedOpp as any)._judge_result?.brief_alignment_score,
+                  generic_bait_flag: afterJudge?.generic_bait_flag ?? false,
+                  unsupported_claim_flag: afterJudge?.unsupported_claim_flag ?? false,
+                  failure_reasons: afterJudge?.failure_reasons ?? [],
+                },
                 _near_pass_polish_applied: true,
                 _near_pass_polish_before_judge: outcome.before_judge,
                 _near_pass_polish_after_judge: outcome.after_judge,
               };
 
-              console.log(`[pipeline-worker] near_pass_polish: candidate ${idx} improved but still failing. Before: ${outcome.before_judge?.final_candidate_score}, After: ${outcome.after_judge?.final_candidate_score}`);
+              console.log(`[pipeline-worker] near_pass_polish: candidate ${idx} improved but still failing. Before: ${outcome.before_judge?.final_candidate_score}, After: ${outcome.after_judge?.final_candidate_score}. Shield issues: ${JSON.stringify(rebuiltShieldIssues)}`);
             }
           } else if (outcome.attempted && outcome.polish_failed_reason) {
             // Polish attempted but failed validation
