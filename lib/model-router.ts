@@ -34,7 +34,8 @@ export type TaskType =
   | 'casual_generation'            // Quick casual generation (short replies, quick takes)
   | 'opportunity_intelligence'     // Phase 2D: structured opportunity scoring, niche reasoning, angle discovery
   | 'opportunity_judge'            // Phase 2D: strict pre-gate scoring of crafted candidates
-  | 'selected_candidate_crafting'; // Phase 2D: craft final text from opportunity brief
+  | 'selected_candidate_crafting'  // Phase 2D: craft final text from opportunity brief
+  | 'near_pass_polish';            // Phase 2F: targeted polish for near-pass judge failures
 
 export type ModelProvider = 'cloud' | 'local';
 
@@ -176,6 +177,15 @@ const DEFAULT_ROUTING: Record<TaskType, ModelConfig> = {
     response_format: { type: 'json_object' },
     provider: 'cloud',
     description: 'Selected candidate crafting from opportunity brief',
+  },
+  // Phase 2F: Near-pass polish — targeted rewrite for judge-failed candidates close to threshold
+  near_pass_polish: {
+    model: 'anthropic/claude-sonnet-4-20250514',
+    temperature: 0.15,
+    max_tokens: 900,
+    response_format: { type: 'json_object' },
+    provider: 'cloud',
+    description: 'Near-pass polish — targeted rewrite for judge-failed candidates close to threshold',
   },
 };
 

@@ -55,7 +55,8 @@ import { cleanOpportunitiesText } from './crafted-text-cleaner';
 import { guardNicheAlignment } from './niche-alignment';
 import { validateOpportunitiesBeforeGate } from './quality-validator';
 import { evaluateOpportunities, type OpportunityBrief, type IntelligenceSummary } from './opportunity-intelligence';
-import { judgeCraftedCandidates, type JudgeResult, type JudgeSummary } from './opportunity-judge';
+import { judgeCraftedCandidates, isNearPass, type JudgeResult, type JudgeSummary } from './opportunity-judge';
+import { attemptNearPassPolish, computeNearPassDiagnostics, MAX_POLISH_CANDIDATES_PER_RUN, type PolishInput, type PolishOutcome, type NearPassDiagnostics } from './near-pass-polish';
 import { callModel, parseModelJson } from './model-router';
 
 // ═══ Types ═══
@@ -1450,19 +1451,168 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
       };
     });
 
+    // ═══ Phase 2F: Near-Pass Polish ═══
+    // For failed candidates that are close to passing, attempt ONE targeted polish.
+    // This runs AFTER the first judge pass and BEFORE returning results.
+    const polishOutcomes: PolishOutcome[] = [];
+    let polishAttempted = 0;
+
+    if (summary.judge_failed_count > 0) {
+      // Identify near-pass candidates (sorted by final_candidate_score descending for priority)
+      const nearPassIndices: number[] = [];
+      for (let i = 0; i < results.length; i++) {
+        const judgeResult = results[i];
+        const opp = judgedOpportunities[i];
+        const candidate = candidates[i];
+        if (!judgeResult || judgeResult.passed) continue;
+
+        const craftedText = opp.crafted_text || candidate?.crafted_text || '';
+        const brief = candidate?.brief || (opp as any)?._brief || {};
+
+        if (isNearPass(judgeResult, craftedText, brief)) {
+          nearPassIndices.push(i);
+        }
+      }
+
+      // Limit to MAX_POLISH_CANDIDATES_PER_RUN, prioritized by score (highest first)
+      nearPassIndices.sort((a, b) => results[b].final_candidate_score - results[a].final_candidate_score);
+      const eligibleIndices = nearPassIndices.slice(0, MAX_POLISH_CANDIDATES_PER_RUN);
+
+      for (const idx of eligibleIndices) {
+        const judgeResult = results[idx];
+        const opp = judgedOpportunities[idx];
+        const candidate = candidates[idx];
+        const brief = candidate?.brief || (opp as any)?._brief || {};
+        const craftedText = opp.crafted_text || candidate?.crafted_text || '';
+
+        const polishInput: PolishInput = {
+          crafted_text: craftedText,
+          brief: {
+            source_summary: brief.source_summary || brief.source_summary,
+            recommended_angle: brief.recommended_angle || brief.angle,
+            why_it_matters: brief.why_it_matters,
+            required_context: brief.required_context,
+            do_not_claim: brief.do_not_claim,
+          },
+          judge_failure_reasons: judgeResult.failure_reasons,
+          judge_scores: {
+            final_candidate_score: judgeResult.final_candidate_score,
+            originality_score: judgeResult.originality_score,
+            usefulness_score: judgeResult.usefulness_score,
+            brief_alignment_score: judgeResult.brief_alignment_score,
+            evidence_safety_score: judgeResult.evidence_safety_score,
+            clarity_score: judgeResult.clarity_score,
+          },
+          source_text_preview: (opp.source_text || '').slice(0, 200),
+          source_author: opp.source_author || '',
+        };
+
+        try {
+          const outcome = await attemptNearPassPolish(polishInput);
+          polishOutcomes.push(outcome);
+          polishAttempted++;
+
+          if (outcome.applied && outcome.polished_text) {
+            // Apply polished text to the opportunity
+            const polishedOpp = judgedOpportunities[idx];
+
+            if (outcome.passed) {
+              // Polish succeeded — re-judge passed! Replace crafted_text, restore shield_passed
+              judgedOpportunities[idx] = {
+                ...polishedOpp,
+                crafted_text: outcome.polished_text,
+                shield_passed: polishedOpp.shield_passed !== false ? true : true, // Override judge failure
+                shield_issues: (polishedOpp.shield_issues || []).filter(
+                  (issue: string) => !issue.startsWith('judge_failed:')
+                ),
+                _judge_result: {
+                  ...(polishedOpp as any)._judge_result,
+                  passed: true,
+                  final_candidate_score: outcome.after_judge?.final_candidate_score || judgeResult.final_candidate_score,
+                  originality_score: outcome.after_judge?.originality_score || judgeResult.originality_score,
+                  usefulness_score: outcome.after_judge?.usefulness_score || judgeResult.usefulness_score,
+                  niche_fit_score: outcome.after_judge?.niche_fit_score || judgeResult.niche_fit_score,
+                  evidence_safety_score: outcome.after_judge?.evidence_safety_score || judgeResult.evidence_safety_score,
+                  clarity_score: outcome.after_judge?.clarity_score || judgeResult.clarity_score,
+                  brief_alignment_score: outcome.after_judge?.brief_alignment_score || judgeResult.brief_alignment_score,
+                  generic_bait_flag: outcome.after_judge?.generic_bait_flag || false,
+                  unsupported_claim_flag: outcome.after_judge?.unsupported_claim_flag || false,
+                  failure_reasons: outcome.after_judge?.failure_reasons || [],
+                },
+                _near_pass_polish_applied: true,
+                _near_pass_polish_before_judge: outcome.before_judge,
+                _near_pass_polish_after_judge: outcome.after_judge,
+              };
+
+              console.log(`[pipeline-worker] near_pass_polish: candidate ${idx} PASSED after polish. Before: ${outcome.before_judge?.final_candidate_score}, After: ${outcome.after_judge?.final_candidate_score}`);
+            } else {
+              // Polish applied but still failing — keep polished text only if it improved
+              judgedOpportunities[idx] = {
+                ...polishedOpp,
+                crafted_text: outcome.polished_text,
+                // Still shield_passed=false since re-judge didn't pass
+                _near_pass_polish_applied: true,
+                _near_pass_polish_before_judge: outcome.before_judge,
+                _near_pass_polish_after_judge: outcome.after_judge,
+              };
+
+              console.log(`[pipeline-worker] near_pass_polish: candidate ${idx} improved but still failing. Before: ${outcome.before_judge?.final_candidate_score}, After: ${outcome.after_judge?.final_candidate_score}`);
+            }
+          } else if (outcome.attempted && outcome.polish_failed_reason) {
+            // Polish attempted but failed validation
+            judgedOpportunities[idx] = {
+              ...judgedOpportunities[idx],
+              _near_pass_polish_failed_reason: outcome.polish_failed_reason,
+            };
+
+            console.log(`[pipeline-worker] near_pass_polish: candidate ${idx} polish failed: ${outcome.polish_failed_reason}`);
+          }
+        } catch (polishErr: any) {
+          console.warn(`[pipeline-worker] near_pass_polish error for candidate ${idx}: ${(polishErr?.message || 'unknown').slice(0, 200)}`);
+          polishOutcomes.push({
+            attempted: true,
+            applied: false,
+            passed: false,
+            polished_text: null,
+            before_judge: null,
+            after_judge: null,
+            polish_failed_reason: `polish_exception:${(polishErr?.message || 'unknown').slice(0, 50)}`,
+            what_changed: null,
+            targeted_failures: [],
+          });
+        }
+      }
+    }
+
+    // Compute near-pass diagnostics
+    const nearPassDiagnostics = computeNearPassDiagnostics(polishOutcomes);
+
+    // Recompute pass/fail counts after polish (some may have flipped)
+    const finalPassedCount = judgedOpportunities.filter(o => o.shield_passed !== false).length;
+    const finalFailedCount = judgedOpportunities.filter(o => o.shield_passed === false).length;
+
     // Log summary
-    console.log(`[pipeline-worker] opportunity_judge: ${summary.judge_passed_count} passed, ${summary.judge_failed_count} failed. Avg final_candidate_score: ${summary.avg_final_candidate_score}, Avg originality: ${summary.avg_originality_score}`);
+    console.log(`[pipeline-worker] opportunity_judge: ${finalPassedCount} passed, ${finalFailedCount} failed (after near-pass polish). Near-pass: ${nearPassDiagnostics.near_pass_candidates_count} eligible, ${nearPassDiagnostics.near_pass_polish_attempted_count} attempted, ${nearPassDiagnostics.near_pass_polish_passed_count} rescued. Avg final_candidate_score: ${summary.avg_final_candidate_score}`);
 
     return {
       ok: true,
       result: {
-        judge_passed_count: summary.judge_passed_count,
-        judge_failed_count: summary.judge_failed_count,
+        judge_passed_count: finalPassedCount,
+        judge_failed_count: finalFailedCount,
         judge_failure_reasons: summary.judge_failure_reasons,
         avg_final_candidate_score: summary.avg_final_candidate_score,
         avg_originality_score: summary.avg_originality_score,
         _opportunities: judgedOpportunities,
         _judge_summary: summary,
+        // Phase 2F: Near-pass diagnostics
+        near_pass_candidates_count: nearPassDiagnostics.near_pass_candidates_count,
+        near_pass_polish_attempted_count: nearPassDiagnostics.near_pass_polish_attempted_count,
+        near_pass_polish_applied_count: nearPassDiagnostics.near_pass_polish_applied_count,
+        near_pass_polish_passed_count: nearPassDiagnostics.near_pass_polish_passed_count,
+        near_pass_polish_failed_count: nearPassDiagnostics.near_pass_polish_failed_count,
+        near_pass_polish_failure_reasons: nearPassDiagnostics.near_pass_polish_failure_reasons,
+        average_score_before_polish: nearPassDiagnostics.average_score_before_polish,
+        average_score_after_polish: nearPassDiagnostics.average_score_after_polish,
       }
     };
   } catch (err: any) {

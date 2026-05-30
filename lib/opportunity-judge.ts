@@ -65,6 +65,114 @@ const EVIDENCE_SAFETY_THRESHOLD = 8;
 /** Phase 2D.2: Minimum brief_alignment_score to pass judge */
 const BRIEF_ALIGNMENT_THRESHOLD = 7.5;
 
+// ═══ Phase 2F: Near-Pass Eligibility ═══
+
+/** Minimum final_candidate_score to be considered near-pass (eligible for polish) */
+const NEAR_PASS_MIN_FINAL_SCORE = 6.8;
+
+/** Maximum final_candidate_score for near-pass (must still be failing, i.e. < 7.8) */
+const NEAR_PASS_MAX_FINAL_SCORE = 7.8;
+
+/** Minimum evidence_safety_score to be eligible for polish */
+const NEAR_PASS_MIN_EVIDENCE_SAFETY = 7.5;
+
+/** Minimum niche_fit_score to be eligible for polish */
+const NEAR_PASS_MIN_NICHE_FIT = 7;
+
+/** Minimum crafted_text length for near-pass eligibility */
+const NEAR_PASS_MIN_TEXT_LENGTH = 40;
+
+/** Maximum crafted_text length for near-pass eligibility */
+const NEAR_PASS_MAX_TEXT_LENGTH = 280;
+
+/** Failure reasons that are NOT fixable by polish */
+const UNFIXABLE_FAILURE_REASONS = new Set([
+  'generic_bait_flag',
+  'unsupported_claim_flag',
+  'judge_parse_failed',
+  'malformed_json_output',
+  'text_is_json_wrapper',
+]);
+
+/** Failure reason prefixes that indicate low evidence safety (not fixable by polish) */
+const LOW_EVIDENCE_SAFETY_PREFIX = 'evidence_safety_score';
+
+/**
+ * Determine if a judge-failed result is "near-pass" — close enough to threshold
+ * that a targeted polish attempt might push it over.
+ *
+ * Eligibility criteria:
+ * - final_candidate_score >= 6.8 and < 7.8
+ * - evidence_safety_score >= 7.5
+ * - niche_fit_score >= 7
+ * - generic_bait_flag = false
+ * - unsupported_claim_flag = false
+ * - crafted_text length between 40 and 280
+ * - has _brief or useful brief context
+ * - failure reasons are all fixable (originality, usefulness, brief_alignment, final_score)
+ * - NOT fixable if: unsupported_claim_flag, generic_bait_flag, malformed_json_output,
+ *   text_is_json_wrapper, low evidence_safety_score, language mismatch
+ */
+export function isNearPass(
+  judgeResult: JudgeResult,
+  craftedText?: string,
+  brief?: Record<string, any>
+): boolean {
+  // Must have failed the judge (near-pass only applies to failed candidates)
+  if (judgeResult.passed) return false;
+
+  // final_candidate_score must be in the near-pass range
+  if (judgeResult.final_candidate_score < NEAR_PASS_MIN_FINAL_SCORE) return false;
+  if (judgeResult.final_candidate_score >= NEAR_PASS_MAX_FINAL_SCORE) return false;
+
+  // evidence_safety_score must be high enough (factual issues can't be polished)
+  if (judgeResult.evidence_safety_score < NEAR_PASS_MIN_EVIDENCE_SAFETY) return false;
+
+  // niche_fit_score must be high enough (off-niche content can't be polished)
+  if (judgeResult.niche_fit_score < NEAR_PASS_MIN_NICHE_FIT) return false;
+
+  // Flags that indicate structural/unfixable problems
+  if (judgeResult.generic_bait_flag) return false;
+  if (judgeResult.unsupported_claim_flag) return false;
+
+  // Text length check
+  const textLen = (craftedText || '').trim().length;
+  if (textLen < NEAR_PASS_MIN_TEXT_LENGTH || textLen > NEAR_PASS_MAX_TEXT_LENGTH) return false;
+
+  // Must have brief context (polish needs to know the angle)
+  if (!brief || (!brief.recommended_angle && !brief.angle && !brief.source_summary)) return false;
+
+  // Check failure reasons — all must be fixable
+  for (const reason of judgeResult.failure_reasons) {
+    // Check for unfixable flags
+    if (UNFIXABLE_FAILURE_REASONS.has(reason)) return false;
+    // Check for low evidence safety prefix (indicates evidence issue below threshold)
+    if (reason.startsWith(LOW_EVIDENCE_SAFETY_PREFIX)) {
+      // Already checked evidence_safety_score >= 7.5 above, but if reason includes this,
+      // it means score was < 8 (the judge threshold). Since we already check >= 7.5,
+      // this is fixable (the score is close to threshold, not catastrophically low).
+      // Continue — evidence safety is borderline fixable
+    }
+  }
+
+  return true;
+}
+
+/** Export thresholds for testing */
+export const NEAR_PASS_THRESHOLDS = {
+  NEAR_PASS_MIN_FINAL_SCORE,
+  NEAR_PASS_MAX_FINAL_SCORE,
+  NEAR_PASS_MIN_EVIDENCE_SAFETY,
+  NEAR_PASS_MIN_NICHE_FIT,
+  NEAR_PASS_MIN_TEXT_LENGTH,
+  NEAR_PASS_MAX_TEXT_LENGTH,
+  FINAL_SCORE_THRESHOLD,
+  ORIGINALITY_THRESHOLD,
+  USEFULNESS_THRESHOLD,
+  EVIDENCE_SAFETY_THRESHOLD,
+  BRIEF_ALIGNMENT_THRESHOLD,
+};
+
 /**
  * Generic engagement bait patterns — reused concept from originality-enhancer.ts
  * These patterns indicate low-effort engagement bait that should not pass the judge.
