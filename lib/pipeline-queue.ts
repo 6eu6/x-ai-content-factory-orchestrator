@@ -1018,9 +1018,10 @@ export async function markStuckTasks(stuckAfterMinutes: number = 10): Promise<nu
     const cutoff = new Date(Date.now() - stuckAfterMinutes * 60 * 1000).toISOString();
 
     // Find running tasks with stale locked_at
+    // Phase S1: Also fetch task_type for better stuck diagnostics
     const { data: stuckTasks, error: findError } = await supabase
       .from('pipeline_tasks')
-      .select('id, run_id')
+      .select('id, run_id, task_type')
       .eq('status', 'running')
       .lt('locked_at', cutoff);
 
@@ -1033,7 +1034,7 @@ export async function markStuckTasks(stuckAfterMinutes: number = 10): Promise<nu
         .from('pipeline_tasks')
         .update({
           status: 'stuck',
-          error_message: `Task stuck for >${stuckAfterMinutes}min — worker likely died`,
+          error_message: `Task "${task.task_type}" stuck for >${stuckAfterMinutes}min — worker likely died`,
           updated_at: new Date().toISOString()
         })
         .eq('id', task.id)

@@ -271,14 +271,66 @@ export async function markStuckPipelineRuns(staleMinutes = 10): Promise<number> 
 
     if (findError || !stuckRuns?.length) return 0;
 
-    // Mark each as stuck
+    // Mark each as stuck with improved diagnostics
     let marked = 0;
     for (const run of stuckRuns) {
+      // Phase S1: Look up actual task states for this run to produce better diagnostics
+      let taskInfo = '';
+      try {
+        const { data: runTasks } = await supabase
+          .from('pipeline_tasks')
+          .select('task_type, status, error_message')
+          .eq('run_id', run.id);
+
+        if (runTasks && runTasks.length > 0) {
+          // Check for failed tasks first (most actionable)
+          const failedTasks = runTasks.filter((t: any) => t.status === 'failed');
+          if (failedTasks.length > 0) {
+            const failedInfo = failedTasks.map((t: any) =>
+              `${t.task_type}${t.error_message ? ': ' + String(t.error_message).slice(0, 80) : ''}`
+            ).join(', ');
+            taskInfo = ` — failed task(s): ${failedInfo}`;
+          } else {
+            // No failed tasks — check for running/stuck tasks
+            const activeTasks = runTasks.filter((t: any) => t.status === 'running' || t.status === 'stuck');
+            if (activeTasks.length > 0) {
+              const activeInfo = activeTasks.map((t: any) => `${t.task_type} (${t.status})`).join(', ');
+              taskInfo = ` — active task(s): ${activeInfo}`;
+            } else {
+              // No failed or active tasks — check for stuck tasks
+              const stuckTasks = runTasks.filter((t: any) => t.status === 'stuck');
+              if (stuckTasks.length > 0) {
+                const stuckInfo = stuckTasks.map((t: any) => t.task_type).join(', ');
+                taskInfo = ` — stuck task(s): ${stuckInfo}`;
+              }
+            }
+          }
+        }
+      } catch (taskErr: any) {
+        // Don't let task lookup failure prevent marking as stuck
+        console.warn(`[pipeline-run-tracker] Failed to look up tasks for stuck run ${run.id}: ${taskErr?.message}`);
+      }
+
+      // Build error message based on actual task state
+      const currentStep = run.current_step || 'unknown';
+      let errorMessage: string;
+
+      if (taskInfo.includes('failed task')) {
+        // Actual failed task exists — don't assume timeout
+        errorMessage = `Pipeline stuck at step "${currentStep}" for >${staleMinutes}min${taskInfo}`;
+      } else if (taskInfo.includes('active task') || taskInfo.includes('stuck task')) {
+        // Active or stuck tasks found — likely worker died mid-processing
+        errorMessage = `Pipeline stuck at step "${currentStep}" for >${staleMinutes}min — worker may have died${taskInfo}`;
+      } else {
+        // No task info available — assume timeout (original behavior)
+        errorMessage = `Pipeline stuck at step "${currentStep}" for >${staleMinutes}min — likely Vercel serverless timeout`;
+      }
+
       const { error: updateError } = await supabase
         .from('pipeline_runs')
         .update({
           status: 'stuck',
-          error_message: `Pipeline stuck at step "${run.current_step || 'unknown'}" for >${staleMinutes}min — likely Vercel serverless timeout`,
+          error_message: errorMessage,
           updated_at: new Date().toISOString()
         })
         .eq('id', run.id);
