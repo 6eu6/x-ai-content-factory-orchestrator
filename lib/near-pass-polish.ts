@@ -79,6 +79,12 @@ export type PolishOutcome = {
   targeted_failures: string[];
   /** Phase 2G.1: Signature voice diagnostics for the polished text */
   signature_voice_diagnostics?: SignatureVoiceDiagnostics;
+  /** Phase 2G.2: Brief-locked polish diagnostics */
+  _brief_locked_polish_attempted?: boolean;
+  _brief_locked_polish_applied?: boolean;
+  _brief_locked_polish_before_judge?: JudgeResult | null;
+  _brief_locked_polish_after_judge?: JudgeResult | null;
+  _brief_locked_polish_reason?: string;
 };
 
 export type NearPassDiagnostics = {
@@ -90,6 +96,10 @@ export type NearPassDiagnostics = {
   near_pass_polish_failure_reasons: string[];
   average_score_before_polish: number;
   average_score_after_polish: number;
+  /** Phase 2G.2: Brief-locked polish diagnostics */
+  brief_locked_polish_attempted_count: number;
+  brief_locked_polish_applied_count: number;
+  brief_locked_polish_passed_count: number;
 };
 
 /** Max candidates to attempt polish per run */
@@ -149,6 +159,31 @@ export function buildPolishPrompt(input: PolishInput): Array<{ role: 'system' | 
       })
     : '';
 
+  // Phase 2G.2: Add BRIEF LOCK section when brief_alignment is at risk
+  const isBriefAlignmentAtRisk = scores.brief_alignment_score < 7.5 ||
+    input.judge_failure_reasons.some(r => r.includes('brief_alignment'));
+  const briefLockSection = isBriefAlignmentAtRisk
+    ? `\n\n═══ BRIEF LOCK ═══
+
+CRITICAL: This tweet's brief_alignment is at risk. You MUST preserve the recommended angle while improving other dimensions. Do NOT drift from the brief.
+
+BRIEF LOCK DETAILS:
+- Source summary: "${sourceSummary}"
+- Recommended angle: "${recommendedAngle}"
+- Why it matters: "${whyItMatters}"
+- Required context: ${requiredContext || 'none'}
+- Do not claim: ${doNotClaim || 'none'}
+
+BRIEF LOCK CHECKLIST (verify ALL before submitting):
+✓ The recommended angle "${recommendedAngle}" is clearly expressed in the text
+✓ All required_context items are reflected
+✓ The why_it_matters reason is addressed
+✓ No claims from do_not_claim appear
+✓ If adding a signature frame or contrast, it STRENGTHENS the recommended angle rather than replacing it
+
+INSTRUCTION: Improve originality/signature voice WITHOUT losing the recommended angle. If adding a signature frame, preserve every required element from the brief.`
+    : '';
+
   // Phase 2G: Add sharper originality instruction when originality is the failure
   const originalityInstruction = isOriginalityFailure
     ? `\n\nCRITICAL: This tweet failed because of LOW ORIGINALITY. Do NOT merely rephrase or slightly adjust wording. Add a SHARPER FRAME using one of the suggested twist types. The frame must change the THINKING STRUCTURE, not just the words. For example, if the source says "X is growing", an original frame is not "X is growing fast" but "the cost of ignoring X is now higher than adopting X" (inversion) or "X works because it eliminates step Y from the old workflow" (mechanism).`
@@ -194,7 +229,7 @@ CURRENT JUDGE SCORES:
 - evidence_safety_score: ${scores.evidence_safety_score}
 - clarity_score: ${scores.clarity_score}
 
-FAILURE REASONS: ${failureReasons}${originalitySection}${signatureVoiceSection}
+FAILURE REASONS: ${failureReasons}${originalitySection}${signatureVoiceSection}${briefLockSection}
 
 Return JSON only:
 {
@@ -561,5 +596,272 @@ export function computeNearPassDiagnostics(outcomes: PolishOutcome[]): NearPassD
     near_pass_polish_failure_reasons: failureReasons,
     average_score_before_polish: avgBefore,
     average_score_after_polish: avgAfter,
+    brief_locked_polish_attempted_count: outcomes.filter(o => o._brief_locked_polish_attempted).length,
+    brief_locked_polish_applied_count: outcomes.filter(o => o._brief_locked_polish_applied).length,
+    brief_locked_polish_passed_count: outcomes.filter(o => o._brief_locked_polish_applied && o.passed).length,
   };
+}
+
+// ═══ Phase 2G.2: Brief-Locked Micro-Repair ═══
+
+/**
+ * Check if a candidate is eligible for brief-locked micro-repair.
+ *
+ * Eligibility criteria:
+ * - after_judge.final_candidate_score >= 7.8
+ * - after_judge.originality_score >= 7.8
+ * - after_judge.evidence_safety_score >= 8
+ * - after_judge.brief_alignment_score >= 6.8 and < 7.5
+ * - failure_reasons include brief_alignment
+ *
+ * This is a SECOND repair attempt, only for candidates that already went through
+ * near-pass polish and improved significantly but still fail only on brief_alignment.
+ */
+export function isMicroRepairEligible(
+  afterJudge: JudgeResult
+): boolean {
+  // Must have failed (not passed)
+  if (afterJudge.passed) return false;
+
+  // final_candidate_score must be >= 7.8 (passed that threshold)
+  if (afterJudge.final_candidate_score < 7.8) return false;
+
+  // originality_score must be >= 7.8
+  if (afterJudge.originality_score < 7.8) return false;
+
+  // evidence_safety_score must be >= 8
+  if (afterJudge.evidence_safety_score < 8) return false;
+
+  // brief_alignment_score must be >= 6.8 and < 7.5 (close to threshold)
+  if (afterJudge.brief_alignment_score < 6.8) return false;
+  if (afterJudge.brief_alignment_score >= 7.5) return false;
+
+  // failure_reasons must include brief_alignment
+  const hasBriefAlignmentFailure = afterJudge.failure_reasons.some(r =>
+    r.includes('brief_alignment')
+  );
+  if (!hasBriefAlignmentFailure) return false;
+
+  return true;
+}
+
+/**
+ * Build the prompt for brief-locked micro-repair.
+ * This is a very targeted repair that ONLY adjusts brief alignment
+ * while preserving the existing signature frame and voice.
+ */
+export function buildMicroRepairPrompt(
+  currentText: string,
+  brief: {
+    source_summary?: string;
+    recommended_angle?: string;
+    angle?: string;
+    why_it_matters?: string;
+    required_context?: string[];
+    do_not_claim?: string[];
+  },
+  afterJudgeScores: {
+    final_candidate_score: number;
+    originality_score: number;
+    usefulness_score: number;
+    brief_alignment_score: number;
+    evidence_safety_score: number;
+    clarity_score: number;
+  }
+): Array<{ role: 'system' | 'user'; content: string }> {
+  const recommendedAngle = brief.recommended_angle || brief.angle || '';
+  const sourceSummary = brief.source_summary || '';
+  const whyItMatters = brief.why_it_matters || '';
+  const requiredContext = Array.isArray(brief.required_context) ? brief.required_context.join(', ') : '';
+  const doNotClaim = Array.isArray(brief.do_not_claim) ? brief.do_not_claim.join(', ') : '';
+
+  return [
+    {
+      role: 'system',
+      content: `You are a micro-repair specialist for @30piq. A tweet has EXCELLENT originality and evidence safety but FAILS ONLY on brief_alignment (score ${afterJudgeScores.brief_alignment_score}/10, needs 7.5+).
+
+Your ONLY job: Make minimal adjustments so the recommended angle "${recommendedAngle}" is more clearly expressed. Do NOT change the signature frame, contrast structure, or voice.
+
+═══ BRIEF LOCK (MICRO-REPAIR) ═══
+
+STRICT RULES:
+- ONLY adjust brief alignment. Do NOT change the originality, evidence safety, or signature voice.
+- Preserve the existing signature frame as much as possible.
+- The recommended angle MUST be clearly expressed after your edit.
+- Keep it under 280 characters.
+- Do NOT invent personal experience.
+- Do NOT add generic hype or unsupported claims.
+- Do NOT add hashtags or emojis.
+- Do NOT wrap output in JSON or markdown.
+
+BRIEF LOCK DETAILS:
+- Source summary: "${sourceSummary}"
+- Recommended angle: "${recommendedAngle}"
+- Why it matters: "${whyItMatters}"
+- Required context: ${requiredContext || 'none'}
+- Do not claim: ${doNotClaim || 'none'}
+
+BRIEF LOCK CHECKLIST:
+✓ The recommended angle "${recommendedAngle}" is clearly expressed
+✓ All required_context items are reflected
+✓ The why_it_matters reason is addressed
+✓ No claims from do_not_claim appear
+✓ The signature frame and voice from the current text are preserved
+
+CURRENT SCORES:
+- final_candidate_score: ${afterJudgeScores.final_candidate_score}
+- originality_score: ${afterJudgeScores.originality_score}
+- brief_alignment_score: ${afterJudgeScores.brief_alignment_score} (NEEDS 7.5+)
+- evidence_safety_score: ${afterJudgeScores.evidence_safety_score}
+
+Return JSON only:
+{
+  "polished_text": "the micro-repaired tweet, under 280 chars",
+  "what_changed": "what you adjusted for brief alignment",
+  "claims_safety_checked": true
+}`,
+    },
+    {
+      role: 'user',
+      content: `Micro-repair this tweet to improve brief alignment ONLY:\n\n"${currentText}"`,
+    },
+  ];
+}
+
+/**
+ * Attempt a brief-locked micro-repair on a candidate that already went through
+ * near-pass polish and improved significantly but still fails only on brief_alignment.
+ *
+ * This is max 1 per candidate, only for highly promising candidates.
+ *
+ * Returns a PolishOutcome with brief-locked diagnostics.
+ */
+export async function attemptBriefLockedMicroRepair(
+  currentText: string,
+  brief: {
+    source_summary?: string;
+    recommended_angle?: string;
+    angle?: string;
+    why_it_matters?: string;
+    required_context?: string[];
+    do_not_claim?: string[];
+  },
+  afterJudge: JudgeResult
+): Promise<PolishOutcome> {
+  const emptyOutcome: PolishOutcome = {
+    attempted: false,
+    applied: false,
+    passed: false,
+    polished_text: null,
+    before_judge: null,
+    after_judge: null,
+    polish_failed_reason: null,
+    what_changed: null,
+    targeted_failures: [],
+    _brief_locked_polish_attempted: true,
+    _brief_locked_polish_applied: false,
+    _brief_locked_polish_reason: `brief_alignment_score_${afterJudge.brief_alignment_score}_below_7.5`,
+  };
+
+  // Check eligibility
+  if (!isMicroRepairEligible(afterJudge)) {
+    return {
+      ...emptyOutcome,
+      _brief_locked_polish_attempted: false,
+      _brief_locked_polish_reason: 'not_eligible',
+    };
+  }
+
+  try {
+    // Build micro-repair prompt
+    const messages = buildMicroRepairPrompt(currentText, brief, {
+      final_candidate_score: afterJudge.final_candidate_score,
+      originality_score: afterJudge.originality_score,
+      usefulness_score: afterJudge.usefulness_score,
+      brief_alignment_score: afterJudge.brief_alignment_score,
+      evidence_safety_score: afterJudge.evidence_safety_score,
+      clarity_score: afterJudge.clarity_score,
+    });
+
+    const response = await callModel('near_pass_polish' as TaskType, messages, {
+      temperature: 0.12,
+      max_tokens: 600,
+      response_format: { type: 'json_object' },
+    });
+
+    // Parse response
+    const parsed = parseModelJson(response);
+    if (!parsed || typeof parsed !== 'object') {
+      return {
+        ...emptyOutcome,
+        polish_failed_reason: 'micro_repair_response_parse_failed',
+      };
+    }
+
+    const repairedText = parsed.polished_text;
+    if (!repairedText || typeof repairedText !== 'string') {
+      return {
+        ...emptyOutcome,
+        polish_failed_reason: 'micro_repair_text_missing',
+      };
+    }
+
+    const trimmedRepair = repairedText.trim();
+    const whatChanged = parsed.what_changed || 'brief_alignment_micro_repair';
+
+    // Local validation
+    const doNotClaim = brief?.do_not_claim || [];
+    const validation = validatePolishedText(
+      trimmedRepair,
+      doNotClaim,
+      brief?.recommended_angle || brief?.angle,
+      afterJudge.brief_alignment_score
+    );
+
+    if (!validation.valid) {
+      return {
+        ...emptyOutcome,
+        polished_text: trimmedRepair,
+        polish_failed_reason: validation.reason || 'micro_repair_validation_failed',
+        what_changed: whatChanged,
+      };
+    }
+
+    // Re-judge the micro-repaired text
+    const reJudgeResult = await judgeCraftedCandidate(trimmedRepair, brief || {});
+
+    // Check if the repair improved things without degrading originality or evidence
+    const originalityPreserved = reJudgeResult.originality_score >= 7.8;
+    const evidencePreserved = reJudgeResult.evidence_safety_score >= 8;
+    const briefImproved = reJudgeResult.brief_alignment_score > afterJudge.brief_alignment_score;
+
+    // Apply only if:
+    // - brief_alignment improved (or passed)
+    // - originality did NOT drop below 7.8
+    // - evidence safety did NOT drop below 8
+    const shouldApply = briefImproved && originalityPreserved && evidencePreserved;
+
+    return {
+      attempted: true,
+      applied: shouldApply,
+      passed: reJudgeResult.passed,
+      polished_text: shouldApply ? trimmedRepair : null,
+      before_judge: afterJudge,
+      after_judge: reJudgeResult,
+      polish_failed_reason: shouldApply ? null : 'micro_repair_brief_not_improved_or_scores_degraded',
+      what_changed: shouldApply ? whatChanged : null,
+      targeted_failures: ['brief_alignment_score'],
+      _brief_locked_polish_attempted: true,
+      _brief_locked_polish_applied: shouldApply,
+      _brief_locked_polish_before_judge: afterJudge,
+      _brief_locked_polish_after_judge: reJudgeResult,
+      _brief_locked_polish_reason: `brief_alignment_score_${afterJudge.brief_alignment_score}_to_${reJudgeResult.brief_alignment_score}`,
+    };
+  } catch (err: any) {
+    console.warn(`[near-pass-polish] Micro-repair attempt failed: ${(err?.message || 'unknown').slice(0, 200)}`);
+    return {
+      ...emptyOutcome,
+      polish_failed_reason: `micro_repair_ai_call_failed:${(err?.message || 'unknown').slice(0, 100)}`,
+    };
+  }
 }

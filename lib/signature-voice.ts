@@ -69,6 +69,13 @@ export const SIGNATURE_VOICE_RULES = {
     'render target',
     'operator heuristic',
     'training set for taste',
+    'format prompting',
+    'output format',
+    'stale mental',
+    'context window',
+    'token budget',
+    'inference cost',
+    'prompt budget',
   ],
   lengthConstraint: 'Keep under 280 chars unless explicitly long-form is enabled.',
 };
@@ -138,17 +145,23 @@ export function detectSignatureVoiceIndicators(text: string): {
     !summaryStarters.test(firstSentence.trim());
 
   // Contrast or inversion: "X is not A, it's B" or explicit contrast signals
-  const hasContrastOrInversion = /\bis not\b.*\bit(?:'s| is)\b/i.test(trimmed) ||
-    /\bnot .* but\b/i.test(trimmed) ||
-    /\binstead of\b/i.test(trimmed) ||
-    /\brather than\b/i.test(trimmed) ||
-    /\bthe opposite\b/i.test(trimmed) ||
-    /\bthe mistake\b/i.test(trimmed) ||
-    /\bdon't\b.*\bdo\b/i.test(trimmed) ||
-    /, not \b/i.test(trimmed) ||
-    /\bnot \w+, (it's|it is|the|that|but)\b/i.test(trimmed);
+  // Phase 2G.2: Expanded to detect more contrast patterns
+  const hasContrastOrInversion =
+    /\bis not\b/i.test(trimmed) ||                           // "X is not Y" (redefinition/negation)
+    /\bis not\b.*\bit(?:'s| is)\b/i.test(trimmed) ||         // "X is not A, it's B" (classic contrast)
+    /\bnot .* but\b/i.test(trimmed) ||                       // "not X but Y"
+    /\binstead of\b/i.test(trimmed) ||                       // "instead of X"
+    /\brather than\b/i.test(trimmed) ||                      // "rather than X"
+    /\bthe opposite\b/i.test(trimmed) ||                     // "the opposite"
+    /\bthe mistake\b/i.test(trimmed) ||                      // "the mistake"
+    /\bdon't\b.*\bdo\b/i.test(trimmed) ||                    // "don't X, do Y"
+    /[,\u2014\u2013\u2012-]\s*not\b/i.test(trimmed) ||       // ", not X" or "\u2014 not X" (contrast after punctuation)
+    /\bnot \w+, (it's|it is|the|that|but)\b/i.test(trimmed) || // "not X, it's Y"
+    /\bnot to\b/i.test(trimmed) ||                           // "not to X" (negation of purpose)
+    /\bfrom \w+ to \w+/i.test(trimmed);                      // "from A to B" (directional contrast)
 
   // Operator takeaway: a practical instruction or heuristic
+  // Phase 2G.2: Expanded to detect more operator patterns
   const operatorTakeawayPatterns = [
     /\b(if|when) you\b.{0,30}\b(use|need|want|evaluate|choose|build|pick)\b/i,
     /\b(your (move|play|signal|filter|rule|heuristic))\b/i,
@@ -156,6 +169,14 @@ export function detectSignatureVoiceIndicators(text: string): {
     /\b(stop|start|switch|avoid|skip|try|use)\b.{0,20}\b(instead|now|before|after)\b/i,
     /\b(stop)\b.{0,30}\b(start)\b/i,
     /\b(always|never)\b.{0,30}\b(if|when|unless)\b/i,
+    // Phase 2G.2: Additional operator takeaway patterns
+    /\bmatch \w+ to \w+/i,                    // "Match X to Y"
+    /\buse \w+ (for|to|when|in)\b/i,          // "Use X for Y"
+    /\bask for \w+ (when|if|before)\b/i,      // "Ask for X when Y"
+    /\bthe rule[:.]/i,                          // "The rule: X"
+    /\bdefault to \w+ (when|if|unless)\b/i,   // "Default to X when Y"
+    /\boperators?:\s/i,                        // "Operators: X"
+    /\bfor \w+, (use|try|check|apply|build|choose|pick)\b/i, // "For comparisons, use tables"
   ];
 
   const hasOperatorTakeaway = operatorTakeawayPatterns.some(p => p.test(trimmed));
@@ -172,7 +193,18 @@ export function detectSignatureVoiceIndicators(text: string): {
     /([A-Z][a-z]+(?:\s+[a-z]+){1,5}\s+(?:is|are|means|becomes)\s+[a-z]+(?:\s+[a-z]+){0,4})/
   );
 
-  const hasCompactPhrase = hasConcreteNoun || !!compactPhraseMatch;
+  // Phase 2G.2: Also detect compound technical terms in definition context
+  // Pattern: "a [compound term]" or "the [compound term]" where compound term is
+  // two lowercase words forming a technical concept (e.g., "a render target")
+  const compoundTermInContext = /\b(?:a|the|your|our) ([a-z]+ [a-z]+)(?:\s+(?:you|that|which|for|to|in|of|from|with|by|on|at|\.))/i.test(trimmed);
+
+  // Phase 2G.2: Also detect noun+noun compounds ending in common tech/abstract nouns
+  // Relevant to @30piq domain: AI, productivity, career, ops
+  // Exclude common determiners (the, a, an, this, that, some, any, each, every, no, my, your, our, their)
+  // to avoid false positives like "the shift", "a model", etc.
+  const compoundNounSuffixes = /\b(?!the\b|a\b|an\b|this\b|that\b|some\b|any\b|each\b|every\b|no\b|my\b|your\b|our\b|their\b|his\b|her\b|its\b)[a-z]+ (?:target|map|cache|model|heuristic|prompt|format|budget|window|cost|pipeline|signal|filter|rule|critic|set|layer|engine|pattern|frame|index|gate|shield|metric|stack|queue|graph|node|block|chain|pool|core|base|scope|path|loop|switch|bridge|drift|shift|gap|fold|axis|lever|anchor|beam)\b/i.test(trimmed.toLowerCase());
+
+  const hasCompactPhrase = hasConcreteNoun || !!compactPhraseMatch || compoundTermInContext || compoundNounSuffixes;
 
   // Detect signature phrase — the most quotable compact phrase
   let detectedSignaturePhrase: string | null = null;
@@ -189,6 +221,20 @@ export function detectSignatureVoiceIndicators(text: string): {
   }
   if (!detectedSignaturePhrase && compactPhraseMatch) {
     detectedSignaturePhrase = compactPhraseMatch[1].slice(0, 80);
+  }
+  // Phase 2G.2: Also extract compound terms detected in definition context
+  if (!detectedSignaturePhrase && compoundTermInContext) {
+    const ctxMatch = trimmed.match(/\b(?:a|the|your|our) ([a-z]+ [a-z]+)(?:\s+(?:you|that|which|for|to|in|of|from|with|by|on|at|\.))/i);
+    if (ctxMatch) {
+      detectedSignaturePhrase = ctxMatch[1].slice(0, 80);
+    }
+  }
+  // Phase 2G.2: Also extract compound noun suffix terms
+  if (!detectedSignaturePhrase && compoundNounSuffixes) {
+    const suffixMatch = trimmed.toLowerCase().match(/\b([a-z]+ (?:target|map|cache|model|heuristic|prompt|format|budget|window|cost|pipeline|signal|filter|rule|critic|set|layer|engine|pattern|frame|index|gate|shield|metric|stack|queue|graph|node|block|chain|pool|core|base|scope|path|loop|switch|bridge|drift|shift|gap|fold|axis|lever|anchor|beam))\b/i);
+    if (suffixMatch) {
+      detectedSignaturePhrase = suffixMatch[1].slice(0, 80);
+    }
   }
 
   // Detect operator takeaway text

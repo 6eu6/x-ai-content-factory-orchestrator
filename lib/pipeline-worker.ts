@@ -56,7 +56,7 @@ import { guardNicheAlignment } from './niche-alignment';
 import { validateOpportunitiesBeforeGate } from './quality-validator';
 import { evaluateOpportunities, type OpportunityBrief, type IntelligenceSummary } from './opportunity-intelligence';
 import { judgeCraftedCandidates, isNearPass, type JudgeResult, type JudgeSummary } from './opportunity-judge';
-import { attemptNearPassPolish, computeNearPassDiagnostics, MAX_POLISH_CANDIDATES_PER_RUN, type PolishInput, type PolishOutcome, type NearPassDiagnostics } from './near-pass-polish';
+import { attemptNearPassPolish, attemptBriefLockedMicroRepair, isMicroRepairEligible, computeNearPassDiagnostics, MAX_POLISH_CANDIDATES_PER_RUN, type PolishInput, type PolishOutcome, type NearPassDiagnostics } from './near-pass-polish';
 import { callModel, parseModelJson } from './model-router';
 import { getOriginalityContext, buildOriginalityPromptSection, detectOriginalityIndicators, validateOriginalityOutput, type OriginalityContext, type OriginalityDiagnostics } from './originality-context';
 import { buildSignatureVoiceSection, validateSignatureVoice, type SignatureVoiceDiagnostics } from './signature-voice';
@@ -1712,6 +1712,8 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
     // This runs AFTER the first judge pass and BEFORE returning results.
     const polishOutcomes: PolishOutcome[] = [];
     let polishAttempted = 0;
+    // Track eligible indices for micro-repair later (Phase 2G.2)
+    let polishEligibleIndices: number[] = [];
 
     if (summary.judge_failed_count > 0) {
       // Identify near-pass candidates (sorted by final_candidate_score descending for priority)
@@ -1733,6 +1735,7 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
       // Limit to MAX_POLISH_CANDIDATES_PER_RUN, prioritized by score (highest first)
       nearPassIndices.sort((a, b) => results[b].final_candidate_score - results[a].final_candidate_score);
       const eligibleIndices = nearPassIndices.slice(0, MAX_POLISH_CANDIDATES_PER_RUN);
+      polishEligibleIndices = eligibleIndices;
 
       for (const idx of eligibleIndices) {
         const judgeResult = results[idx];
@@ -1927,12 +1930,160 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
     // Compute near-pass diagnostics
     const nearPassDiagnostics = computeNearPassDiagnostics(polishOutcomes);
 
+    // ═══ Phase 2G.2: Brief-Locked Micro-Repair ═══
+    // For candidates that went through near-pass polish, improved significantly,
+    // but still fail ONLY on brief_alignment, attempt one micro-repair.
+    const microRepairIndices: number[] = [];
+    for (let i = 0; i < polishOutcomes.length; i++) {
+      const outcome = polishOutcomes[i];
+      // Only consider outcomes that were applied and have after_judge
+      if (!outcome.applied || !outcome.after_judge) continue;
+      // The candidate must still be failing
+      if (outcome.after_judge.passed) continue;
+
+      // Find the index in judgedOpportunities that corresponds to this polish outcome
+      // The polishOutcomes are in the same order as polishEligibleIndices
+      const eligibleIdx = polishEligibleIndices.length > i
+        ? polishEligibleIndices[i]
+        : -1;
+      if (eligibleIdx < 0) continue;
+
+      // Check if micro-repair is eligible
+      const afterJudge = outcome.after_judge;
+      const brief = candidates[eligibleIdx]?.brief || {};
+      const currentText = outcome.polished_text || judgedOpportunities[eligibleIdx]?.crafted_text || '';
+
+      // isMicroRepairEligible imported from near-pass-polish
+      if (!isMicroRepairEligible(afterJudge)) continue;
+
+      microRepairIndices.push(i);
+    }
+
+    for (const polishIdx of microRepairIndices) {
+      const outcome = polishOutcomes[polishIdx];
+      const eligibleIdx = polishEligibleIndices.length > polishIdx
+        ? polishEligibleIndices[polishIdx]
+        : -1;
+      if (eligibleIdx < 0) continue;
+
+      const brief = candidates[eligibleIdx]?.brief || {};
+      const currentText = outcome.polished_text || judgedOpportunities[eligibleIdx]?.crafted_text || '';
+      const afterJudge = outcome.after_judge!;
+
+      try {
+        const microOutcome = await attemptBriefLockedMicroRepair(currentText, brief, afterJudge);
+        polishOutcomes[polishIdx] = {
+          ...outcome,
+          _brief_locked_polish_attempted: microOutcome._brief_locked_polish_attempted,
+          _brief_locked_polish_applied: microOutcome._brief_locked_polish_applied,
+          _brief_locked_polish_before_judge: microOutcome._brief_locked_polish_before_judge,
+          _brief_locked_polish_after_judge: microOutcome._brief_locked_polish_after_judge,
+          _brief_locked_polish_reason: microOutcome._brief_locked_polish_reason,
+        };
+
+        if (microOutcome.applied && microOutcome.polished_text) {
+          const polishedOpp = judgedOpportunities[eligibleIdx];
+
+          if (microOutcome.passed) {
+            // Micro-repair passed! Apply it
+            const microAfterJudge = microOutcome.after_judge;
+            const remainingShieldIssues = (polishedOpp.shield_issues || []).filter((issue: string) => {
+              if (issue.startsWith('judge_failed:')) return false;
+              if (issue === 'brief_alignment_failed' && (microAfterJudge?.brief_alignment_score ?? 0) >= 7.5) return false;
+              if (issue === 'missing_originality' && (microAfterJudge?.originality_score ?? 0) >= 7.8) return false;
+              return true;
+            });
+
+            judgedOpportunities[eligibleIdx] = {
+              ...polishedOpp,
+              crafted_text: microOutcome.polished_text,
+              shield_passed: remainingShieldIssues.length === 0,
+              shield_issues: remainingShieldIssues,
+              _judge_result: {
+                ...(polishedOpp as any)._judge_result,
+                passed: true,
+                final_candidate_score: microAfterJudge?.final_candidate_score || afterJudge.final_candidate_score,
+                originality_score: microAfterJudge?.originality_score || afterJudge.originality_score,
+                usefulness_score: microAfterJudge?.usefulness_score || afterJudge.usefulness_score,
+                niche_fit_score: microAfterJudge?.niche_fit_score || afterJudge.niche_fit_score,
+                evidence_safety_score: microAfterJudge?.evidence_safety_score || afterJudge.evidence_safety_score,
+                clarity_score: microAfterJudge?.clarity_score || afterJudge.clarity_score,
+                brief_alignment_score: microAfterJudge?.brief_alignment_score || afterJudge.brief_alignment_score,
+                generic_bait_flag: microAfterJudge?.generic_bait_flag || false,
+                unsupported_claim_flag: microAfterJudge?.unsupported_claim_flag || false,
+                failure_reasons: microAfterJudge?.failure_reasons || [],
+              },
+              _near_pass_polish_applied: true,
+              _near_pass_polish_before_judge: outcome.before_judge,
+              _near_pass_polish_after_judge: microAfterJudge,
+              _brief_locked_polish_applied: true,
+              _brief_locked_polish_before_judge: afterJudge,
+              _brief_locked_polish_after_judge: microAfterJudge,
+            };
+
+            console.log(`[pipeline-worker] brief_locked_micro_repair: candidate ${eligibleIdx} PASSED after micro-repair. Brief alignment: ${afterJudge.brief_alignment_score} → ${microAfterJudge?.brief_alignment_score}`);
+          } else {
+            // Micro-repair improved but still not passing
+            const microAfterJudge = microOutcome.after_judge;
+            const currentShieldIssues = polishedOpp.shield_issues || [];
+            const rebuiltIssues = currentShieldIssues.filter((issue: string) =>
+              !issue.startsWith('judge_failed:')
+            );
+            const newFailureReasons = microAfterJudge?.failure_reasons || [];
+            if (newFailureReasons.length > 0) {
+              rebuiltIssues.push(`judge_failed:${newFailureReasons[0]}`);
+            }
+
+            // Conditionally remove brief_alignment_failed if score improved enough
+            if (microAfterJudge && microAfterJudge.brief_alignment_score >= 7.5) {
+              const idx = rebuiltIssues.indexOf('brief_alignment_failed');
+              if (idx >= 0) rebuiltIssues.splice(idx, 1);
+            }
+
+            judgedOpportunities[eligibleIdx] = {
+              ...polishedOpp,
+              crafted_text: microOutcome.polished_text,
+              shield_passed: rebuiltIssues.length === 0 && (microAfterJudge?.passed ?? false),
+              shield_issues: rebuiltIssues,
+              _judge_result: {
+                ...(polishedOpp as any)._judge_result,
+                passed: microAfterJudge?.passed ?? false,
+                final_candidate_score: microAfterJudge?.final_candidate_score ?? afterJudge.final_candidate_score,
+                originality_score: microAfterJudge?.originality_score ?? afterJudge.originality_score,
+                usefulness_score: microAfterJudge?.usefulness_score ?? afterJudge.usefulness_score,
+                niche_fit_score: microAfterJudge?.niche_fit_score ?? afterJudge.niche_fit_score,
+                evidence_safety_score: microAfterJudge?.evidence_safety_score ?? afterJudge.evidence_safety_score,
+                clarity_score: microAfterJudge?.clarity_score ?? afterJudge.clarity_score,
+                brief_alignment_score: microAfterJudge?.brief_alignment_score ?? afterJudge.brief_alignment_score,
+                generic_bait_flag: microAfterJudge?.generic_bait_flag ?? false,
+                unsupported_claim_flag: microAfterJudge?.unsupported_claim_flag ?? false,
+                failure_reasons: newFailureReasons,
+              },
+              _near_pass_polish_applied: true,
+              _near_pass_polish_before_judge: outcome.before_judge,
+              _near_pass_polish_after_judge: microAfterJudge,
+              _brief_locked_polish_applied: true,
+              _brief_locked_polish_before_judge: afterJudge,
+              _brief_locked_polish_after_judge: microAfterJudge,
+            };
+
+            console.log(`[pipeline-worker] brief_locked_micro_repair: candidate ${eligibleIdx} improved but still failing. Brief alignment: ${afterJudge.brief_alignment_score} → ${microAfterJudge?.brief_alignment_score}`);
+          }
+        }
+      } catch (microErr: any) {
+        console.warn(`[pipeline-worker] brief_locked_micro_repair error for candidate ${eligibleIdx}: ${(microErr?.message || 'unknown').slice(0, 200)}`);
+      }
+    }
+
+    // Recompute near-pass diagnostics (including micro-repair outcomes)
+    const nearPassDiagnosticsFinal = computeNearPassDiagnostics(polishOutcomes);
+
     // Recompute pass/fail counts after polish (some may have flipped)
     const finalPassedCount = judgedOpportunities.filter(o => o.shield_passed !== false).length;
     const finalFailedCount = judgedOpportunities.filter(o => o.shield_passed === false).length;
 
     // Log summary
-    console.log(`[pipeline-worker] opportunity_judge: ${finalPassedCount} passed, ${finalFailedCount} failed (after near-pass polish). Near-pass: ${nearPassDiagnostics.near_pass_candidates_count} eligible, ${nearPassDiagnostics.near_pass_polish_attempted_count} attempted, ${nearPassDiagnostics.near_pass_polish_passed_count} rescued. Avg final_candidate_score: ${summary.avg_final_candidate_score}`);
+    console.log(`[pipeline-worker] opportunity_judge: ${finalPassedCount} passed, ${finalFailedCount} failed (after near-pass polish + micro-repair). Near-pass: ${nearPassDiagnosticsFinal.near_pass_candidates_count} eligible, ${nearPassDiagnosticsFinal.near_pass_polish_attempted_count} attempted, ${nearPassDiagnosticsFinal.near_pass_polish_passed_count} rescued. Brief-locked: ${nearPassDiagnosticsFinal.brief_locked_polish_attempted_count} attempted, ${nearPassDiagnosticsFinal.brief_locked_polish_applied_count} applied, ${nearPassDiagnosticsFinal.brief_locked_polish_passed_count} rescued. Avg final_candidate_score: ${summary.avg_final_candidate_score}`);
 
     return {
       ok: true,
@@ -1945,14 +2096,18 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
         _opportunities: judgedOpportunities,
         _judge_summary: summary,
         // Phase 2F: Near-pass diagnostics
-        near_pass_candidates_count: nearPassDiagnostics.near_pass_candidates_count,
-        near_pass_polish_attempted_count: nearPassDiagnostics.near_pass_polish_attempted_count,
-        near_pass_polish_applied_count: nearPassDiagnostics.near_pass_polish_applied_count,
-        near_pass_polish_passed_count: nearPassDiagnostics.near_pass_polish_passed_count,
-        near_pass_polish_failed_count: nearPassDiagnostics.near_pass_polish_failed_count,
-        near_pass_polish_failure_reasons: nearPassDiagnostics.near_pass_polish_failure_reasons,
-        average_score_before_polish: nearPassDiagnostics.average_score_before_polish,
-        average_score_after_polish: nearPassDiagnostics.average_score_after_polish,
+        near_pass_candidates_count: nearPassDiagnosticsFinal.near_pass_candidates_count,
+        near_pass_polish_attempted_count: nearPassDiagnosticsFinal.near_pass_polish_attempted_count,
+        near_pass_polish_applied_count: nearPassDiagnosticsFinal.near_pass_polish_applied_count,
+        near_pass_polish_passed_count: nearPassDiagnosticsFinal.near_pass_polish_passed_count,
+        near_pass_polish_failed_count: nearPassDiagnosticsFinal.near_pass_polish_failed_count,
+        near_pass_polish_failure_reasons: nearPassDiagnosticsFinal.near_pass_polish_failure_reasons,
+        average_score_before_polish: nearPassDiagnosticsFinal.average_score_before_polish,
+        average_score_after_polish: nearPassDiagnosticsFinal.average_score_after_polish,
+        // Phase 2G.2: Brief-locked polish diagnostics
+        brief_locked_polish_attempted_count: nearPassDiagnosticsFinal.brief_locked_polish_attempted_count,
+        brief_locked_polish_applied_count: nearPassDiagnosticsFinal.brief_locked_polish_applied_count,
+        brief_locked_polish_passed_count: nearPassDiagnosticsFinal.brief_locked_polish_passed_count,
       }
     };
   } catch (err: any) {
