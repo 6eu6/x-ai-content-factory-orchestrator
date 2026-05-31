@@ -1,36 +1,31 @@
-# AUDIT BASELINE — Phase 0 Freeze (Updated)
+# AUDIT BASELINE — Phase 0 Freeze (Updated 2026-06-01)
 
 **Date:** 2026-06-01
-**Auditor:** System-wide deep audit (second pass, comprehensive verification)
-**Audit Protocol:** PRE/POST CHANGE DEEP VERIFICATION AUDIT v1
+**Auditor:** PRE/POST CHANGE DEEP VERIFICATION AUDIT v1
+**Audit Protocol:** Sections A–K comprehensive verification
 
 ---
 
 ## Current State
 
 ### Git
-- **Latest commit SHA:** `2fc0616a603dfde700576b6b87cbce9db4cb1f19`
+- **Latest commit SHA:** `25cda8fc66bfc6af9ef34da60a7421aae153b63c`
 - **Branch:** `main`
-- **Latest commit message:** `audit: system-wide deep audit + S1.3 adjacent pattern fix`
+- **Working tree:** Clean (no uncommitted changes)
 
-### Recent 15 Commits
+### Recent Commits
 | # | SHA | Message |
 |---|-----|---------|
-| 1 | `2fc0616` | audit: system-wide deep audit + S1.3 adjacent pattern fix |
-| 2 | `2472765` | feat(S1.3): Account Growth Lens — broaden niche without allowing forced angles |
-| 3 | `5fdf5e0` | fix(S1.2): propagate post_length_policy into craft/select/judge/polish |
-| 4 | `66eef52` | Phase S1.2: Account Posting Limits + Polish Hard Cap |
-| 5 | `06dff0b` | feat(M1): structured memory compaction for token savings + quality learning |
-| 6 | `e29c608` | fix(2G.3): near-pass polish crash when results.length > judgedOpportunities.length |
-| 7 | `74134d3` | Phase S1.1: Source Freshness Gate for Reply/Quote Recommendations |
-| 8 | `c9868cd` | Phase S1: Pipeline Contract Stabilization & Replay Testing |
-| 9 | `7738ced` | Phase 2G.3 Hotfix: Fix opportunity_judge undefined crafted_text crash |
-| 10 | `7efceca` | Phase 2G.3: Dual Candidate Generation + Internal Selection |
-| 11 | `e0d9266` | Phase 2G.2 — Brief-Locked Signature Polish + Signature Validator Fix |
-| 12 | `856d4a9` | Phase 2E.3 — Discovery Rejection Transparency |
-| 13 | `3a67773` | Phase 2G.1 — Signature Voice + Stronger Originality Strategy |
-| 14 | `47d4521` | Phase 2G: RAG-Guided Originality & Angle Bank |
-| 15 | `9e219cb` | Phase 2F.1 hotfix: stale judge state + source deduplication |
+| 1 | `25cda8f` | docs: mark P0-3 and P1-4 as COMPLETE in roadmap |
+| 2 | `96fd4f9` | fix: P0-3 hard-reject brief_crafting_parse_failed + P1 prompt drift + deprecation warning |
+| 3 | `3b28c0f` | docs: update audit reports with 2026-06-01 verification findings |
+| 4 | `2fc0616` | audit: system-wide deep audit + S1.3 adjacent pattern fix |
+| 5 | `2472765` | feat(S1.3): Account Growth Lens — broaden niche without allowing forced angles |
+| 6 | `5fdf5e0` | fix(S1.2): propagate post_length_policy into craft/select/judge/polish |
+| 7 | `66eef52` | Phase S1.2: Account Posting Limits + Polish Hard Cap |
+| 8 | `06dff0b` | feat(M1): structured memory compaction for token savings + quality learning |
+| 9 | `e29c608` | fix(2G.3): near-pass polish crash when results.length > judgedOpportunities.length |
+| 10 | `74134d3` | Phase S1.1: Source Freshness Gate for Reply/Quote Recommendations |
 
 ### Versions
 | Dependency | Version |
@@ -44,85 +39,29 @@
 | Zod | ^4.4.3 |
 | pg | ^8.21.0 |
 
-### Package Scripts
-| Script | Command |
-|--------|---------|
-| `dev` | `next dev` |
-| `build` | `next build --webpack` |
-| `start` | `next start` |
-| `lint` | `next lint` |
-| `test` | `vitest run` |
-| `worker:pipeline` | `tsx scripts/pipeline-worker.ts` |
-
-### Codebase Stats
-| Metric | Value |
-|--------|-------|
-| lib/*.ts files | 55 |
-| lib/ total lines | 25,326 |
-| test files | 35 |
-| test total lines | 15,122 |
-| API routes | 55 |
-| app/ size | 772K |
-| lib/ size | 1.1M |
-
-### Environment Assumptions
-- **Supabase project:** `qmoictvgwavhirnexscz`
-- **No .env files in repo** (gitignored; credentials on Vercel/Oracle VPS only)
-- **AI gateway:** OpenRouter (OPENAI_BASE_URL=https://openrouter.ai/api/v1)
-- **X API:** TwitterAPI.io for scanning
-- **Telegram:** Bot-based recommendation delivery (manual publish only)
-- **Worker:** Persistent Oracle VPS worker via PM2 (`scripts/pipeline-worker.ts`)
-- **Fallback:** Vercel serverless via `app/api/pipeline-worker/route.ts`
-
----
-
-## Build Status
+### Build & Test Status
 
 | Check | Status | Details |
 |-------|--------|---------|
-| `npm install` | PASS | 2 moderate vulnerabilities (non-blocking) |
-| `npm run build` | PASS | All routes compiled. 55 API routes + static pages |
+| `npm install` | PASS | Dependencies resolved |
 | `npx tsc --noEmit` | PASS | Zero type errors |
-| `npx vitest run` | PASS | **35 test files, 922 tests, all passing.** Duration: 6.27s |
+| `npm run build` | PASS | All 55 API routes compiled |
+| `npx vitest run` | PASS | **35 test files, 922 tests, all passing** |
 
-### Test Files (35)
-| Test File | Tests |
-|-----------|-------|
-| phase2d-quality.test.ts | 88 |
-| phase2b-quality.test.ts | 82 |
-| feedback-loop.test.ts | 68 |
-| phase2c-quality.test.ts | 68 |
-| phase2a-ledger.test.ts | 45 |
-| phase-s1-2-post-length-policy.test.ts | 45 |
-| phase-s1-3-account-growth-lens.test.ts | 49 |
-| phase2c1-quality.test.ts | 59 |
-| phase2f-near-pass-polish.test.ts | 41 |
-| phase-m1-structured-memory.test.ts | 17 |
-| phase-s1-1-freshness-gate.test.ts | 16 |
-| phase2g1-signature-voice.test.ts | 15 |
-| phase2e3-rejection-transparency.test.ts | 15 |
-| phase2d1-model-routing.test.ts | 25 |
-| rule-performance.test.ts | 25 |
-| phase2d-integration-fix.test.ts | 28 |
-| content-policy.test.ts | 30 |
-| cron-reliability.test.ts | 19 |
-| phase2e1-discovery-audit.test.ts | 19 |
-| performance-outcome.test.ts | 20 |
-| phase2d2-brief-crafting.test.ts | 17 |
-| phase2d3-crafting-contract.test.ts | 19 |
-| brain-quality.test.ts | 10 |
-| phase2g-originality-context.test.ts | 14 |
-| phase2g2-brief-locked-polish.test.ts | 13 |
-| phase2c2-quality.test.ts | 12 |
-| phase2g3-dual-candidate.test.ts | 10 |
-| pipeline-contract-replay.test.ts | 9 |
-| phase2g3-hotfix2-near-pass-mismatch.test.ts | 8 |
-| telegram-parsing.test.ts | 8 |
-| phase2g3-hotfix-candidate-crash.test.ts | 7 |
-| retry.test.ts | 7 |
-| parse-model-json.test.ts | 6 |
-| x-scoring.test.ts | 4 |
-| decision-engine.test.ts | 4 |
+### Environment Keys Verified
+
+| Key | Status |
+|-----|--------|
+| SUPABASE_URL | OK — reachable, auth works |
+| SUPABASE_SERVICE_ROLE_KEY | OK — service_role JWT valid |
+| ORCHESTRATOR_SECRET | OK |
+| OPENAI_API_KEY (OpenRouter) | OK — sk-or-v1-* format |
+| OPENAI_BASE_URL | OK — openrouter.ai/api/v1 |
+| TWITTERAPI_IO_KEY | OK |
+| TELEGRAM_BOT_TOKEN | OK |
+| TELEGRAM_ALLOWED_CHAT_ID | OK — 5654610649 |
+| GITHUB_TOKEN | OK — ghp_* |
+| X_USERNAME | OK — 30piq |
 
 ---
 
@@ -131,53 +70,83 @@
 | # | Invariant | Status |
 |---|-----------|--------|
 | 1 | No auto-posting to X | VERIFIED — all X API calls are read-only |
-| 2 | Telegram remains manual recommendation only | VERIFIED — all Telegram calls are send-only, no X write endpoints |
-| 3 | Telegram message says "manual copy/publish only" | VERIFIED — Arabic text "انسخ وانشر يدويًا فقط" in daily-runner.ts:555 |
-| 4 | No unjudged text can reach publish_gate | VERIFIED with gap — legacy daily-runner.ts bypasses judge (documented risk) |
-| 5 | No candidate can bypass shield/judge/publish_gate | VERIFIED — all 3 gates checked in sequence |
-| 6a | final_candidate_score >= 7.8 | VERIFIED — lib/opportunity-judge.ts |
-| 6b | originality_score >= 7.8 | VERIFIED |
-| 6c | usefulness_score >= 7 | VERIFIED |
-| 6d | evidence_safety_score >= 8 | VERIFIED |
-| 6e | brief_alignment_score >= 7.5 | VERIFIED |
-| 7 | S1.2 post length policy: hard_limit=280, target=240, allow_longform=false | VERIFIED |
-| 8 | S1.3 Account Growth Lens: broad lens, transferable angles, forced angle detection | VERIFIED |
-| 9 | Weak content must be rejected | VERIFIED — multiple gates enforce |
-| 10 | "No recommendation" is acceptable | VERIFIED — decision engine can return empty |
+| 2 | Telegram remains manual recommendation only | VERIFIED — all Telegram calls are send-only |
+| 3 | Telegram message says "manual copy/publish only" | VERIFIED — Arabic text present |
+| 4 | No candidate can bypass shield/judge/publish_gate | VERIFIED with gap — legacy daily-runner still callable |
+| 5a | final_candidate_score >= 7.8 | VERIFIED — opportunity-judge.ts:58 |
+| 5b | originality_score >= 7.8 | VERIFIED — opportunity-judge.ts:61 |
+| 5c | usefulness_score >= 7 | VERIFIED — opportunity-judge.ts:64 |
+| 5d | evidence_safety_score >= 8 | VERIFIED — opportunity-judge.ts:67 |
+| 5e | brief_alignment_score >= 7.5 | VERIFIED — opportunity-judge.ts:70 |
+| 6 | S1.2 post length: hard_limit=280, target=240, allow_longform=false | VERIFIED |
+| 7 | S1.3 Account Growth Lens: broad lens with transferable angles | VERIFIED |
+| 8 | No threshold changes | VERIFIED — all 5 thresholds match spec |
+| 9 | "No recommendation" is acceptable | VERIFIED |
 
 ---
 
-## Known Issues from This Audit
+## Active Issues (from 2026-06-01 Deep Verification Audit)
 
-### CRITICAL (P0)
-1. **Enrich step weak candidate pass**: When all 3 craftFromBrief candidates fail, opportunity keeps stale pre-intelligence crafted_text with `_brief_crafting_parse_failed=true`. Nothing downstream hard-rejects on this flag.
-2. **Memory compaction not in processTask switch**: `memory_compaction` case missing from pipeline task dispatcher. However, memory compaction IS triggered inside `processTelegramDelivery` as a fire-and-forget step, so it does run. Memory retrieval IS integrated into the enrich step via `getRelevantStructuredMemory`. The issue is that compaction is not a separately trackable/retryable task type, not that it doesn't run at all.
+### P0 — CRITICAL
 
-### HIGH (P1)
-3. **Prompt drift in 3 files**: `originality-enhancer.ts:487` and `originality-enhancer.ts:572` and `numeric-claim-guard.ts:154` still use old narrow "AI x productivity x career growth" wording.
-4. **Legacy daily-runner bypasses judge**: Documented but not blocked at runtime. Unjudged text could reach publish_gate via this path.
-5. **No source quality feedback loop**: `source_quality_scores` exists but never queried during account selection.
-6. **Memory: good_angles never populated**: Source author memory only records failures; winning patterns always empty.
-7. **Memory: winning_angle/source_pattern rule types never created**: Compaction only creates failure-derived types.
-8. **Noisy accounts waste AI budget**: Zero-yield accounts scanned every cycle with same priority.
+| ID | Finding | Impact |
+|----|---------|--------|
+| J1 | `source_quality_scores` table MISSING from production DB | Source quality feedback loop is completely non-functional. Migration file exists but was never applied. |
 
-### MEDIUM (P2)
-9. **No memory confidence decay**: Rules accumulate forever at high confidence with no time-based decay.
-10. **No minimum confidence threshold for memory retrieval**: Low-confidence rules can appear in prompt injection.
-11. **Invalid handles not cleaned from DB**: Stay in accounts table, consuming fetch budget.
-12. **Brief alignment gate skipped for opportunities without a brief**: Only checks if `_brief.recommended_angle.length >= 10`.
-13. **Missing diagnostics**: load_account_state emits no structured diagnostics; persist_decision silent-fails on daily_checkins.
-14. **Misleading comment**: content-engine-v3.ts:1254 "Lowered thresholds" refers to scan prefilter, not quality thresholds.
+### P1 — HIGH
 
-### LOW (P3)
-15. **niche-alignment.ts missing explicit ALLOWED_ADJACENCY_PATTERNS for "social media behavior"**
-16. **Rescue prompt wording inconsistent with canonical S1.3** (opportunity-intelligence.ts:1324)
-17. **Missing regression test for نشرت command** (confirms it only logs, never posts)
+| ID | Finding | Impact |
+|----|---------|--------|
+| C1/H1 | Memory compaction skipped when `notify_telegram=false` | Memory rules go stale, degrading quality over time |
+| B4 | 9 stale "AI x Productivity x Career Growth" prompts in content-type-engine.ts, media-pipeline.ts, content.ts, viral-discovery-run/route.ts, growth.ts | Prompt drift — content generation uses outdated narrow lens |
+| B4b | content-engine-v3.ts:990 overly-broad prompt "can tweet about anything" | Contradicts S1.3 lens boundaries |
+
+### P2 — MEDIUM
+
+| ID | Finding | Impact |
+|----|---------|--------|
+| C2 | opportunity_judge does NOT enforce post length policy | Wastes compute on text that will fail at publish_gate |
+| B3 | Legacy daily-runner.ts bypasses judge/shield (still callable via API) | Unjudged content could reach publish_gate |
+
+### P3 — LOW
+
+| ID | Finding | Impact |
+|----|---------|--------|
+| C3 | Micro-repair uses getDefaultPostLengthPolicy() instead of injected | Won't adapt if @30piq upgrades to Premium |
+| B2 | Decision engine thresholds (7.0-7.8) lower than judge gate (7.8) | Misleading but not a safety hole |
+| F1 | 3 corrupted accounts in DB (emoji/Arabic entries) | Harmless but messy |
 
 ---
 
-## Baseline Established
+## Database State
 
-This baseline confirms the project is in a buildable, testable state with 922 passing tests. All hard invariants are verified at the code level with the gaps noted above.
+### Critical Tables
+| Table | Rows | Status |
+|-------|------|--------|
+| pipeline_cost_ledger | 3,802 | ACTIVE |
+| compact_operator_rules | 33 | ACTIVE |
+| source_author_memory | 1 | ACTIVE (karpathy only) |
+| pipeline_runs | 35 | ACTIVE |
+| published_decisions | 6 | ACTIVE |
+| accounts | 27 | ACTIVE (3 corrupted) |
+| memory_compaction_runs | 5 | ACTIVE |
+| **source_quality_scores** | **MISSING** | **Migration not applied** |
 
-**No destructive edits should be made until the repair roadmap is finalized (Phase 12). Only Phase 13 allows small safe fixes with pre/post verification.**
+### Corrupted Accounts (to delete)
+- `📋` (emoji)
+- `قائمة` (Arabic "list")
+- `الحسابات` (Arabic "accounts")
+
+---
+
+## VERDICT: **NEEDS FOLLOW-UP**
+
+System is NOT in a dangerous state. No auto-posting, no threshold violations, no security holes. However, P0 + 3x P1 issues must be fixed before considering the system fully operational.
+
+**Required actions before next change:**
+1. Apply `source_quality_scores` migration to production DB (P0)
+2. Fix memory compaction placement (P1)
+3. Update 9 stale prompts to S1.3 lens (P1)
+4. Fix content-engine-v3.ts overly-broad prompt (P1)
+
+After each fix, run POST-CHANGE verification per the audit protocol.
