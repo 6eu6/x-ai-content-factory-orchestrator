@@ -77,7 +77,7 @@ Opportunity intelligence is the first AI-powered evaluation in the pipeline. It 
 - Opportunities failing MIN_ORIGINALITY_POTENTIAL_SCORE = 7
 - Opportunities failing MIN_NICHE_FIT_SCORE = 5
 - Opportunities failing MIN_USEFULNESS_SCORE = 6 (relaxed to 5 if viral_context >= 8 AND angle >= 30 chars)
-- The 12 CANONICAL_REJECTION_REASONS: blocked_topic, forced_angle, generic_only, intelligence_parse_failed, low_originality, low_niche_fit, low_publishability, low_usefulness, no_actionable_angle, redundant_with_existing, too_narrow_audience, unsupported_claims
+- The 12 CANONICAL_REJECTION_REASONS: blocked_topic, forced_angle, generic_only, intelligence_parse_failed, low_originality_potential, low_niche_fit, low_usefulness, unsupported_claim_risk, no_clear_angle, language_or_context_mismatch, insufficient_context, weak_source
 
 ### What It Allows
 - Opportunities that meet all threshold requirements, even if some dimensions are borderline

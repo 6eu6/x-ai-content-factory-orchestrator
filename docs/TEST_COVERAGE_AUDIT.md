@@ -1,7 +1,7 @@
 # TEST COVERAGE AUDIT
 
 **Date:** 2026-06-01
-**Scope:** 35 test files, 913 tests, all passing
+**Scope:** 35 test files, 922 tests, all passing
 **Runner:** Vitest 3.2.4
 **Command:** `npx vitest run`
 
@@ -272,7 +272,7 @@ There is no test that verifies the Telegram delivery pipeline never calls X writ
 ## 5. Acceptance Criteria for Test Coverage Improvement
 
 1. All Priority 1 tests pass
-2. Test count increases from 913 to 1000+
+2. Test count increases from 922 to 1000+
 3. No category has "CRITICAL" gap level
 4. End-to-end pipeline test validates the full scan → delivery sequence
 5. Contract tests enforce the manual-only Telegram invariant

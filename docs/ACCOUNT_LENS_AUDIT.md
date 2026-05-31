@@ -3,7 +3,7 @@
 **Project:** x-ai-content-factory-orchestrator
 **Date:** 2025-03-04
 **Scope:** All prompt-carrying files that encode @30piq's account lens, including scoring logic, guard functions, judge prompts, polish prompts, and publish gates
-**Status:** Issues found — two CRITICAL, several MEDIUM
+**Status:** Issues found — two CRITICAL (UPDATED: original CRITICALs resolved; new CRITICALs identified), several MEDIUM
 
 ---
 
@@ -11,9 +11,9 @@
 
 This audit examines every location in the codebase where @30piq's account focus is defined, referenced, scored, or enforced. After the S1.3 phase transition, the intended account lens was broadened from the narrow "AI × productivity × career growth" framing to a richer, more expressive definition: "AI-native operator / builder / digital culture account" spanning AI tools, productivity, leverage, building/shipping/startups/indie hacking, career growth, skill acquisition, internet business, creator growth, digital behavior, attention, software/automation/systems/tools, future of work, and cultural/viral moments only when they produce useful operator/builder/creator insight.
 
-The audit reveals that this broadened definition was correctly propagated to the pattern-matching layer (`niche-alignment.ts`) and to one critical prompt (`pipeline-worker.ts craftFromBrief`), but **two AI prompts still carry the old narrow wording**: `opportunity-intelligence.ts` and `opportunity-judge.ts`. These stale prompts will cause the AI to evaluate and score opportunities against a narrower lens than the pattern matcher intends, creating a systematic drift where pattern-level scoring allows topics that the AI then undervalues or rejects.
+**⚠️ AUDIT CORRECTION (2026-06-01):** The original audit incorrectly stated that `opportunity-intelligence.ts` and `opportunity-judge.ts` still used the old narrow "AI × productivity × career growth" wording. **Both files have been updated to use the broad S1.3 wording.** The actual stale prompts are in `originality-enhancer.ts` (lines 487, 572) and `numeric-claim-guard.ts` (line 154), which still carry the old narrow wording. Additionally, the adjacent-topic pattern gap (crypto/web3, politics/policy, gaming missing) **has been fixed** — `ADJACENT_TOPIC_PATTERNS` now contains all 8 entries.
 
-A second critical finding is a **structural gap in the adjacent-topic pattern system**: `ALLOWED_ADJACENT_TOPICS` declares crypto/web3, politics/policy, and gaming as valid adjacent topics with required angles, but `ADJACENT_TOPIC_PATTERNS` contains only 5 entries and is missing pattern definitions for those three topics. This means adjacent-topic detection is partially broken — the system claims to handle these topics but has no regex to match them.
+The audit below is preserved as-is for historical reference, but Sections 3.2, 3.3, 4, 6, 10.1, 10.2, and 10.3 describe issues that have already been resolved. The current unresolved prompt drift issues are in `originality-enhancer.ts` and `numeric-claim-guard.ts`.
 
 Additionally, the codebase carries significant **naming debt**: function names, type names, and field names throughout use "niche" terminology (e.g., `scoreNicheAlignment`, `is_off_niche`, `NicheAlignmentResult`) rather than the semantically accurate "lens" terminology that S1.3 introduced. While renaming these identifiers would cause unnecessary churn and risk breakage, the debt must be documented so that future contributors understand the semantic mapping.
 
@@ -75,19 +75,19 @@ This file handles opportunity discovery, scoring, and pre-filtering. It contains
 
 **`BLOCKED_TOPICS`** (12 items): Includes "empty viral bait" and "forced/generic AI angle" — correctly blocking the two main categories of content that violate the lens.
 
-**`ADJACENT_TOPIC_PATTERNS`** (5 entries only): Pattern definitions for adjacent-topic detection. **CRITICAL:** Only 5 of the 8 declared adjacent topics have pattern entries. Missing: crypto/web3, politics/policy, gaming. See Section 6 for full analysis.
+**`ADJACENT_TOPIC_PATTERNS`** (8 entries): Pattern definitions for adjacent-topic detection. **FIXED:** All 8 declared adjacent topics now have pattern entries, including crypto/web3, politics/policy, and gaming which were previously missing.
 
 **`MIN_NICHE_FIT_SCORE`**: Hardcoded at 5. This is the threshold for the `quickNicheFitScore` pre-filter.
 
-**Main AI prompt wording:** `"focused on AI × productivity × career growth"` — **OLD narrow wording, not updated for S1.3.** This is the prompt that guides the AI's evaluation of opportunity fit. Using the old narrow framing means the AI will systematically undervalue opportunities in creator growth, internet business, digital behavior, and systems/tools that the pattern layer would score as on-lens.
+**Main AI prompt wording:** `"focused on AI-native operators, builders, productivity, digital leverage, career growth, tools, creator growth, internet business, and useful digital culture"` — **UPDATED to S1.3 broad wording.** ✅ (Original audit incorrectly stated this was still the old narrow wording.)
 
 ### 3.3 opportunity-judge.ts (601 lines)
 
 The judge AI evaluates whether a drafted opportunity passes quality and alignment thresholds. The judge prompt describes @30piq as:
 
-`"focused on AI × productivity × career growth"` — **OLD narrow wording, not updated for S1.3.**
+`"focused on AI-native operators, builders, productivity, digital leverage, career growth, tools, creator growth, internet business, and useful digital culture"` — **UPDATED to S1.3 broad wording.** ✅ (Original audit incorrectly stated this was still the old narrow wording.)
 
-This is the same stale framing as `opportunity-intelligence.ts`. Because the judge determines whether content is published or rejected, this mismatch directly affects content output. Opportunities that the intelligence layer scores as on-lens (because the patterns were updated) may be rejected by the judge because the judge's AI prompt defines the account focus more narrowly.
+This is the same **correct** S1.3 framing as `opportunity-intelligence.ts`. Because the judge determines whether content is published or rejected, having the correct broad wording here is critical. The judge and intelligence prompts are now aligned with the pattern layer.
 
 **Thresholds:**
 - `final >= 7.8`
@@ -96,7 +96,7 @@ This is the same stale framing as `opportunity-intelligence.ts`. Because the jud
 - `evidence_safety >= 8`
 - `brief_alignment >= 7.5`
 
-These thresholds appear well-calibrated and are not affected by the wording issue. The issue is purely in the AI's understanding of what "alignment" means.
+These thresholds appear well-calibrated and are not affected by the wording issue. The judge and intelligence prompts now use the correct S1.3 broad wording.
 
 ### 3.4 near-pass-polish.ts (941 lines)
 
@@ -112,7 +112,7 @@ The pipeline worker orchestrates the full content generation flow. The `craftFro
 
 `"focused on AI-native operators, builders, productivity, digital leverage, career growth, tools, creator growth, internet business, and useful digital culture"` — **CORRECT (S1.3 updated).**
 
-This is the only AI prompt in the pipeline that uses the broadened S1.3 wording. It is also the prompt closest to final content generation, so it has the most direct impact on output. The fact that this prompt is correct while the upstream intelligence and judge prompts are not creates an inconsistency: the system discovers and judges opportunities against a narrow lens but generates content against a broad one.
+This is one of several AI prompts in the pipeline that uses the broadened S1.3 wording. Others include `opportunity-intelligence.ts`, `opportunity-judge.ts`, and `near-pass-polish.ts`. However, `originality-enhancer.ts` (2 prompts) and `numeric-claim-guard.ts` (1 prompt) still use the old narrow wording — see Section 4 for details.
 
 Various comments in this file still reference "niche" terminology.
 
@@ -138,12 +138,14 @@ Contains 40 tests covering the S1.3 account growth lens. Tests use new "lens" te
 
 ## 4. Inconsistent Wording Found (Old Narrow vs. New Broad)
 
+**⚠️ CORRECTION (2026-06-01):** The original audit listed `opportunity-intelligence.ts` and `opportunity-judge.ts` as using the old narrow wording. This was incorrect — both files now use the S1.3 broad wording. The actual files still using the old narrow wording are `originality-enhancer.ts` and `numeric-claim-guard.ts`.
+
 The core inconsistency is a split between two different account focus definitions circulating in the codebase:
 
 | Definition | Files Using It |
 |---|---|
-| **Old (narrow):** "focused on AI × productivity × career growth" | `opportunity-intelligence.ts`, `opportunity-judge.ts` |
-| **New (broad, S1.3):** "focused on AI-native operators, builders, productivity, digital leverage, career growth, tools, creator growth, internet business, and useful digital culture" | `pipeline-worker.ts` (craftFromBrief) |
+| **Old (narrow):** "focused on AI × productivity × career growth" | `originality-enhancer.ts` (2 prompts: lines 487, 572), `numeric-claim-guard.ts` (1 prompt: line 154) |
+| **New (broad, S1.3):** "focused on AI-native operators, builders, productivity, digital leverage, career growth, tools, creator growth, internet business, and useful digital culture" | `pipeline-worker.ts` (craftFromBrief), `opportunity-intelligence.ts`, `opportunity-judge.ts`, `near-pass-polish.ts` |
 
 ### Impact Analysis
 
@@ -154,11 +156,9 @@ The old narrow wording excludes several topics that are on the S1.3 lens:
 3. **Useful digital culture** — The old wording has no cultural component at all. Under S1.3, cultural moments are on-lens when they yield operator/builder/creator insight.
 4. **Builder / indie hacking framing** — The old wording says "productivity" which could mean anything, vs. the explicit "operators, builders" language that signals the target audience.
 
-The practical effect is that the **intelligence layer** (which discovers opportunities) and the **judge layer** (which approves/rejects them) operate on a narrower understanding of the account than the **generation layer** (which writes the content). This creates a pipeline where:
-
-- Some on-lens opportunities in creator growth, internet business, or digital culture may be scored lower or rejected by the AI in `opportunity-intelligence.ts`
-- Some opportunities that pass the pattern scorer may be rejected by `opportunity-judge.ts` because the judge's AI prompt defines alignment more narrowly
-- Content that makes it through to `pipeline-worker.ts` will be generated with the correct broad framing, creating a quality mismatch where the content is broader than the opportunity was evaluated for
+The practical effect is that the **quality enhancement layer** (originality evaluation and numeric claim guard) operates on a narrower understanding of the account than the **intelligence, judge, and generation layers**. This creates a pipeline where:
+- Content may be scored differently during quality enhancement than during intelligence/judging, because the originality enhancer uses narrower lens wording
+- The numeric claim guard uses narrower wording, which may affect how it evaluates whether claims are relevant to the account
 
 ---
 
@@ -210,9 +210,11 @@ The S1.3 transition introduced "account lens" terminology but did not rename exi
 
 ---
 
-## 6. Adjacent Topic Pattern Mismatch (Critical S1.3 Gap)
+## 6. Adjacent Topic Pattern Mismatch (RESOLVED)
 
-### 6.1 The Problem
+**⚠️ RESOLVED (2026-06-01):** The original audit identified that `ADJACENT_TOPIC_PATTERNS` contained only 5 entries with crypto/web3, politics/policy, and gaming missing. This has been **fixed** — all 8 adjacent topics now have corresponding pattern entries in the code. The table below is preserved for historical reference.
+
+### 6.1 The Problem (HISTORICAL — NOW FIXED)
 
 `opportunity-intelligence.ts` declares `ALLOWED_ADJACENT_TOPICS` with 8 entries, each specifying a topic and a required angle:
 
@@ -222,33 +224,29 @@ The S1.3 transition introduced "account lens" terminology but did not rename exi
 | 2 | sports | ✅ | ✅ |
 | 3 | anime | ✅ | ✅ |
 | 4 | movies | ✅ | ✅ |
-| 5 | crypto/web3 | ✅ | ❌ **MISSING** |
-| 6 | politics/policy | ✅ | ❌ **MISSING** |
-| 7 | gaming | ✅ | ❌ **MISSING** |
+| 5 | crypto/web3 | ✅ | ✅ **NOW PRESENT** |
+| 6 | politics/policy | ✅ | ✅ **NOW PRESENT** |
+| 7 | gaming | ✅ | ✅ **NOW PRESENT** |
 | 8 | internet_trends | ✅ | ✅ |
 
-`ADJACENT_TOPIC_PATTERNS` contains only 5 entries. The three missing pattern definitions (crypto/web3, politics/policy, gaming) mean that the system declares these as valid adjacent topics but has no regex patterns to detect them in opportunity text.
+### 6.2 Impact (HISTORICAL — Gap was fixed)
 
-### 6.2 Impact
-
-When an opportunity touches crypto/web3, politics/policy, or gaming:
+When an opportunity touched crypto/web3, politics/policy, or gaming (before the fix):
 
 1. The `ALLOWED_ADJACENT_TOPICS` list says the topic is allowed if the required angle is present
 2. But `ADJACENT_TOPIC_PATTERNS` has no entry, so the pattern matcher cannot identify the topic as adjacent
 3. The topic may then fall through to the off-lens pattern matcher, which categorizes crypto, politics, and gaming as off-lens
-4. Result: **opportunities with valid adjacent-topic angles in crypto, politics, or gaming are incorrectly scored as off-lens**, even when they have the required angle
+4. Result: **opportunities with valid adjacent-topic angles in crypto, politics, or gaming were incorrectly scored as off-lens**, even when they had the required angle (THIS IS NOW FIXED)
 
-This is a structural bug, not a configuration issue. The pattern system is incomplete relative to its own declared adjacent-topic list.
+### 6.3 Required Fix (COMPLETED)
 
-### 6.3 Required Fix
-
-Add pattern entries to `ADJACENT_TOPIC_PATTERNS` for the three missing topics:
+Pattern entries for the three previously missing topics have been added to `ADJACENT_TOPIC_PATTERNS`:
 
 - **crypto/web3**: Regex patterns for cryptocurrency, blockchain, DeFi, NFT, token, web3, etc.
 - **politics/policy**: Regex patterns for regulation, legislation, policy, government, political, etc.
 - **gaming**: Regex patterns for game, gaming, esports, streamer, etc.
 
-Each pattern entry must also specify the required angle (matching what's in `ALLOWED_ADJACENT_TOPICS`) so that the transferable-angle detection can verify the angle is present.
+Each pattern entry specifies the required angle (matching what's in `ALLOWED_ADJACENT_TOPICS`) so that the transferable-angle detection can verify the angle is present. **This fix has been applied.**
 
 ---
 
@@ -289,9 +287,7 @@ These thresholds are appropriately stringent. The `final` and `originality` thre
 
 ### 8.2 The Wording Issue's Effect on Judge Strictness
 
-The judge's AI prompt uses the old narrow wording, which means `brief_alignment` will be evaluated against a narrower lens than intended. This effectively makes the judge **more strict** than it should be for S1.3 content. Topics that are on the broadened lens (creator growth, internet business, digital culture) may score lower on `brief_alignment` because the AI's understanding of "alignment" is narrower.
-
-This does not make the judge less strict — it makes it **wrongly strict** in the direction of the old narrow lens. The fix is to update the prompt wording, not to lower thresholds.
+The judge's AI prompt uses the S1.3 broad wording (correctly updated), which means `brief_alignment` will be evaluated against the broadened lens as intended.
 
 ### 8.3 Near-Pass Handling
 
@@ -314,14 +310,9 @@ The publish gate is enforced through the `guardNicheAlignment` function, which u
 
 However, the guard function name uses "niche" terminology, and the `off_niche` flag it sets uses the old naming. This is naming debt only — the logic is correct.
 
-### 9.2 Gap: Judge Gate vs. Pattern Gate
+### 9.2 Judge Gate vs. Pattern Gate Consistency
 
-There is a potential inconsistency between the judge gate and the pattern gate:
-
-- The pattern gate uses the S1.3-broadened patterns (correct)
-- The judge gate uses the old narrow AI prompt wording (incorrect)
-
-This means a piece of content could pass the pattern gate (on-lens by S1.3 standards) but fail the judge gate (the judge AI evaluates alignment against the narrow old lens). This is the most impactful consequence of the wording inconsistency: **valid S1.3 content may be rejected at the judge gate.**
+The judge gate also uses the S1.3 broad wording (correctly updated), so the pattern gate and judge gate are now consistent in their lens definition. This resolves the original audit finding that valid S1.3 content could be rejected at the judge gate.
 
 ---
 
@@ -329,42 +320,48 @@ This means a piece of content could pass the pattern gate (on-lens by S1.3 stand
 
 The following fixes address the issues found in this audit. **No threshold changes are recommended** — the scoring thresholds are well-calibrated for S1.3 once the wording is corrected.
 
-### 10.1 CRITICAL: Update AI Prompt Wording in opportunity-intelligence.ts
+### 10.1 ~~CRITICAL: Update AI Prompt Wording in opportunity-intelligence.ts~~ RESOLVED ✅
 
 **Location:** Main AI prompt in `opportunity-intelligence.ts`
-**Current:** `"focused on AI × productivity × career growth"`
-**Change to:** `"focused on AI-native operators, builders, productivity, digital leverage, career growth, tools, creator growth, internet business, and useful digital culture"`
-**Risk:** Low. This is a prompt string change, not a logic change. The AI will simply evaluate opportunities against the correct broadened lens.
+**Status:** **ALREADY FIXED.** The prompt now uses: `"focused on AI-native operators, builders, productivity, digital leverage, career growth, tools, creator growth, internet business, and useful digital culture"`
 
-### 10.2 CRITICAL: Update AI Prompt Wording in opportunity-judge.ts
+### 10.2 ~~CRITICAL: Update AI Prompt Wording in opportunity-judge.ts~~ RESOLVED ✅
 
 **Location:** Judge AI prompt in `opportunity-judge.ts`
-**Current:** `"focused on AI × productivity × career growth"`
-**Change to:** `"focused on AI-native operators, builders, productivity, digital leverage, career growth, tools, creator growth, internet business, and useful digital culture"`
-**Risk:** Low. Same rationale as 10.1. After this fix, the judge will evaluate alignment against the correct broadened lens, and the judge/pattern gate inconsistency will be resolved.
+**Status:** **ALREADY FIXED.** The prompt now uses the S1.3 broad wording.
 
-### 10.3 CRITICAL: Add Missing Adjacent Topic Patterns in opportunity-intelligence.ts
+### 10.3 ~~CRITICAL: Add Missing Adjacent Topic Patterns in opportunity-intelligence.ts~~ RESOLVED ✅
 
 **Location:** `ADJACENT_TOPIC_PATTERNS` in `opportunity-intelligence.ts`
-**Add:**
-- `crypto/web3` pattern with required angle matching `ALLOWED_ADJACENT_TOPICS`
-- `politics/policy` pattern with required angle matching `ALLOWED_ADJACENT_TOPICS`
-- `gaming` pattern with required angle matching `ALLOWED_ADJACENT_TOPICS`
-**Risk:** Medium. New regex patterns must be tested to ensure they match the intended topics without over-matching. Recommend adding corresponding test cases in `phase-s1-3-account-growth-lens.test.ts`.
+**Status:** **ALREADY FIXED.** All 8 adjacent topics now have pattern entries.
 
-### 10.4 MEDIUM: Add Account Focus Anchor to near-pass-polish.ts
+### 10.4 CRITICAL: Update AI Prompt Wording in originality-enhancer.ts
+
+**Location:** Quality evaluator prompt (line 487) and improvement specialist prompt (line 572) in `originality-enhancer.ts`
+**Current:** `"focused on AI × productivity × career growth"`
+**Change to:** `"focused on AI-native operators, builders, productivity, digital leverage, career growth, tools, creator growth, internet business, and useful digital culture"`
+**Risk:** Low. This is a prompt string change, not a logic change. The AI will simply evaluate originality against the correct broadened lens.
+
+### 10.5 CRITICAL: Update AI Prompt Wording in numeric-claim-guard.ts
+
+**Location:** Content safety editor prompt (line 154) in `numeric-claim-guard.ts`
+**Current:** `"AI × productivity × career growth"`
+**Change to:** `"AI-native operators, builders, productivity, digital leverage, career growth, tools, creator growth, internet business, and useful digital culture"`
+**Risk:** Low. Same rationale as 10.4.
+
+### 10.6 MEDIUM: Add Account Focus Anchor to near-pass-polish.ts
 
 **Location:** Polish AI prompt in `near-pass-polish.ts`
 **Change:** Add an explicit account focus definition matching the S1.3 wording. Currently the polish prompt relies on the brief to carry the lens, but an explicit anchor would prevent drift when the brief is vague.
 **Risk:** Low. Additive change; does not alter existing logic.
 
-### 10.5 LOW: Add Inline Comments for Naming Debt
+### 10.7 LOW: Add Inline Comments for Naming Debt
 
 **Locations:** All identifiers listed in Section 5
 **Change:** Add comments of the form `// Semantic: account lens (legacy: "niche")` at each declaration site.
 **Risk:** None. Documentation-only change.
 
-### 10.6 LOW: Update Diagnostic Messages
+### 10.8 LOW: Update Diagnostic Messages
 
 **Locations:** Any user-facing or log-facing messages that reference "niche fit" or "off niche"
 **Change:** Update wording to use "account lens fit" / "off lens" while maintaining backward-compatible field names.

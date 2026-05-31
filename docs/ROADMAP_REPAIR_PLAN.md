@@ -2,7 +2,7 @@
 
 > **Project**: X (Twitter) content opportunity/recommendation engine for **@30piq**
 > **Purpose**: Prioritized repair roadmap based on the full system audit (DATABASE_AUDIT_REPORT, MEMORY_AUDIT, ACTIVE_SYSTEM_MAP, ACCOUNT_LENS_AUDIT, QUALITY_PIPELINE_AUDIT, SOURCE_STRATEGY_AUDIT)
-> **Last Updated**: 2026-03-04
+> **Last Updated**: 2026-06-01
 > **Audience**: Maintainers and future agents who need to understand what needs fixing and in what order
 > **Related Docs**: `ACTIVE_TABLES.md`, `DATABASE_AUDIT_REPORT.md`, `MEMORY_AUDIT.md`, `OPERATIONS_RUNBOOK.md`
 
@@ -55,6 +55,22 @@ These items can cause broken pipeline runs, weak recommendations that slip throu
 | **DB Migration Required** | No |
 | **Can Be Done Safely Now** | Yes, but needs careful design to not over-block. The threshold of `< 2` for hard rejection is conservative — it only blocks content with truly no transferable mechanism. However, the definition of "transferable mechanism" should be reviewed to ensure the scoring is accurate. If `transferable_angle_score` is unreliable (e.g., always returns 3–5 regardless of actual transferability), the threshold may need adjustment. **Recommendation**: implement with `< 2` threshold, monitor rejection rates for 1 week, then consider adjusting to `< 3` if too many false positives. |
 | **Status** | 🔴 **NOT STARTED** |
+
+---
+
+### P0-3: Enrich Step — Stale Pre-Brief Crafted Text Passes Downstream
+
+| Attribute | Detail |
+|-----------|--------|
+| **Problem** | When all 3 candidates from `craftFromBrief` fail (crafted_text=null), the opportunity keeps its original pre-intelligence `crafted_text` from content-engine-v3 with `_brief_crafting_parse_failed=true`. Nothing downstream hard-rejects on this flag. The heuristic brief alignment gate in `quality_enhance` may catch it, but only if the brief exists and `_brief.recommended_angle.length >= 10`. This means stale, un-briefed, pre-intelligence text could potentially flow through to `publish_gate`. The publish gate checks `shield_passed`, but `shield_passed` may still be true from the original content-engine scan shield check, which was performed on the original text before the brief was applied. |
+| **Evidence** | Found during PRE/POST CHANGE DEEP VERIFICATION AUDIT (2026-06-01) by tracing the enrich step's `processEnrichOpportunities()` in `lib/pipeline-worker.ts`. When `bestCandidate.crafted_text` is null, the opportunity retains its `opportunity.crafted_text` from the merge/scan step. The `_brief_crafting_parse_failed=true` flag is set but never checked as a hard rejection by `quality_enhance`, `opportunity_judge`, or `publish_gate`. |
+| **Files** | `lib/pipeline-worker.ts` (processEnrichOpportunities), `lib/quality-validator.ts` or `lib/content-policy.ts` (for hard-reject check) |
+| **Risk** | Stale pre-intelligence text that was never crafted to match the brief could reach publish_gate. If this text happens to pass shield_passed (from the original scan), it could be accepted and sent as a recommendation. This undermines the entire intelligence → brief → craft pipeline, as the crafted text may not reflect the recommended angle at all. |
+| **Proposed Fix** | Add a hard-reject check in `quality_enhance` or `opportunity_judge`: if `_brief_crafting_parse_failed === true`, set `shield_passed=false` with reason `'brief_crafting_parse_failed'`. This ensures stale pre-brief text is blocked at the quality gate. The rejection should be logged to `rejection_ledger` with reason "brief_crafting_parse_failed". |
+| **Tests Needed** | (1) Opportunity with `_brief_crafting_parse_failed=true` is rejected at quality_enhance, (2) Opportunity with `_brief_crafting_parse_failed=false` is not affected, (3) Opportunity without `_brief_crafting_parse_failed` field is not affected, (4) Rejection is logged to rejection_ledger, (5) Diagnostic `brief_crafting_parse_failed_count` is emitted, (6) Full pipeline path test: all candidates fail → stale text blocked at quality gate |
+| **DB Migration Required** | No |
+| **Can Be Done Safely Now** | Yes. This is a purely additive safety check. It only adds a new rejection reason for a case that should never pass. No threshold changes. No judge bypass. No behavior change for correctly crafted opportunities. |
+| **Status** | 🔴 **NOT STARTED** — Found in comprehensive audit (2026-06-01) |
 
 ---
 
@@ -112,19 +128,19 @@ These items won't break runs immediately but will degrade quality and increase c
 
 ---
 
-### P1-4: Prompt Wording Consistency
+### P1-4: Prompt Wording Consistency (Prompt Drift)
 
 | Attribute | Detail |
 |-----------|--------|
-| **Problem** | The ACCOUNT_LENS_AUDIT found that some prompts and comments still reference the old niche framing "AI × productivity × career growth" instead of the current broader Account Growth Lens framing. This isn't a runtime issue — the old wording appears in comments, doc strings, and some prompt template descriptions rather than in the actual scoring logic. However, it creates confusion for future agents who read the code and try to understand the system's intent. If a future maintainer sees "AI × productivity × career growth" in a comment and assumes that's the current niche, they may make incorrect modifications. Additionally, some prompt instructions to the AI models may contain vestigial language that narrows the model's understanding of what's acceptable content, even though the scoring logic has been broadened. |
-| **Evidence** | The ACCOUNT_LENS_AUDIT identified specific files and line numbers where old wording persists. The rename from `niche_fit` to `account_lens` was only partially completed (S1.3 was a partial rename), leaving some variables, comments, and log messages using the old terminology. The `ALLOWED_ADJACENT_TOPICS` list was expanded but some prompt templates still describe the niche in the old narrower terms. |
-| **Files** | Multiple files across `lib/` — primarily `lib/niche-alignment.ts`, `lib/opportunity-intelligence.ts`, `lib/account-shield.ts`, `lib/candidate-selector.ts`, and various prompt template strings |
-| **Risk** | Not a runtime risk — old wording in comments doesn't affect pipeline behavior. The risk is maintainability and correctness of future modifications. A future agent that trusts comments over code may build features based on the old niche understanding, creating inconsistencies. If old wording appears in AI prompts, it may subtly constrain the model's output in ways that don't match the updated scoring logic, creating a disconnect between what the system scores as acceptable and what the AI generates. |
-| **Proposed Fix** | (1) Add inline naming-debt comments (`// NAMING DEBT: was "niche_fit", now "account_lens"`) at every location where the old terminology persists but can't be immediately renamed (e.g., variable names that would break imports). (2) Update all comments and doc strings to use current terminology. (3) Update prompt template descriptions to match the current Account Growth Lens framing. (4) Create a `grep` command that future agents can use to find remaining old-terminology instances: `rg 'niche_fit|AI.*productivity.*career' lib/`. (5) Plan a full variable rename in a future P3 cleanup pass. |
-| **Tests Needed** | None — this is comment-only and prompt-wording-only. No logic changes, no test changes required. |
+| **Problem** | The comprehensive PRE/POST CHANGE DEEP VERIFICATION AUDIT (2026-06-01) confirmed that 3 active AI prompts still use the old narrow "AI × productivity × career growth" wording instead of the current broader Account Growth Lens. These are NOT comments — they are actual AI system prompts that constrain model output. The main prompts in opportunity-intelligence.ts, opportunity-judge.ts, near-pass-polish.ts, and pipeline-worker.ts are correctly using S1.3 broad wording. However, the originality-enhancer and numeric-claim-guard modules still reference the old narrow framing in their AI prompts, which means the AI models generating originality enhancements and checking numeric claims are operating with a narrower understanding than the rest of the pipeline. |
+| **Evidence** | Direct code inspection confirmed: (1) `lib/originality-enhancer.ts:487` — "focused on AI × productivity × career growth" in AI system prompt, (2) `lib/originality-enhancer.ts:572` — same old narrow wording in another prompt variant, (3) `lib/numeric-claim-guard.ts:154` — "@30piq (AI × productivity × career growth)" in AI system prompt. Additionally, `lib/opportunity-intelligence.ts:1324` uses a shorter variant for the rescue prompt that is inconsistent with the canonical S1.3 wording. |
+| **Files** | `lib/originality-enhancer.ts` (lines 487, 572), `lib/numeric-claim-guard.ts` (line 154), `lib/opportunity-intelligence.ts` (line 1324 — minor) |
+| **Risk** | This IS a runtime issue. The originality-enhancer AI model will undervalue originality improvements related to creator growth, internet business, and digital culture — causing it to miss or under-enhance content that aligns with the broad lens. The numeric-claim-guard AI model will over-scrutinize claims about creator economy or digital behavior topics, potentially rejecting valid content that the rest of the pipeline would accept. The disconnect between narrow prompts and broad scoring creates an inconsistent pipeline where some steps are S1.3-aware and others are not. |
+| **Proposed Fix** | Replace old narrow wording with canonical S1.3 broad lens wording: "focused on AI-native operators, builders, productivity, digital leverage, career growth, tools, creator growth, internet business, and useful digital culture" in (1) originality-enhancer.ts lines 487 and 572, (2) numeric-claim-guard.ts line 154. Also align the rescue prompt in opportunity-intelligence.ts:1324 with the canonical wording for consistency. |
+| **Tests Needed** | Run full test suite after changes. No new tests required — prompt wording changes don't affect deterministic test logic. Run PRE/POST CHANGE DEEP VERIFICATION AUDIT to confirm no regressions. |
 | **DB Migration Required** | No |
-| **Can Be Done Safely Now** | Yes. Comment and prompt wording changes are zero-risk. They don't affect runtime behavior and can be reverted instantly if any wording turns out to be important. |
-| **Status** | 🔴 **NOT STARTED** |
+| **Can Be Done Safely Now** | Yes. Prompt wording changes in AI system prompts are low-risk. They expand the model's understanding rather than constraining it. The worst case is slightly different AI output, which is then still subject to judge/shield/publish_gate. |
+| **Status** | 🔴 **NOT STARTED** — Precise files/lines identified in comprehensive audit (2026-06-01) |
 
 ---
 
