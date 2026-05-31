@@ -20,6 +20,7 @@
 import { callModel, parseModelJson, TaskType } from './model-router';
 import { judgeCraftedCandidate, type JudgeResult } from './opportunity-judge';
 import { buildOriginalityPromptSection } from './originality-context';
+import { buildSignatureVoiceSection, validateSignatureVoice, type SignatureVoiceDiagnostics } from './signature-voice';
 
 // ═══ Types ═══
 
@@ -53,6 +54,8 @@ export type PolishResult = {
   what_changed: string;
   targeted_failures: string[];
   claims_safety_checked: boolean;
+  signature_phrase?: string;
+  operator_takeaway?: string;
 };
 
 export type PolishOutcome = {
@@ -74,6 +77,8 @@ export type PolishOutcome = {
   what_changed: string | null;
   /** Which failures the polish targeted */
   targeted_failures: string[];
+  /** Phase 2G.1: Signature voice diagnostics for the polished text */
+  signature_voice_diagnostics?: SignatureVoiceDiagnostics;
 };
 
 export type NearPassDiagnostics = {
@@ -136,6 +141,14 @@ export function buildPolishPrompt(input: PolishInput): Array<{ role: 'system' | 
     originalitySection = '\n\n' + buildOriginalityPromptSection(input.originality_context);
   }
 
+  // Phase 2G.1: Add signature voice section when originality failed
+  const signatureVoiceSection = isOriginalityFailure
+    ? '\n\n' + buildSignatureVoiceSection({
+        recommended_angle: recommendedAngle,
+        source_text_preview: sourcePreview.slice(0, 150),
+      })
+    : '';
+
   // Phase 2G: Add sharper originality instruction when originality is the failure
   const originalityInstruction = isOriginalityFailure
     ? `\n\nCRITICAL: This tweet failed because of LOW ORIGINALITY. Do NOT merely rephrase or slightly adjust wording. Add a SHARPER FRAME using one of the suggested twist types. The frame must change the THINKING STRUCTURE, not just the words. For example, if the source says "X is growing", an original frame is not "X is growing fast" but "the cost of ignoring X is now higher than adopting X" (inversion) or "X works because it eliminates step Y from the old workflow" (mechanism).`
@@ -181,14 +194,16 @@ CURRENT JUDGE SCORES:
 - evidence_safety_score: ${scores.evidence_safety_score}
 - clarity_score: ${scores.clarity_score}
 
-FAILURE REASONS: ${failureReasons}${originalitySection}
+FAILURE REASONS: ${failureReasons}${originalitySection}${signatureVoiceSection}
 
 Return JSON only:
 {
   "polished_text": "the improved tweet text, under 280 chars, no JSON wrapper, no markdown",
   "what_changed": "short explanation of what you improved",
   "targeted_failures": ["originality_score", "usefulness_score"],
-  "claims_safety_checked": true
+  "claims_safety_checked": true,
+  "signature_phrase": "3-8 word repeatable phrase from the polished text",
+  "operator_takeaway": "concrete operator rule or actionable signal"
 }`,
     },
     {
@@ -394,6 +409,19 @@ export async function attemptNearPassPolish(
     const whatChanged = parsed.what_changed || '';
     const targetedFailures = Array.isArray(parsed.targeted_failures) ? parsed.targeted_failures : [];
     const claimsSafetyChecked = parsed.claims_safety_checked === true;
+    const signaturePhrase = parsed.signature_phrase || undefined;
+    const operatorTakeaway = parsed.operator_takeaway || undefined;
+
+    // Phase 2G.1: Validate signature voice on polished text (if originality failure)
+    const isOriginalityFailure = input.judge_scores.originality_score < 7.8 ||
+      input.judge_failure_reasons.some(r => r.includes('originality') || r.includes('missing_originality'));
+    let signatureVoiceDiag: SignatureVoiceDiagnostics | undefined;
+    if (isOriginalityFailure) {
+      signatureVoiceDiag = validateSignatureVoice(polishedText);
+      // Override with model-declared values if available
+      if (signaturePhrase) signatureVoiceDiag._signature_phrase = signaturePhrase;
+      if (operatorTakeaway) signatureVoiceDiag._operator_takeaway = operatorTakeaway;
+    }
 
     // Step 3: Validate polished text locally
     const doNotClaim = input.brief?.do_not_claim || [];
@@ -413,6 +441,7 @@ export async function attemptNearPassPolish(
         polish_failed_reason: validation.reason || 'validation_failed',
         what_changed: whatChanged,
         targeted_failures: targetedFailures,
+        signature_voice_diagnostics: signatureVoiceDiag,
       };
     }
 
@@ -446,6 +475,7 @@ export async function attemptNearPassPolish(
         polish_failed_reason: null,
         what_changed: whatChanged,
         targeted_failures: targetedFailures,
+        signature_voice_diagnostics: signatureVoiceDiag,
       };
     }
 
@@ -478,6 +508,7 @@ export async function attemptNearPassPolish(
       polish_failed_reason: shouldApplyPolish ? null : 'polish_improved_but_not_enough',
       what_changed: whatChanged,
       targeted_failures: targetedFailures,
+      signature_voice_diagnostics: signatureVoiceDiag,
     };
   } catch (err: any) {
     console.warn(`[near-pass-polish] Polish attempt failed: ${(err?.message || 'unknown').slice(0, 200)}`);

@@ -59,6 +59,7 @@ import { judgeCraftedCandidates, isNearPass, type JudgeResult, type JudgeSummary
 import { attemptNearPassPolish, computeNearPassDiagnostics, MAX_POLISH_CANDIDATES_PER_RUN, type PolishInput, type PolishOutcome, type NearPassDiagnostics } from './near-pass-polish';
 import { callModel, parseModelJson } from './model-router';
 import { getOriginalityContext, buildOriginalityPromptSection, detectOriginalityIndicators, validateOriginalityOutput, type OriginalityContext, type OriginalityDiagnostics } from './originality-context';
+import { buildSignatureVoiceSection, validateSignatureVoice, type SignatureVoiceDiagnostics } from './signature-voice';
 
 // ═══ Types ═══
 
@@ -418,6 +419,7 @@ async function craftFromBrief(
   _brief_crafting_repair_applied?: boolean;
   _brief_crafting_failure_reason?: string;
   _originality_diagnostics?: OriginalityDiagnostics;
+  _signature_voice_diagnostics?: SignatureVoiceDiagnostics;
 }> {
   const sourceText = String(opp.source_text || opp.text || '').slice(0, 400);
   const sourceAuthor = String(opp.source_author || opp.author || opp.username || '');
@@ -429,6 +431,13 @@ async function craftFromBrief(
   const originalitySection = originalityContext
     ? '\n\n' + buildOriginalityPromptSection(originalityContext)
     : '';
+
+  // Phase 2G.1: Build signature voice section (always included for stronger voice)
+  const signatureVoiceSection = '\n\n' + buildSignatureVoiceSection({
+    recommended_angle: brief.recommended_angle,
+    source_text_preview: sourceText.slice(0, 150),
+    twist_type_used: undefined, // Will be determined by model
+  });
 
   // Phase 2D.3: JSON contract system prompt
   // Phase 2G: Updated JSON schema to include originality_strategy, twist_type_used, avoided_anti_patterns
@@ -463,12 +472,14 @@ Your task: Craft a tweet that STRICTLY follows the Opportunity Brief below. The 
 12. No hashtags, no AI slop words (delve, crucial, leverage, game-changer, unlock, empower, elevate, foster, streamline, harness, cutting-edge, paradigm, synergy).
 
 13. Return a JSON object with this exact schema:
-    { "crafted_text": "string under 280 chars", "format": "quote|reply|standalone", "brief_alignment_score": number, "originality_strategy": "string explaining what makes this original", "twist_type_used": "one of: inversion|mechanism|operator_heuristic|cost_of_being_stale|timeline_shift|capability_map|distribution_positioning|constraint_insight|failure_mode_insight", "avoided_anti_patterns": ["list of anti-patterns you consciously avoided"], "claims_to_avoid_checked": boolean, "notes": "short string" }
+    { "crafted_text": "string under 280 chars", "format": "quote|reply|standalone", "brief_alignment_score": number, "originality_strategy": "string explaining what makes this original", "twist_type_used": "one of: inversion|mechanism|operator_heuristic|cost_of_being_stale|timeline_shift|capability_map|distribution_positioning|constraint_insight|failure_mode_insight", "signature_phrase": "3-8 word repeatable phrase from the text", "operator_takeaway": "concrete operator rule or actionable signal", "avoided_anti_patterns": ["list of anti-patterns you consciously avoided"], "claims_to_avoid_checked": boolean, "notes": "short string" }
     - crafted_text: The tweet text, plain text only (no JSON/markdown inside it).
     - format: The content format.
     - brief_alignment_score: Your self-assessment 1-10 of how well the text follows the recommended_angle.
     - originality_strategy: Brief explanation of what makes your text original (not just a summary or generic take).
     - twist_type_used: The twist type you applied from the suggested types (or "none" if none fits).
+    - signature_phrase: A compact, repeatable phrase from your crafted text (3-8 words). Think "capability map", "stale mental model", "judgment cache for taste".
+    - operator_takeaway: A concrete operator rule or actionable signal. Think "When evaluating X, check Y" or "The signal is Z".
     - avoided_anti_patterns: List of anti-patterns you consciously avoided.
     - claims_to_avoid_checked: True if you verified the text avoids all do_not_claim terms.
     - notes: Brief note on your crafting decisions.
@@ -493,7 +504,7 @@ ${requiredContextStr || '(none)'}
 
 Niche fit: ${brief.niche_fit_score}/10
 Originality potential: ${brief.originality_potential_score}/10
-Publishability: ${brief.publishability_score}/10${originalitySection}`;
+Publishability: ${brief.publishability_score}/10${originalitySection}${signatureVoiceSection}`;
 
   const userPrompt = `Craft a brief-faithful tweet for this opportunity:
 
@@ -501,7 +512,7 @@ Source by @${sourceAuthor}: "${sourceText}"
 
 Original drafted text (IGNORE its angle — use the brief's angle instead): "${originalCrafted}"
 
-Return a JSON object with crafted_text, format, brief_alignment_score, originality_strategy, twist_type_used, avoided_anti_patterns, claims_to_avoid_checked, and notes.`;
+Return a JSON object with crafted_text, format, brief_alignment_score, originality_strategy, twist_type_used, signature_phrase, operator_takeaway, avoided_anti_patterns, claims_to_avoid_checked, and notes.`;
 
   try {
     const response = await callModel('selected_candidate_crafting' as any, [
@@ -652,6 +663,16 @@ Return a repaired JSON object.`,
     const originalityOutput = validateOriginalityOutput(parsed);
     const originalityIndicators = detectOriginalityIndicators(crafted);
 
+    // Phase 2G.1: Validate signature voice
+    const signatureVoiceDiagnostics = validateSignatureVoice(crafted);
+    // Override the model-declared signature_phrase and operator_takeaway if available
+    if (parsed.signature_phrase && typeof parsed.signature_phrase === 'string') {
+      signatureVoiceDiagnostics._signature_phrase = parsed.signature_phrase.trim();
+    }
+    if (parsed.operator_takeaway && typeof parsed.operator_takeaway === 'string') {
+      signatureVoiceDiagnostics._operator_takeaway = parsed.operator_takeaway.trim();
+    }
+
     return {
       crafted_text: crafted,
       format: modelFormat || brief.content_format || 'reply',
@@ -674,6 +695,7 @@ Return a repaired JSON object.`,
           ? originalityOutput.avoided_anti_patterns
           : undefined,
       },
+      _signature_voice_diagnostics: signatureVoiceDiagnostics,
     };
   } catch (err: any) {
     console.warn(`[craftFromBrief] AI call failed: ${(err?.message || 'unknown').slice(0, 200)}`);
@@ -1209,6 +1231,11 @@ async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskRe
     let originalityContextFetchFailedCount = 0;
     const originalityTwistTypeCounts: Record<string, number> = {};
     const originalityAntiPatternsUsed: string[] = [];
+    // Phase 2G.1: Signature voice task-level diagnostics
+    let signatureVoiceUsedCount = 0;
+    let signatureVoiceScoreSum = 0;
+    let signatureVoiceScoreCount = 0;
+    const signatureVoiceFailureReasonsAll: string[] = [];
 
     // Phase 2G: Fetch originality context for the batch (shared, not per-candidate)
     let batchOriginalityContext: OriginalityContext | null = null;
@@ -1276,6 +1303,12 @@ async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskRe
               _originality_strategy: recraftResult._originality_diagnostics?._originality_strategy,
               _originality_context_items_count: recraftResult._originality_diagnostics?._originality_context_items_count ?? 0,
               _avoided_originality_anti_patterns: recraftResult._originality_diagnostics?._avoided_originality_anti_patterns,
+              // Phase 2G.1: Signature voice diagnostics
+              _signature_voice_used: recraftResult._signature_voice_diagnostics?._signature_voice_used ?? false,
+              _signature_phrase: recraftResult._signature_voice_diagnostics?._signature_phrase,
+              _operator_takeaway: recraftResult._signature_voice_diagnostics?._operator_takeaway,
+              _signature_voice_score: recraftResult._signature_voice_diagnostics?._signature_voice_score ?? 0,
+              _signature_voice_failure_reasons: recraftResult._signature_voice_diagnostics?._signature_voice_failure_reasons,
             };
             briefRecraftCount++;
 
@@ -1286,6 +1319,17 @@ async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskRe
             }
             if (recraftResult._originality_diagnostics?._avoided_originality_anti_patterns) {
               originalityAntiPatternsUsed.push(...recraftResult._originality_diagnostics._avoided_originality_anti_patterns);
+            }
+            // Phase 2G.1: Track signature voice stats
+            if (recraftResult._signature_voice_diagnostics?._signature_voice_used) {
+              signatureVoiceUsedCount++;
+            }
+            if (recraftResult._signature_voice_diagnostics?._signature_voice_score) {
+              signatureVoiceScoreSum += recraftResult._signature_voice_diagnostics._signature_voice_score;
+              signatureVoiceScoreCount++;
+            }
+            if (recraftResult._signature_voice_diagnostics?._signature_voice_failure_reasons) {
+              signatureVoiceFailureReasonsAll.push(...recraftResult._signature_voice_diagnostics._signature_voice_failure_reasons);
             }
           } else {
             briefRecraftFailed++;
@@ -1308,6 +1352,12 @@ async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskRe
               _originality_strategy: recraftResult._originality_diagnostics?._originality_strategy,
               _originality_context_items_count: recraftResult._originality_diagnostics?._originality_context_items_count ?? 0,
               _avoided_originality_anti_patterns: recraftResult._originality_diagnostics?._avoided_originality_anti_patterns,
+              // Phase 2G.1: Signature voice diagnostics (even on failure)
+              _signature_voice_used: recraftResult._signature_voice_diagnostics?._signature_voice_used ?? false,
+              _signature_phrase: recraftResult._signature_voice_diagnostics?._signature_phrase,
+              _operator_takeaway: recraftResult._signature_voice_diagnostics?._operator_takeaway,
+              _signature_voice_score: recraftResult._signature_voice_diagnostics?._signature_voice_score ?? 0,
+              _signature_voice_failure_reasons: recraftResult._signature_voice_diagnostics?._signature_voice_failure_reasons,
             };
           }
         } catch (recraftErr: any) {
@@ -1336,6 +1386,12 @@ async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskRe
         originality_twist_type_counts: originalityTwistTypeCounts,
         originality_context_fetch_failed_count: originalityContextFetchFailedCount,
         originality_anti_patterns_used: originalityAntiPatternsUsed,
+        // Phase 2G.1: Signature voice task-level diagnostics
+        signature_voice_used_count: signatureVoiceUsedCount,
+        signature_voice_avg_score: signatureVoiceScoreCount > 0
+          ? Math.round((signatureVoiceScoreSum / signatureVoiceScoreCount) * 10) / 10
+          : 0,
+        signature_voice_failure_reasons: signatureVoiceFailureReasonsAll,
         _opportunities: opportunities,
         _rule_performance: rulePerformanceStats
       }
