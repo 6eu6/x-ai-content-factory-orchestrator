@@ -1261,6 +1261,23 @@ async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskRe
       };
     }
 
+    // Phase S1.2 follow-up: Load post_length_policy from load_account_state for this run
+    let enrichPolicy = getDefaultPostLengthPolicy();
+    try {
+      const { data: accountTask } = await supabase
+        .from('pipeline_tasks')
+        .select('result')
+        .eq('run_id', runId)
+        .eq('task_type', 'load_account_state')
+        .eq('status', 'completed')
+        .maybeSingle();
+      if (accountTask?.result?.post_length_policy) {
+        enrichPolicy = normalizePostLengthPolicy(accountTask.result.post_length_policy);
+      }
+    } catch (policyErr: any) {
+      console.warn(`[pipeline-worker] enrich: failed to load post_length_policy, using defaults: ${(policyErr?.message || 'unknown').slice(0, 200)}`);
+    }
+
     const { enrichOpportunitiesWithRulePerformance } = await import('./enrich-opportunities-with-rule-performance');
     const rulePerformanceStats = await enrichOpportunitiesWithRulePerformance(opportunities);
 
@@ -1356,8 +1373,8 @@ async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskRe
           }
 
           // Phase 2G.3: craftFromBrief now returns CraftedCandidate[]
-          // Phase S1.2: Pass post_length_policy so craft prompt includes length limits
-          const allCandidates = await craftFromBrief(opp, brief, originalityCtx, memorySection || undefined, undefined);
+          // Phase S1.2 follow-up: Pass enrichPolicy so craft prompt includes actual account limits
+          const allCandidates = await craftFromBrief(opp, brief, originalityCtx, memorySection || undefined, enrichPolicy);
 
           // Track multi-candidate diagnostics
           multiCandidateGenerationCount += allCandidates.length;
@@ -1376,7 +1393,7 @@ async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskRe
             do_not_claim: brief.do_not_claim || [],
             required_context: brief.required_context || [],
           };
-          const selectionResult = selectCandidatesForJudge(allCandidates, briefForSelection);
+          const selectionResult = selectCandidatesForJudge(allCandidates, briefForSelection, enrichPolicy.hard_limit_chars);
 
           // Track dropped candidates
           multiCandidateDroppedCount += selectionResult.dropped;
@@ -1530,6 +1547,10 @@ async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskRe
         memory_rules_retrieved_count: memoryRulesRetrievedCount,
         memory_source_used_count: memorySourceUsedCount,
         memory_anti_patterns_used_count: memoryAntiPatternsUsedCount,
+        // Phase S1.2 follow-up: Post length policy diagnostics (enrich)
+        post_length_policy_hard_limit_chars: enrichPolicy.hard_limit_chars,
+        post_length_policy_target_chars: enrichPolicy.target_chars,
+        post_length_policy_allow_longform: enrichPolicy.allow_longform,
         _opportunities: opportunities,
         _rule_performance: rulePerformanceStats
       }
@@ -1775,6 +1796,23 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
           _judge_summary: null,
         }
       };
+    }
+
+    // Phase S1.2 follow-up: Load post_length_policy from load_account_state for this run
+    let judgePolicy = getDefaultPostLengthPolicy();
+    try {
+      const { data: accountTask } = await supabase
+        .from('pipeline_tasks')
+        .select('result')
+        .eq('run_id', runId)
+        .eq('task_type', 'load_account_state')
+        .eq('status', 'completed')
+        .maybeSingle();
+      if (accountTask?.result?.post_length_policy) {
+        judgePolicy = normalizePostLengthPolicy(accountTask.result.post_length_policy);
+      }
+    } catch (policyErr: any) {
+      console.warn(`[pipeline-worker] opportunity_judge: failed to load post_length_policy, using defaults: ${(policyErr?.message || 'unknown').slice(0, 200)}`);
     }
 
     // Get intelligence briefs for context (if available)
@@ -2152,6 +2190,8 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
           },
           source_text_preview: (opp.source_text || '').slice(0, 200),
           source_author: opp.source_author || '',
+          // Phase S1.2 follow-up: Pass actual policy for hard cap enforcement in polish
+          post_length_policy: judgePolicy,
         };
 
         // Phase M1: Retrieve structured memory for polish
@@ -2534,10 +2574,14 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
         // Phase M1: Structured memory diagnostics (polish)
         polish_memory_used_count: polishMemoryUsedCount,
         // Phase S1.2: Post length policy diagnostics (opportunity_judge)
-        candidate_over_limit_count: judgedOpportunities.filter(o => (o.crafted_text || '').length > getDefaultPostLengthPolicy().hard_limit_chars).length,
+        candidate_over_limit_count: judgedOpportunities.filter(o => (o.crafted_text || '').length > judgePolicy.hard_limit_chars).length,
         polish_over_limit_count: polishOutcomes.filter(o => o.polish_failed_reason === 'polished_text_over_hard_limit').length,
         polish_shorten_attempted_count: polishOutcomes.filter(o => o._shorten_attempted).length,
         polish_shorten_success_count: polishOutcomes.filter(o => o._shorten_attempted && o._shorten_applied).length,
+        // Phase S1.2 follow-up: Actual policy fields for diagnostics
+        post_length_policy_hard_limit_chars: judgePolicy.hard_limit_chars,
+        post_length_policy_target_chars: judgePolicy.target_chars,
+        post_length_policy_allow_longform: judgePolicy.allow_longform,
       }
     };
   } catch (err: any) {

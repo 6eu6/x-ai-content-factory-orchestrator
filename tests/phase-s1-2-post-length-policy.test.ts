@@ -30,6 +30,12 @@ import {
   validatePolishedText,
 } from '../lib/near-pass-polish';
 import {
+  computeLocalCandidateScore,
+  selectCandidatesForJudge,
+  type CraftedCandidate,
+  type BriefForSelection,
+} from '../lib/candidate-selector';
+import {
   NEAR_PASS_THRESHOLDS,
 } from '../lib/opportunity-judge';
 
@@ -392,5 +398,88 @@ describe('Phase S1.2: No Threshold Changes', () => {
     expect(instruction).toContain('280');
     expect(instruction).toContain('240');
     expect(instruction).toContain('Shorten');
+  });
+});
+
+// ═══ F. Policy Propagation (S1.2 follow-up) ═══
+
+describe('Phase S1.2 follow-up: Policy Propagation', () => {
+  const defaultBrief: BriefForSelection = {
+    recommended_angle: 'AI agents need judgment caches not more parameters',
+    source_summary: 'A study on AI agent decision-making',
+    do_not_claim: [],
+    required_context: [],
+  };
+
+  it('computeLocalCandidateScore uses custom hardLimitChars', () => {
+    // Text at 300 chars: over default 280 but under custom 500
+    const text300 = 'A'.repeat(300);
+    const candidate: CraftedCandidate = {
+      variant_type: 'brief_faithful',
+      crafted_text: text300,
+      format: 'reply',
+      brief_alignment_score: 8,
+      brief_alignment_notes: [],
+      invented_personal_experience_flag: false,
+      ignored_recommended_angle_flag: false,
+    };
+
+    // With default 280 limit, this should get a penalty for length
+    const scoreWith280 = computeLocalCandidateScore(candidate, defaultBrief, 280);
+    // With custom 500 limit, this should pass length check (higher score)
+    const scoreWith500 = computeLocalCandidateScore(candidate, defaultBrief, 500);
+
+    // The score with 500 should be >= score with 280 (length check passes)
+    expect(scoreWith500).toBeGreaterThanOrEqual(scoreWith280);
+  });
+
+  it('selectCandidatesForJudge uses custom hardLimitChars for local scoring', () => {
+    const text300 = 'A'.repeat(300);
+    const candidate: CraftedCandidate = {
+      variant_type: 'brief_faithful',
+      crafted_text: text300,
+      format: 'reply',
+      brief_alignment_score: 8,
+      brief_alignment_notes: [],
+      invented_personal_experience_flag: false,
+      ignored_recommended_angle_flag: false,
+    };
+
+    // With 500 limit, candidate should be selectable
+    const result500 = selectCandidatesForJudge([candidate], defaultBrief, 500);
+    expect(result500.selected.length).toBe(1);
+    expect(result500.selected[0].crafted_text).toBe(text300);
+
+    // With 280 limit, candidate should still be selectable (not filtered, just scored lower)
+    const result280 = selectCandidatesForJudge([candidate], defaultBrief, 280);
+    expect(result280.selected.length).toBe(1);
+    // Score with 280 should be lower than with 500 due to length check
+    expect(result280.selected[0]._candidate_local_score!).toBeLessThan(result500.selected[0]._candidate_local_score!);
+  });
+
+  it('validatePolishedText uses actual policy hard_limit_chars, not default', () => {
+    const text350 = 'A'.repeat(350);
+
+    // With default policy (280): should fail
+    const defaultResult = validatePolishedText(text350, [], undefined, 7);
+    expect(defaultResult.valid).toBe(false);
+    expect(defaultResult.reason).toBe('polished_text_over_hard_limit');
+
+    // With custom policy (400): should pass
+    const customPolicy = normalizePostLengthPolicy({ hard_limit_chars: 400 });
+    const customResult = validatePolishedText(text350, [], undefined, 7, customPolicy);
+    expect(customResult.valid).toBe(true);
+  });
+
+  it('normalizePostLengthPolicy roundtrips through account state', () => {
+    // Simulate what happens when policy comes from load_account_state result
+    const originalPolicy = getDefaultPostLengthPolicy();
+    // Simulate storing to JSON and back
+    const serialized = JSON.parse(JSON.stringify(originalPolicy));
+    const restoredPolicy = normalizePostLengthPolicy(serialized);
+    expect(restoredPolicy.hard_limit_chars).toBe(originalPolicy.hard_limit_chars);
+    expect(restoredPolicy.target_chars).toBe(originalPolicy.target_chars);
+    expect(restoredPolicy.allow_longform).toBe(originalPolicy.allow_longform);
+    expect(restoredPolicy.prefer_short_posts).toBe(originalPolicy.prefer_short_posts);
   });
 });
