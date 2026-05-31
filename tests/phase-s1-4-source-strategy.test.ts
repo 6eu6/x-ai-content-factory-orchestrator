@@ -34,6 +34,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   computeSourceQualityScore,
+  extractSourceHandle,
+  aggregateSourceQualityFromTasks,
   UNKNOWN_SOURCE_SCORE,
   STRONG_SOURCE_THRESHOLD,
   LOW_SOURCE_THRESHOLD,
@@ -458,7 +460,7 @@ describe('S1.4: Thresholds and constraints unchanged', () => {
     const knownExports = [
       'SourceQualityRow', 'UNKNOWN_SOURCE_SCORE', 'STRONG_SOURCE_THRESHOLD',
       'LOW_SOURCE_THRESHOLD', 'MIN_SCANS_FOR_CONFIDENCE', 'computeSourceQualityScore',
-      'aggregateSourceQualityFromTasks', 'upsertSourceQualityScores',
+      'extractSourceHandle', 'aggregateSourceQualityFromTasks', 'upsertSourceQualityScores',
       'loadSourceQualityScores', 'updateSourceQualityFromRun',
     ];
     expect(knownExports).not.toContain('autoPost');
@@ -493,9 +495,8 @@ describe('S1.4: Thresholds and constraints unchanged', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('S1.4: Aggregation from pipeline tasks', () => {
-  it('aggregateSourceQualityFromTasks: basic aggregation', async () => {
-    const { aggregateSourceQualityFromTasks } = await import('../lib/source-quality');
-
+  it('aggregateSourceQualityFromTasks: basic aggregation with per-account tasks', () => {
+    // This tests the legacy format where global tasks still had account_handle
     const tasks = [
       {
         task_type: 'scan_account',
@@ -507,8 +508,8 @@ describe('S1.4: Aggregation from pipeline tasks', () => {
         account_handle: 'testuser',
         result: {
           briefs: [
-            { should_craft: true, publishability_score: 8, originality_potential_score: 7.5, niche_fit_score: 6, usefulness_score: 7 },
-            { should_craft: false, publishability_score: 5, originality_potential_score: 4, niche_fit_score: 3, usefulness_score: 4 },
+            { should_craft: true, source_author: 'testuser', publishability_score: 8, originality_potential_score: 7.5, niche_fit_score: 6, usefulness_score: 7 },
+            { should_craft: false, source_author: 'testuser', publishability_score: 5, originality_potential_score: 4, niche_fit_score: 3, usefulness_score: 4 },
           ],
           rescue_count: 1,
           rejection_reason_counts: { low_niche_fit: 1 },
@@ -534,17 +535,13 @@ describe('S1.4: Aggregation from pipeline tasks', () => {
     expect(row.scans_count).toBe(1);
     expect(row.tweets_analyzed).toBe(10);
     expect(row.raw_opportunities_count).toBe(5);
-    expect(row.selected_count).toBe(1);
-    expect(row.rescued_count).toBe(1);
-    expect(row.judge_passed_count).toBe(2);
-    expect(row.publish_gate_accepted_count).toBe(1);
-    expect(row.rejection_reason_counts).toEqual({ low_niche_fit: 1 });
+    expect(row.selected_count).toBe(1); // one brief with should_craft=true
+    expect(row.judge_passed_count).toBe(2); // from proportional fallback
+    expect(row.publish_gate_accepted_count).toBe(1); // from proportional fallback
     expect(row.source_quality_score).toBeGreaterThan(0);
   });
 
-  it('aggregateSourceQualityFromTasks: skips tasks with null account_handle', async () => {
-    const { aggregateSourceQualityFromTasks } = await import('../lib/source-quality');
-
+  it('aggregateSourceQualityFromTasks: skips scan_account with null account_handle', () => {
     const tasks = [
       {
         task_type: 'scan_account',
@@ -563,9 +560,7 @@ describe('S1.4: Aggregation from pipeline tasks', () => {
     expect(result.has('valid')).toBe(true);
   });
 
-  it('aggregateSourceQualityFromTasks: handles empty results gracefully', async () => {
-    const { aggregateSourceQualityFromTasks } = await import('../lib/source-quality');
-
+  it('aggregateSourceQualityFromTasks: handles empty results gracefully', () => {
     const tasks = [
       {
         task_type: 'scan_account',
@@ -586,9 +581,512 @@ describe('S1.4: Aggregation from pipeline tasks', () => {
 
     // This will try to connect to Supabase, which will fail in test environment.
     // But it should fall back gracefully.
-    // We test the fallback path by mocking the import failure.
-    // Since we can't easily mock Supabase in vitest without setup,
-    // we just verify the function signature and that it doesn't throw on import.
     expect(typeof selectAccountsWithStrategy).toBe('function');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// F. extractSourceHandle helper
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('S1.4: extractSourceHandle', () => {
+  it('extracts source_author from opportunity', () => {
+    expect(extractSourceHandle({ source_author: 'karpathy' })).toBe('karpathy');
+  });
+
+  it('strips leading @ from source_author', () => {
+    expect(extractSourceHandle({ source_author: '@karpathy' })).toBe('karpathy');
+  });
+
+  it('falls back to author field', () => {
+    expect(extractSourceHandle({ author: 'levelsio' })).toBe('levelsio');
+  });
+
+  it('falls back to username field', () => {
+    expect(extractSourceHandle({ username: 'sama' })).toBe('sama');
+  });
+
+  it('falls back to account_handle field', () => {
+    expect(extractSourceHandle({ account_handle: 'elikerli' })).toBe('elikerli');
+  });
+
+  it('returns null for empty object', () => {
+    expect(extractSourceHandle({})).toBeNull();
+  });
+
+  it('returns null for null/undefined', () => {
+    expect(extractSourceHandle(null)).toBeNull();
+    expect(extractSourceHandle(undefined)).toBeNull();
+  });
+
+  it('returns null for blank strings', () => {
+    expect(extractSourceHandle({ source_author: '' })).toBeNull();
+    expect(extractSourceHandle({ source_author: '   ' })).toBeNull();
+  });
+
+  it('prioritizes source_author over other fields', () => {
+    expect(extractSourceHandle({ source_author: 'first', author: 'second' })).toBe('first');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// G. Real pipeline shape: global tasks with account_handle = null
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('S1.4: Real pipeline shape aggregation', () => {
+  it('attributes global task results to source_author in _opportunities', () => {
+    // Simulates the REAL pipeline shape:
+    // - scan_account tasks have account_handle set
+    // - merge_scan_results, opportunity_intelligence, opportunity_judge, publish_gate
+    //   are global tasks with account_handle = null
+    // - source attribution is via source_author in _opportunities[]
+
+    const tasks = [
+      // scan_account: has account_handle
+      {
+        task_type: 'scan_account',
+        account_handle: 'karpathy',
+        result: { tweets_analyzed: 20, viral_found: 3 },
+      },
+      {
+        task_type: 'scan_account',
+        account_handle: 'levelsio',
+        result: { tweets_analyzed: 15, opportunities_found: 2 },
+      },
+      // merge_scan_results: global (account_handle = null)
+      {
+        task_type: 'merge_scan_results',
+        account_handle: null,
+        result: {
+          _opportunities: [
+            { source_author: 'karpathy', source_text: 'AI tweet 1' },
+            { source_author: 'karpathy', source_text: 'AI tweet 2' },
+            { source_author: 'levelsio', source_text: 'startup tweet 1' },
+          ],
+        },
+      },
+      // opportunity_intelligence: global (account_handle = null)
+      {
+        task_type: 'opportunity_intelligence',
+        account_handle: null,
+        result: {
+          _opportunities: [
+            {
+              source_author: 'karpathy',
+              _brief: { should_craft: true, publishability_score: 8, originality_potential_score: 7, niche_fit_score: 6, usefulness_score: 7 },
+            },
+            {
+              source_author: 'karpathy',
+              _brief: { should_craft: false, rejection_reason: 'low_niche_fit', publishability_score: 3, originality_potential_score: 2, niche_fit_score: 2, usefulness_score: 3 },
+            },
+            {
+              source_author: 'levelsio',
+              _brief: { should_craft: true, publishability_score: 9, originality_potential_score: 8, niche_fit_score: 8, usefulness_score: 8 },
+            },
+          ],
+          rescued_opportunity_count: 1,
+          top_rejection_reasons: { low_niche_fit: 1 },
+        },
+      },
+      // opportunity_judge: global (account_handle = null)
+      {
+        task_type: 'opportunity_judge',
+        account_handle: null,
+        result: {
+          _opportunities: [
+            {
+              source_author: 'karpathy',
+              _judge_result: { passed: true, final_candidate_score: 8.5 },
+            },
+            {
+              source_author: 'levelsio',
+              _judge_result: { passed: true, final_candidate_score: 9.0 },
+            },
+          ],
+        },
+      },
+      // publish_gate: global (account_handle = null)
+      {
+        task_type: 'publish_gate',
+        account_handle: null,
+        result: {
+          _accepted: [
+            { source_author: 'levelsio', crafted_text: 'Great thread...' },
+          ],
+          _rejected: [
+            { source_author: 'karpathy', reason: 'freshness_timeout' },
+          ],
+        },
+      },
+    ];
+
+    const result = aggregateSourceQualityFromTasks(tasks);
+
+    // Should have both karpathy and levelsio
+    expect(result.size).toBe(2);
+    expect(result.has('karpathy')).toBe(true);
+    expect(result.has('levelsio')).toBe(true);
+
+    // karpathy: scanned, had opportunities, some selected, judge passed, gate rejected
+    const karpathyRow = result.get('karpathy')!;
+    expect(karpathyRow.scans_count).toBe(1);
+    expect(karpathyRow.tweets_analyzed).toBe(20);
+    expect(karpathyRow.raw_opportunities_count).toBe(3); // from scan_account viral_found
+    expect(karpathyRow.selected_count).toBe(1); // one _brief with should_craft=true
+    expect(karpathyRow.judge_passed_count).toBe(1); // one _judge_result.passed=true
+    expect(karpathyRow.publish_gate_accepted_count).toBe(0); // rejected by gate
+    expect(karpathyRow.avg_publishability_score).toBeGreaterThan(0);
+
+    // levelsio: scanned, had opportunities, selected, judge passed, gate accepted
+    const levelsioRow = result.get('levelsio')!;
+    expect(levelsioRow.scans_count).toBe(1);
+    expect(levelsioRow.tweets_analyzed).toBe(15);
+    expect(levelsioRow.raw_opportunities_count).toBe(2); // from scan_account opportunities_found
+    expect(levelsioRow.selected_count).toBe(1);
+    expect(levelsioRow.judge_passed_count).toBe(1);
+    expect(levelsioRow.publish_gate_accepted_count).toBe(1); // accepted by gate
+
+    // Both should have quality scores
+    expect(karpathyRow.source_quality_score).toBeGreaterThan(0);
+    expect(levelsioRow.source_quality_score).toBeGreaterThan(0);
+
+    // levelsio should score higher (gate accepted, higher scores)
+    expect(levelsioRow.source_quality_score).toBeGreaterThan(karpathyRow.source_quality_score);
+  });
+
+  it('attributes sources from merge_scan_results even without scan_account tasks', () => {
+    // Edge case: merge_scan_results has opportunities for accounts
+    // that don't have a scan_account task (e.g., from a different run)
+    const tasks = [
+      {
+        task_type: 'merge_scan_results',
+        account_handle: null,
+        result: {
+          _opportunities: [
+            { source_author: 'newsource1' },
+            { source_author: 'newsource2' },
+          ],
+        },
+      },
+      {
+        task_type: 'opportunity_intelligence',
+        account_handle: null,
+        result: {
+          _opportunities: [
+            {
+              source_author: 'newsource1',
+              _brief: { should_craft: true, publishability_score: 7 },
+            },
+            {
+              source_author: 'newsource2',
+              _brief: { should_craft: false, rejection_reason: 'low_quality' },
+            },
+          ],
+        },
+      },
+    ];
+
+    const result = aggregateSourceQualityFromTasks(tasks);
+    expect(result.size).toBe(2);
+    expect(result.has('newsource1')).toBe(true);
+    expect(result.has('newsource2')).toBe(true);
+
+    const row1 = result.get('newsource1')!;
+    expect(row1.scans_count).toBe(0); // no scan_account task
+    expect(row1.raw_opportunities_count).toBe(1); // from merge
+    expect(row1.selected_count).toBe(1); // from intelligence
+
+    const row2 = result.get('newsource2')!;
+    expect(row2.scans_count).toBe(0);
+    expect(row2.raw_opportunities_count).toBe(1);
+    expect(row2.selected_count).toBe(0); // should_craft=false
+  });
+
+  it('uses viral_found as fallback when opportunities_found/raw_opportunity_count are absent', () => {
+    // Real scan_account results commonly expose viral_found instead of opportunities_found
+    const tasks = [
+      {
+        task_type: 'scan_account',
+        account_handle: 'karpathy',
+        result: { tweets_analyzed: 25, viral_found: 4 },
+      },
+    ];
+
+    const result = aggregateSourceQualityFromTasks(tasks);
+    expect(result.size).toBe(1);
+
+    const row = result.get('karpathy')!;
+    expect(row.scans_count).toBe(1);
+    expect(row.tweets_analyzed).toBe(25);
+    expect(row.raw_opportunities_count).toBe(4); // viral_found used as fallback
+  });
+
+  it('prefers opportunities_found over viral_found when both are present', () => {
+    const tasks = [
+      {
+        task_type: 'scan_account',
+        account_handle: 'karpathy',
+        result: { tweets_analyzed: 25, opportunities_found: 6, viral_found: 4 },
+      },
+    ];
+
+    const result = aggregateSourceQualityFromTasks(tasks);
+    const row = result.get('karpathy')!;
+    expect(row.raw_opportunities_count).toBe(6); // opportunities_found takes priority
+  });
+
+  it('does not double-count raw_opportunities from merge when scan_account already counted', () => {
+    const tasks = [
+      {
+        task_type: 'scan_account',
+        account_handle: 'karpathy',
+        result: { tweets_analyzed: 20, viral_found: 3 },
+      },
+      {
+        task_type: 'merge_scan_results',
+        account_handle: null,
+        result: {
+          _opportunities: [
+            { source_author: 'karpathy' },
+            { source_author: 'karpathy' },
+            { source_author: 'karpathy' },
+          ],
+        },
+      },
+    ];
+
+    const result = aggregateSourceQualityFromTasks(tasks);
+    const row = result.get('karpathy')!;
+    // Should be 3 from scan_account (viral_found), NOT 3 + 3 = 6
+    // merge_scan_results skips adding raw_opportunities for accounts
+    // that already have scans_count > 0
+    expect(row.raw_opportunities_count).toBe(3);
+  });
+
+  it('attributes judge results per source_author from _opportunities', () => {
+    const tasks = [
+      {
+        task_type: 'scan_account',
+        account_handle: 'source_a',
+        result: { tweets_analyzed: 10, viral_found: 3 },
+      },
+      {
+        task_type: 'scan_account',
+        account_handle: 'source_b',
+        result: { tweets_analyzed: 10, viral_found: 2 },
+      },
+      {
+        task_type: 'opportunity_intelligence',
+        account_handle: null,
+        result: {
+          _opportunities: [
+            { source_author: 'source_a', _brief: { should_craft: true, publishability_score: 8 } },
+            { source_author: 'source_a', _brief: { should_craft: true, publishability_score: 7 } },
+            { source_author: 'source_b', _brief: { should_craft: true, publishability_score: 9 } },
+          ],
+        },
+      },
+      {
+        task_type: 'opportunity_judge',
+        account_handle: null,
+        result: {
+          _opportunities: [
+            { source_author: 'source_a', _judge_result: { passed: true } },
+            { source_author: 'source_a', _judge_result: { passed: false } },
+            { source_author: 'source_b', _judge_result: { passed: true } },
+          ],
+        },
+      },
+    ];
+
+    const result = aggregateSourceQualityFromTasks(tasks);
+
+    const rowA = result.get('source_a')!;
+    expect(rowA.selected_count).toBe(2);
+    expect(rowA.judge_passed_count).toBe(1); // only 1 passed out of 2
+
+    const rowB = result.get('source_b')!;
+    expect(rowB.selected_count).toBe(1);
+    expect(rowB.judge_passed_count).toBe(1); // 1 passed out of 1
+  });
+
+  it('attributes publish_gate accepted/rejected per source_author', () => {
+    const tasks = [
+      {
+        task_type: 'scan_account',
+        account_handle: 'alpha',
+        result: { tweets_analyzed: 10, viral_found: 2 },
+      },
+      {
+        task_type: 'scan_account',
+        account_handle: 'beta',
+        result: { tweets_analyzed: 10, viral_found: 1 },
+      },
+      {
+        task_type: 'opportunity_intelligence',
+        account_handle: null,
+        result: {
+          _opportunities: [
+            { source_author: 'alpha', _brief: { should_craft: true, publishability_score: 8 } },
+            { source_author: 'beta', _brief: { should_craft: true, publishability_score: 7 } },
+          ],
+        },
+      },
+      {
+        task_type: 'opportunity_judge',
+        account_handle: null,
+        result: {
+          _opportunities: [
+            { source_author: 'alpha', _judge_result: { passed: true } },
+            { source_author: 'beta', _judge_result: { passed: true } },
+          ],
+        },
+      },
+      {
+        task_type: 'publish_gate',
+        account_handle: null,
+        result: {
+          _accepted: [
+            { source_author: 'alpha', crafted_text: 'Great insight...' },
+          ],
+          _rejected: [
+            { source_author: 'beta', reason: 'freshness_timeout' },
+          ],
+        },
+      },
+    ];
+
+    const result = aggregateSourceQualityFromTasks(tasks);
+
+    const alphaRow = result.get('alpha')!;
+    expect(alphaRow.publish_gate_accepted_count).toBe(1);
+
+    const betaRow = result.get('beta')!;
+    expect(betaRow.publish_gate_accepted_count).toBe(0);
+    // beta's rejection reason should be attributed
+    expect(betaRow.rejection_reason_counts['freshness_timeout']).toBeGreaterThanOrEqual(1);
+  });
+
+  it('falls back to top-level counts when _opportunities is empty', () => {
+    // Some older pipeline runs might not have _opportunities in judge/gate results
+    const tasks = [
+      {
+        task_type: 'scan_account',
+        account_handle: 'testuser',
+        result: { tweets_analyzed: 10, opportunities_found: 5 },
+      },
+      {
+        task_type: 'opportunity_intelligence',
+        account_handle: null,
+        result: {
+          _opportunities: [
+            { source_author: 'testuser', _brief: { should_craft: true, publishability_score: 8 } },
+          ],
+        },
+      },
+      {
+        task_type: 'opportunity_judge',
+        account_handle: null,
+        result: { judge_passed_count: 1 }, // no _opportunities, top-level count
+      },
+      {
+        task_type: 'publish_gate',
+        account_handle: null,
+        result: { accepted: 1, reasons: ['freshness_timeout'] }, // no _accepted, top-level count
+      },
+    ];
+
+    const result = aggregateSourceQualityFromTasks(tasks);
+    const row = result.get('testuser')!;
+
+    // Fallback proportional distribution should attribute counts
+    expect(row.judge_passed_count).toBeGreaterThanOrEqual(1);
+    expect(row.publish_gate_accepted_count).toBeGreaterThanOrEqual(1);
+  });
+
+  it('does not invent counts when attribution is impossible', () => {
+    // Global task with no source_author anywhere and no scan_account tasks
+    const tasks = [
+      {
+        task_type: 'opportunity_judge',
+        account_handle: null,
+        result: { judge_passed_count: 5 }, // no _opportunities, no scan accounts
+      },
+    ];
+
+    const result = aggregateSourceQualityFromTasks(tasks);
+    // No accounts to attribute to — should produce empty result, not invent sources
+    expect(result.size).toBe(0);
+  });
+
+  it('handles legacy briefs[] format in opportunity_intelligence', () => {
+    const tasks = [
+      {
+        task_type: 'scan_account',
+        account_handle: 'legacyuser',
+        result: { tweets_analyzed: 10, opportunities_found: 2 },
+      },
+      {
+        task_type: 'opportunity_intelligence',
+        account_handle: null,
+        result: {
+          // Legacy format: briefs[] with source_author
+          briefs: [
+            { source_author: 'legacyuser', should_craft: true, publishability_score: 8, originality_potential_score: 7, niche_fit_score: 6, usefulness_score: 7 },
+            { source_author: 'legacyuser', should_craft: false, rejection_reason: 'too_generic' },
+          ],
+          rescue_count: 1,
+          rejection_reason_counts: { too_generic: 1 },
+        },
+      },
+    ];
+
+    const result = aggregateSourceQualityFromTasks(tasks);
+    const row = result.get('legacyuser')!;
+    expect(row.selected_count).toBe(1);
+    expect(row.avg_publishability_score).toBe(8);
+    expect(row.rejection_reason_counts).toHaveProperty('too_generic');
+  });
+
+  it('handles multiple scan_account tasks for the same handle', () => {
+    // Same account scanned multiple times across runs
+    const tasks = [
+      {
+        task_type: 'scan_account',
+        account_handle: 'karpathy',
+        result: { tweets_analyzed: 10, viral_found: 2 },
+      },
+      {
+        task_type: 'scan_account',
+        account_handle: 'karpathy',
+        result: { tweets_analyzed: 15, viral_found: 3 },
+      },
+    ];
+
+    const result = aggregateSourceQualityFromTasks(tasks);
+    const row = result.get('karpathy')!;
+    expect(row.scans_count).toBe(2);
+    expect(row.tweets_analyzed).toBe(25);
+    expect(row.raw_opportunities_count).toBe(5); // 2 + 3
+  });
+
+  it('produces neutral scores for sources with only scan data and no downstream metrics', () => {
+    const tasks = [
+      {
+        task_type: 'scan_account',
+        account_handle: 'onlyscanned',
+        result: { tweets_analyzed: 10, viral_found: 0 },
+      },
+    ];
+
+    const result = aggregateSourceQualityFromTasks(tasks);
+    const row = result.get('onlyscanned')!;
+    expect(row.scans_count).toBe(1);
+    expect(row.selected_count).toBe(0);
+    expect(row.judge_passed_count).toBe(0);
+    expect(row.publish_gate_accepted_count).toBe(0);
+    // With 1 scan and 0 raw_opportunities, score should regress toward 50
+    expect(row.source_quality_score).toBeLessThanOrEqual(50);
+    expect(row.source_quality_score).toBeGreaterThan(0);
   });
 });

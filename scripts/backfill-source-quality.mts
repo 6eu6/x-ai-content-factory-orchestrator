@@ -29,13 +29,16 @@ async function main() {
   const supabase = supabaseAdmin();
 
   // 1. Fetch all completed pipeline tasks that have results
+  // IMPORTANT: We include tasks with account_handle = NULL because global
+  // tasks (opportunity_intelligence, opportunity_judge, publish_gate,
+  // merge_scan_results) are global and have account_handle = null.
+  // Source attribution is done via source_author inside result payloads.
   console.log('Fetching pipeline tasks...');
   const { data: tasks, error } = await supabase
     .from('pipeline_tasks')
     .select('task_type, account_handle, result, run_id')
-    .in('task_type', ['scan_account', 'opportunity_intelligence', 'opportunity_judge', 'publish_gate'])
-    .eq('status', 'completed')
-    .not('account_handle', 'is', null);
+    .in('task_type', ['scan_account', 'merge_scan_results', 'opportunity_intelligence', 'opportunity_judge', 'publish_gate'])
+    .eq('status', 'completed');
 
   if (error) {
     console.error('Error fetching tasks:', error.message);
@@ -47,13 +50,15 @@ async function main() {
     process.exit(0);
   }
 
-  console.log(`Found ${tasks.length} completed tasks with account_handle`);
+  console.log(`Found ${tasks.length} completed tasks (including global tasks with null account_handle)`);
 
   // 2. Aggregate source quality from tasks
+  // Include tasks with null account_handle — the aggregation function
+  // attributes metrics via source_author in result payloads
   const aggregated = aggregateSourceQualityFromTasks(
     tasks.map((t) => ({
       task_type: t.task_type,
-      account_handle: t.account_handle as string,
+      account_handle: t.account_handle as string | null,
       result: (typeof t.result === 'object' && t.result !== null ? t.result : {}) as Record<string, any>,
     }))
   );

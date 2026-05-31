@@ -125,6 +125,28 @@ export function computeSourceQualityScore(row: Partial<SourceQualityRow> | null 
 }
 
 // ---------------------------------------------------------------------------
+// extractSourceHandle — extract source handle from an opportunity/brief/candidate
+// ---------------------------------------------------------------------------
+
+/**
+ * Extracts the source handle from an opportunity, brief, or candidate object.
+ * Tries source_author first (the primary field on ContentOpportunity), then
+ * falls back to author, username, and account_handle.
+ * Returns null if no valid handle can be extracted.
+ */
+export function extractSourceHandle(obj: Record<string, any> | null | undefined): string | null {
+  if (obj == null || typeof obj !== 'object') return null;
+
+  const candidates = [obj.source_author, obj.author, obj.username, obj.account_handle];
+  for (const c of candidates) {
+    if (typeof c === 'string' && c.trim() !== '') {
+      return c.trim().replace(/^@/, '');
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // aggregateSourceQualityFromTasks
 // ---------------------------------------------------------------------------
 
@@ -134,39 +156,56 @@ type TaskInput = {
   result: Record<string, any>;
 };
 
+type AccountAccumulator = {
+  scans_count: number;
+  tweets_analyzed: number;
+  raw_opportunities_count: number;
+  selected_count: number;
+  rescued_count: number;
+  judge_passed_count: number;
+  publish_gate_accepted_count: number;
+  rejection_reason_counts: Record<string, number>;
+  publishability_scores: number[];
+  originality_potential_scores: number[];
+  niche_fit_scores: number[];
+  usefulness_scores: number[];
+};
+
 /**
  * Aggregates pipeline task data into per-account SourceQualityRow objects.
  *
- * - Groups by account_handle (derived from scan_account tasks).
- * - Collects metrics from opportunity_intelligence, opportunity_judge, and
- *   publish_gate task results.
- * - Safe: skips tasks with missing/empty results or null account_handle.
+ * REAL PIPELINE SHAPE:
+ *   - scan_account tasks have account_handle set (per-account scan)
+ *   - merge_scan_results, opportunity_intelligence, opportunity_judge,
+ *     publish_gate are GLOBAL tasks with account_handle = null
+ *   - Source attribution lives inside result payloads:
+ *     source_author on each opportunity/brief/candidate
+ *
+ * ALGORITHM:
+ *   1. Pass 1 — scan_account tasks: establish per-account base metrics
+ *      (scans_count, tweets_analyzed, raw_opportunities_count)
+ *   2. Pass 2 — merge_scan_results (global): attribute raw opportunities
+ *      to source_author from _opportunities[]
+ *   3. Pass 3 — opportunity_intelligence (global): attribute selected_count,
+ *      scores, rescued_count, rejection_reasons from _opportunities[]
+ *   4. Pass 4 — opportunity_judge (global): attribute judge_passed_count
+ *      from _opportunities[]._judge_result
+ *   5. Pass 5 — publish_gate (global): attribute publish_gate_accepted_count
+ *      from _accepted[] and rejection reasons from _rejected[]
+ *   6. Build final SourceQualityRow map with computed rates and scores
+ *
+ * If attribution to a specific source is impossible, we do not invent counts.
+ * We leave neutral (0) rather than guessing.
  */
 export function aggregateSourceQualityFromTasks(
   tasks: Array<TaskInput>
 ): Map<string, SourceQualityRow> {
   // -----------------------------------------------------------------------
-  // 1. Collect the set of account handles from scan_account tasks
+  // Accumulator map: source_handle → AccountAccumulator
   // -----------------------------------------------------------------------
-  const accounts = new Map<
-    string,
-    {
-      scans_count: number;
-      tweets_analyzed: number;
-      raw_opportunities_count: number;
-      selected_count: number;
-      rescued_count: number;
-      judge_passed_count: number;
-      publish_gate_accepted_count: number;
-      rejection_reason_counts: Record<string, number>;
-      publishability_scores: number[];
-      originality_potential_scores: number[];
-      niche_fit_scores: number[];
-      usefulness_scores: number[];
-    }
-  >();
+  const accounts = new Map<string, AccountAccumulator>();
 
-  function ensureAccount(handle: string) {
+  function ensureAccount(handle: string): AccountAccumulator {
     if (!accounts.has(handle)) {
       accounts.set(handle, {
         scans_count: 0,
@@ -187,83 +226,306 @@ export function aggregateSourceQualityFromTasks(
   }
 
   // -----------------------------------------------------------------------
-  // 2. First pass: scan_account tasks to establish accounts & base metrics
+  // Pass 1: scan_account tasks — establish accounts & base metrics
+  // These tasks have account_handle set to the scanned account's handle.
   // -----------------------------------------------------------------------
   for (const task of tasks) {
-    if (!task.account_handle) continue;
+    if (task.task_type !== 'scan_account') continue;
     if (!task.result || typeof task.result !== 'object') continue;
 
-    if (task.task_type === 'scan_account') {
-      const acc = ensureAccount(task.account_handle);
-      acc.scans_count += 1;
-      acc.tweets_analyzed += safeNum(task.result.tweets_analyzed, 0);
-      acc.raw_opportunities_count += safeNum(
-        task.result.opportunities_found ?? task.result.raw_opportunity_count,
-        0
-      );
+    const handle = task.account_handle;
+    if (!handle) continue;
+
+    const acc = ensureAccount(handle);
+    acc.scans_count += 1;
+    acc.tweets_analyzed += safeNum(task.result.tweets_analyzed, 0);
+
+    // raw_opportunities_count: try opportunities_found, raw_opportunity_count,
+    // then fall back to viral_found (common in real scan_account results)
+    const rawOpp = safeNum(
+      task.result.opportunities_found ?? task.result.raw_opportunity_count,
+      -1
+    );
+    if (rawOpp >= 0) {
+      acc.raw_opportunities_count += rawOpp;
+    } else {
+      // Fall back to viral_found when opportunities_found/raw_opportunity_count
+      // are absent (real scan results commonly expose viral_found)
+      acc.raw_opportunities_count += safeNum(task.result.viral_found, 0);
     }
   }
 
   // -----------------------------------------------------------------------
-  // 3. Second pass: opportunity_intelligence, opportunity_judge, publish_gate
+  // Pass 2: merge_scan_results (global task, account_handle = null)
+  // Attribute raw opportunities to source_author from _opportunities[]
   // -----------------------------------------------------------------------
   for (const task of tasks) {
-    if (!task.account_handle) continue;
+    if (task.task_type !== 'merge_scan_results') continue;
     if (!task.result || typeof task.result !== 'object') continue;
 
-    const acc = accounts.get(task.account_handle);
-    // Only process if we have already seen a scan_account for this handle
-    if (!acc) continue;
+    const opportunities: Array<Record<string, any>> = Array.isArray(task.result._opportunities)
+      ? task.result._opportunities
+      : [];
 
-    if (task.task_type === 'opportunity_intelligence') {
-      // selected_count: count of briefs where should_craft === true
-      const briefs: Array<Record<string, any>> = Array.isArray(task.result.briefs)
-        ? task.result.briefs
-        : [];
-      let selected = 0;
-      for (const brief of briefs) {
-        if (brief.should_craft === true) {
-          selected += 1;
+    // Count opportunities per source_author
+    for (const opp of opportunities) {
+      const sourceHandle = extractSourceHandle(opp);
+      if (!sourceHandle) continue; // cannot attribute — leave neutral
+      const acc = ensureAccount(sourceHandle);
+      // Only add raw_opportunities if scan_account didn't already provide them
+      // (avoid double-counting for accounts that also had scan_account tasks)
+      if (acc.scans_count === 0) {
+        acc.raw_opportunities_count += 1;
+      }
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Pass 3: opportunity_intelligence (global task, account_handle = null)
+  // Attribute selected_count, scores, rescued, rejection_reasons
+  // from _opportunities[] (each has source_author and _brief)
+  // -----------------------------------------------------------------------
+  for (const task of tasks) {
+    if (task.task_type !== 'opportunity_intelligence') continue;
+    if (!task.result || typeof task.result !== 'object') continue;
+
+    const opportunities: Array<Record<string, any>> = Array.isArray(task.result._opportunities)
+      ? task.result._opportunities
+      : [];
+
+    // Legacy path: if _opportunities is empty but briefs[] exists (old format)
+    const briefs: Array<Record<string, any>> = Array.isArray(task.result.briefs)
+      ? task.result.briefs
+      : [];
+
+    if (opportunities.length > 0) {
+      // Modern path: _opportunities[] with _brief attached
+      for (const opp of opportunities) {
+        const sourceHandle = extractSourceHandle(opp);
+        if (!sourceHandle) continue;
+        const acc = ensureAccount(sourceHandle);
+
+        // Check _brief for should_craft and scores
+        const brief = opp._brief;
+        if (brief && typeof brief === 'object') {
+          if (brief.should_craft === true) {
+            acc.selected_count += 1;
+          }
+
+          // Collect individual scores from brief
+          const pub = safeNum(brief.publishability_score, 0);
+          const orig = safeNum(brief.originality_potential_score, 0);
+          const niche = safeNum(brief.niche_fit_score, 0);
+          const useful = safeNum(brief.usefulness_score, 0);
+          if (pub > 0 || orig > 0 || niche > 0 || useful > 0) {
+            acc.publishability_scores.push(pub);
+            acc.originality_potential_scores.push(orig);
+            acc.niche_fit_scores.push(niche);
+            acc.usefulness_scores.push(useful);
+          }
+
+          // Rejection reason from brief
+          if (brief.rejection_reason && typeof brief.rejection_reason === 'string') {
+            acc.rejection_reason_counts[brief.rejection_reason] =
+              (acc.rejection_reason_counts[brief.rejection_reason] ?? 0) + 1;
+          }
         }
-        // Collect individual scores
+      }
+    } else if (briefs.length > 0) {
+      // Legacy path: briefs[] with source_author on each brief
+      for (const brief of briefs) {
+        const sourceHandle = extractSourceHandle(brief);
+        if (!sourceHandle) continue;
+        const acc = ensureAccount(sourceHandle);
+
+        if (brief.should_craft === true) {
+          acc.selected_count += 1;
+        }
+
         const pub = safeNum(brief.publishability_score, 0);
         const orig = safeNum(brief.originality_potential_score, 0);
         const niche = safeNum(brief.niche_fit_score, 0);
         const useful = safeNum(brief.usefulness_score, 0);
-        // Only push if at least one is non-zero (avoid padding with zeroes for
-        // briefs that lack score data)
         if (pub > 0 || orig > 0 || niche > 0 || useful > 0) {
           acc.publishability_scores.push(pub);
           acc.originality_potential_scores.push(orig);
           acc.niche_fit_scores.push(niche);
           acc.usefulness_scores.push(useful);
         }
-      }
-      acc.selected_count += selected;
 
-      // rescued_count
-      acc.rescued_count += safeNum(task.result.rescue_count, 0);
-
-      // rejection_reason_counts: merge
-      const reasons: Record<string, any> = task.result.rejection_reason_counts ?? {};
-      for (const [reason, count] of Object.entries(reasons)) {
-        acc.rejection_reason_counts[reason] =
-          (acc.rejection_reason_counts[reason] ?? 0) + safeNum(count, 0);
+        if (brief.rejection_reason && typeof brief.rejection_reason === 'string') {
+          acc.rejection_reason_counts[brief.rejection_reason] =
+            (acc.rejection_reason_counts[brief.rejection_reason] ?? 0) + 1;
+        }
       }
     }
 
-    if (task.task_type === 'opportunity_judge') {
-      acc.judge_passed_count += safeNum(task.result.judge_passed_count, 0);
+    // rescued_count from top-level result (cannot attribute per-source)
+    const totalRescued = safeNum(
+      task.result.rescued_opportunity_count ?? task.result.rescue_count,
+      0
+    );
+    if (totalRescued > 0) {
+      // Distribute rescued count proportionally among sources with selected > 0
+      const sourcesWithSelected = Array.from(accounts.entries())
+        .filter(([, a]) => a.selected_count > 0);
+      if (sourcesWithSelected.length > 0) {
+        const totalSelected = sourcesWithSelected.reduce((s, [, a]) => s + a.selected_count, 0);
+        for (const [, a] of sourcesWithSelected) {
+          a.rescued_count += Math.round(totalRescued * (a.selected_count / totalSelected));
+        }
+      }
     }
 
-    if (task.task_type === 'publish_gate') {
-      const accepted = safeNum(task.result.accepted ?? task.result.gate_accepted, 0);
-      acc.publish_gate_accepted_count += accepted;
+    // top_rejection_reasons from top-level result (attribute to all active sources)
+    const topReasons: Record<string, any> =
+      task.result.top_rejection_reasons ?? task.result.rejection_reason_counts ?? {};
+    if (Object.keys(topReasons).length > 0) {
+      // Merge into every account that had activity this run
+      for (const [, acc] of accounts) {
+        if (acc.selected_count > 0 || acc.raw_opportunities_count > 0) {
+          for (const [reason, count] of Object.entries(topReasons)) {
+            acc.rejection_reason_counts[reason] =
+              (acc.rejection_reason_counts[reason] ?? 0) + safeNum(count, 0);
+          }
+        }
+      }
     }
   }
 
   // -----------------------------------------------------------------------
-  // 4. Build final SourceQualityRow map
+  // Pass 4: opportunity_judge (global task, account_handle = null)
+  // Attribute judge_passed_count from _opportunities[]._judge_result
+  // -----------------------------------------------------------------------
+  for (const task of tasks) {
+    if (task.task_type !== 'opportunity_judge') continue;
+    if (!task.result || typeof task.result !== 'object') continue;
+
+    const opportunities: Array<Record<string, any>> = Array.isArray(task.result._opportunities)
+      ? task.result._opportunities
+      : [];
+
+    if (opportunities.length > 0) {
+      // Per-opportunity attribution
+      for (const opp of opportunities) {
+        const sourceHandle = extractSourceHandle(opp);
+        if (!sourceHandle) continue;
+        const acc = ensureAccount(sourceHandle);
+
+        const judgeResult = opp._judge_result;
+        if (judgeResult && typeof judgeResult === 'object' && judgeResult.passed === true) {
+          acc.judge_passed_count += 1;
+        }
+      }
+    } else {
+      // Fallback: use top-level judge_passed_count and distribute proportionally
+      const totalPassed = safeNum(task.result.judge_passed_count, 0);
+      if (totalPassed > 0) {
+        const sourcesWithSelected = Array.from(accounts.entries())
+          .filter(([, a]) => a.selected_count > 0);
+        if (sourcesWithSelected.length > 0) {
+          const totalSelected = sourcesWithSelected.reduce((s, [, a]) => s + a.selected_count, 0);
+          for (const [, a] of sourcesWithSelected) {
+            a.judge_passed_count += Math.round(totalPassed * (a.selected_count / totalSelected));
+          }
+        }
+      }
+    }
+
+    // judge_failure_reasons: merge into active accounts
+    const judgeReasons: Record<string, any> = task.result.judge_failure_reasons ?? {};
+    if (Object.keys(judgeReasons).length > 0) {
+      for (const [, acc] of accounts) {
+        if (acc.selected_count > 0 || acc.raw_opportunities_count > 0) {
+          for (const [reason, count] of Object.entries(judgeReasons)) {
+            acc.rejection_reason_counts[reason] =
+              (acc.rejection_reason_counts[reason] ?? 0) + safeNum(count, 0);
+          }
+        }
+      }
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Pass 5: publish_gate (global task, account_handle = null)
+  // Attribute publish_gate_accepted_count from _accepted[].source_author
+  // -----------------------------------------------------------------------
+  for (const task of tasks) {
+    if (task.task_type !== 'publish_gate') continue;
+    if (!task.result || typeof task.result !== 'object') continue;
+
+    const accepted: Array<Record<string, any>> = Array.isArray(task.result._accepted)
+      ? task.result._accepted
+      : [];
+
+    if (accepted.length > 0) {
+      // Per-opportunity attribution from _accepted[]
+      for (const opp of accepted) {
+        const sourceHandle = extractSourceHandle(opp);
+        if (!sourceHandle) continue;
+        const acc = ensureAccount(sourceHandle);
+        acc.publish_gate_accepted_count += 1;
+      }
+    } else {
+      // Fallback: use top-level accepted count and distribute proportionally
+      const totalAccepted = safeNum(task.result.accepted ?? task.result.gate_accepted, 0);
+      if (totalAccepted > 0) {
+        const sourcesWithJudgePassed = Array.from(accounts.entries())
+          .filter(([, a]) => a.judge_passed_count > 0);
+        if (sourcesWithJudgePassed.length > 0) {
+          const totalJudgePassed = sourcesWithJudgePassed.reduce(
+            (s, [, a]) => s + a.judge_passed_count, 0
+          );
+          for (const [, a] of sourcesWithJudgePassed) {
+            a.publish_gate_accepted_count += Math.round(
+              totalAccepted * (a.judge_passed_count / totalJudgePassed)
+            );
+          }
+        }
+      }
+    }
+
+    // Rejection reasons from _rejected[] or top-level reasons
+    const rejected: Array<Record<string, any>> = Array.isArray(task.result._rejected)
+      ? task.result._rejected
+      : [];
+    if (rejected.length > 0) {
+      for (const rej of rejected) {
+        const sourceHandle = extractSourceHandle(rej);
+        const reason = typeof rej.reason === 'string' ? rej.reason : null;
+        if (reason) {
+          if (sourceHandle) {
+            // Attribute to specific source
+            const acc = ensureAccount(sourceHandle);
+            acc.rejection_reason_counts[reason] =
+              (acc.rejection_reason_counts[reason] ?? 0) + 1;
+          } else {
+            // Cannot attribute — merge into all active accounts
+            for (const [, acc] of accounts) {
+              if (acc.selected_count > 0 || acc.raw_opportunities_count > 0) {
+                acc.rejection_reason_counts[reason] =
+                  (acc.rejection_reason_counts[reason] ?? 0) + 1;
+              }
+            }
+          }
+        }
+      }
+    } else {
+      // Top-level reasons array (publish_gate stores reasons as string[])
+      const gateReasons: string[] = Array.isArray(task.result.reasons) ? task.result.reasons : [];
+      for (const reason of gateReasons) {
+        for (const [, acc] of accounts) {
+          if (acc.selected_count > 0 || acc.raw_opportunities_count > 0) {
+            acc.rejection_reason_counts[reason] =
+              (acc.rejection_reason_counts[reason] ?? 0) + 1;
+          }
+        }
+      }
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Pass 6: Build final SourceQualityRow map
   // -----------------------------------------------------------------------
   const result = new Map<string, SourceQualityRow>();
 
@@ -464,17 +726,18 @@ export async function updateSourceQualityFromRun(
       return { updated: 0 };
     }
 
-    // Cast results to the expected shape
-    const tasks: Array<TaskInput> = data
-      .filter((r) => r.account_handle !== null)
-      .map((r) => ({
-        task_type: r.task_type ?? '',
-        account_handle: r.account_handle as string,
-        result: (typeof r.result === 'object' && r.result !== null ? r.result : {}) as Record<
-          string,
-          any
-        >,
-      }));
+    // Cast results to the expected shape — include ALL tasks, even those with
+    // account_handle = null (global tasks like opportunity_intelligence,
+    // opportunity_judge, publish_gate). The aggregation function handles
+    // source attribution via source_author inside result payloads.
+    const tasks: Array<TaskInput> = data.map((r) => ({
+      task_type: r.task_type ?? '',
+      account_handle: r.account_handle as string | null,
+      result: (typeof r.result === 'object' && r.result !== null ? r.result : {}) as Record<
+        string,
+        any
+      >,
+    }));
 
     const aggregated = aggregateSourceQualityFromTasks(tasks);
     const rows = Array.from(aggregated.values());
