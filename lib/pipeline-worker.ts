@@ -61,6 +61,8 @@ import { callModel, parseModelJson } from './model-router';
 import { getOriginalityContext, buildOriginalityPromptSection, detectOriginalityIndicators, validateOriginalityOutput, type OriginalityContext, type OriginalityDiagnostics } from './originality-context';
 import { buildSignatureVoiceSection, validateSignatureVoice, type SignatureVoiceDiagnostics } from './signature-voice';
 import { computeLocalCandidateScore, selectCandidatesForJudge, deduplicateJudgedCandidates, type CraftedCandidate, type BriefForSelection, type CandidateWithJudgeResult } from './candidate-selector';
+import { compactRunIntoMemory, type CompactionResult } from './structured-memory-compaction';
+import { getRelevantStructuredMemory, buildMemoryPromptSection, buildPolishMemorySection, type StructuredMemoryResult } from './structured-memory-retrieval';
 
 // Re-export CraftedCandidate for consumers
 export type { CraftedCandidate } from './candidate-selector';
@@ -410,7 +412,8 @@ async function craftFromBrief(
     originality_potential_score: number;
     publishability_score: number;
   },
-  originalityContext?: OriginalityContext | null
+  originalityContext?: OriginalityContext | null,
+  memorySection?: string
 ): Promise<CraftedCandidate[]> {
   const sourceText = String(opp.source_text || opp.text || '').slice(0, 400);
   const sourceAuthor = String(opp.source_author || opp.author || opp.username || '');
@@ -487,7 +490,7 @@ ${requiredContextStr || '(none)'}
 
 Niche fit: ${brief.niche_fit_score}/10
 Originality potential: ${brief.originality_potential_score}/10
-Publishability: ${brief.publishability_score}/10${originalitySection}${signatureVoiceSection}
+Publishability: ${brief.publishability_score}/10${originalitySection}${signatureVoiceSection}${memorySection ? '\n\n' + memorySection : ''}
 
 ═══ JSON OUTPUT SCHEMA ═══
 
@@ -1252,6 +1255,10 @@ async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskRe
     let briefRecraftFailed = 0;
     let originalityContextUsedCount = 0;
     let originalityContextFetchFailedCount = 0;
+    // Phase M1: Structured memory diagnostics
+    let memoryRulesRetrievedCount = 0;
+    let memorySourceUsedCount = 0;
+    let memoryAntiPatternsUsedCount = 0;
     const originalityTwistTypeCounts: Record<string, number> = {};
     const originalityAntiPatternsUsed: string[] = [];
     // Phase 2G.1: Signature voice task-level diagnostics
@@ -1311,8 +1318,27 @@ async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskRe
             }
           }
 
+          // Phase M1: Retrieve structured memory for crafting
+          let memorySection = '';
+          try {
+            const memory = await getRelevantStructuredMemory({
+              source_author: (opp as any).source_author || (opp as any).author,
+              source_text: String((opp as any).source_text || (opp as any).text || '').slice(0, 400),
+              recommended_angle: brief.recommended_angle,
+              task_type: 'craft',
+            });
+            memorySection = buildMemoryPromptSection(memory);
+            if (memory._meta.total_items > 0) {
+              memoryRulesRetrievedCount += memory._meta.total_items;
+              memorySourceUsedCount += memory._meta.source_memory_used ? 1 : 0;
+              memoryAntiPatternsUsedCount += memory._meta.anti_patterns_used_count;
+            }
+          } catch (memErr: any) {
+            console.warn(`[pipeline-worker] structured memory retrieval for craft failed: ${(memErr?.message || 'unknown').slice(0, 200)}`);
+          }
+
           // Phase 2G.3: craftFromBrief now returns CraftedCandidate[]
-          const allCandidates = await craftFromBrief(opp, brief, originalityCtx);
+          const allCandidates = await craftFromBrief(opp, brief, originalityCtx, memorySection || undefined);
 
           // Track multi-candidate diagnostics
           multiCandidateGenerationCount += allCandidates.length;
@@ -1481,6 +1507,10 @@ async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskRe
         multi_candidate_dropped_count: multiCandidateDroppedCount,
         multi_candidate_parse_fallback_count: multiCandidateParseFallbackCount,
         multi_candidate_best_variant_counts: multiCandidateBestVariantCounts,
+        // Phase M1: Structured memory diagnostics
+        memory_rules_retrieved_count: memoryRulesRetrievedCount,
+        memory_source_used_count: memorySourceUsedCount,
+        memory_anti_patterns_used_count: memoryAntiPatternsUsedCount,
         _opportunities: opportunities,
         _rule_performance: rulePerformanceStats
       }
@@ -2032,6 +2062,8 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
     // This runs AFTER the first judge pass and BEFORE returning results.
     const polishOutcomes: PolishOutcome[] = [];
     let polishAttempted = 0;
+    // Phase M1: Track polish memory usage
+    let polishMemoryUsedCount = 0;
     // Track eligible indices for micro-repair later (Phase 2G.2)
     let polishEligibleIndices: number[] = [];
 
@@ -2102,6 +2134,25 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
           source_text_preview: (opp.source_text || '').slice(0, 200),
           source_author: opp.source_author || '',
         };
+
+        // Phase M1: Retrieve structured memory for polish
+        try {
+          const memory = await getRelevantStructuredMemory({
+            source_author: opp.source_author || '',
+            source_text: String(opp.source_text || '').slice(0, 400),
+            recommended_angle: brief.recommended_angle || brief.angle,
+            candidate_text: craftedText,
+            task_type: 'polish',
+            failure_reasons: judgeResult.failure_reasons || [],
+          });
+          const memoryStr = buildPolishMemorySection(memory);
+          if (memoryStr) {
+            polishInput.learning_memory_section = memoryStr;
+            polishMemoryUsedCount++;
+          }
+        } catch (memErr: any) {
+          console.warn(`[pipeline-worker] structured memory retrieval for polish failed: ${(memErr?.message || 'unknown').slice(0, 200)}`);
+        }
 
         // Phase 2G: If originality failure, fetch originality context for the polish
         const isOriginalityFailure = judgeResult.originality_score < 7.8 ||
@@ -2461,6 +2512,8 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
         // Phase 2G.3 Hotfix #2: Raw vs deduped counts for clarity
         raw_candidate_judged_count: results.length,
         deduped_opportunity_judged_count: judgedOpportunities.length,
+        // Phase M1: Structured memory diagnostics (polish)
+        polish_memory_used_count: polishMemoryUsedCount,
       }
     };
   } catch (err: any) {
@@ -2860,12 +2913,26 @@ async function processTelegramDelivery(task: PipelineTaskRow): Promise<TaskResul
       await deliverDecisionToTelegram(chatId, scanResult, username, decision, followers);
     }
 
+    // Phase M1: Trigger memory compaction for this run (fire-and-forget, must not fail main run)
+    let compactionResult: CompactionResult | null = null;
+    try {
+      compactionResult = await compactRunIntoMemory(runId);
+      console.log(`[pipeline-worker] memory compaction: ${compactionResult.rules_created} rules created, ${compactionResult.rules_updated} rules updated, ${compactionResult.source_memories_created} source memories created, ${compactionResult.source_memories_updated} source memories updated, ${compactionResult.signals_extracted} signals extracted`);
+    } catch (compactErr: any) {
+      console.warn(`[pipeline-worker] memory compaction failed (non-blocking): ${(compactErr?.message || 'unknown').slice(0, 200)}`);
+    }
+
     return {
       ok: true,
       result: {
         delivered: Boolean(chatId),
         selected_count: decision.selected?.length || 0,
-        chat_id: chatId || null
+        chat_id: chatId || null,
+        // Phase M1: Memory compaction diagnostics
+        memory_compaction_rules_created: compactionResult?.rules_created ?? 0,
+        memory_compaction_rules_updated: compactionResult?.rules_updated ?? 0,
+        memory_compaction_source_memories_created: compactionResult?.source_memories_created ?? 0,
+        memory_compaction_source_memories_updated: compactionResult?.source_memories_updated ?? 0,
       }
     };
   } catch (err: any) {

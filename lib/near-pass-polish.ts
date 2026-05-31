@@ -47,6 +47,8 @@ export type PolishInput = {
   source_author?: string;
   /** Phase 2G: Optional originality context for originality-focused polish */
   originality_context?: import('./originality-context').OriginalityContext | null;
+  /** Phase M1: Optional structured memory section for memory-informed polish */
+  learning_memory_section?: string;
 };
 
 export type PolishResult = {
@@ -184,6 +186,9 @@ BRIEF LOCK CHECKLIST (verify ALL before submitting):
 INSTRUCTION: Improve originality/signature voice WITHOUT losing the recommended angle. If adding a signature frame, preserve every required element from the brief.`
     : '';
 
+  // Phase M1: Add learning memory section if available
+  const memorySection = input.learning_memory_section || '';
+
   // Phase 2G: Add sharper originality instruction when originality is the failure
   const originalityInstruction = isOriginalityFailure
     ? `\n\nCRITICAL: This tweet failed because of LOW ORIGINALITY. Do NOT merely rephrase or slightly adjust wording. Add a SHARPER FRAME using one of the suggested twist types. The frame must change the THINKING STRUCTURE, not just the words. For example, if the source says "X is growing", an original frame is not "X is growing fast" but "the cost of ignoring X is now higher than adopting X" (inversion) or "X works because it eliminates step Y from the old workflow" (mechanism).`
@@ -229,7 +234,7 @@ CURRENT JUDGE SCORES:
 - evidence_safety_score: ${scores.evidence_safety_score}
 - clarity_score: ${scores.clarity_score}
 
-FAILURE REASONS: ${failureReasons}${originalitySection}${signatureVoiceSection}${briefLockSection}
+FAILURE REASONS: ${failureReasons}${originalitySection}${signatureVoiceSection}${briefLockSection}${memorySection ? '\n\n' + memorySection : ''}
 
 Return JSON only:
 {
