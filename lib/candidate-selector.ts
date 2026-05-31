@@ -65,6 +65,7 @@ export type CandidateWithJudgeResult = {
   candidate: CraftedCandidate;
   judgeResult: JudgeResultForDedupe;
   sourceKey: string; // identifies the source/opportunity for deduping
+  _candidateIndex?: number; // explicit index for safe mapping (replaces fragile indexOf)
 };
 
 // ═══ Local Validators ═══

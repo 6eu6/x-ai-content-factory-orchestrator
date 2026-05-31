@@ -1776,28 +1776,88 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
 
       if (selectedCandidates && selectedCandidates.length > 0) {
         // Multi-candidate mode: add each selected candidate for judging
+        // HARDEN: Filter null/undefined candidates and candidates without non-empty crafted_text
+        let validCandidateCount = 0;
+        let candidateMissingTextCount = 0;
+        let candidateNullCount = 0;
+
         for (const cand of selectedCandidates) {
-          if (cand.crafted_text) {
+          // Guard: skip null/undefined candidates
+          if (!cand || typeof cand !== 'object') {
+            candidateNullCount++;
+            continue;
+          }
+          // Guard: skip candidates without non-empty crafted_text
+          if (!cand.crafted_text || typeof cand.crafted_text !== 'string' || !cand.crafted_text.trim()) {
+            candidateMissingTextCount++;
+            continue;
+          }
+          candidates.push({
+            crafted_text: cand.crafted_text,
+            brief,
+            opportunityIndex: oppIdx,
+            candidateVariantType: cand.variant_type,
+            candidateLocalScore: cand._candidate_local_score,
+            candidateSelectionReason: cand._candidate_selection_reason,
+            sourceKey,
+          });
+          validCandidateCount++;
+        }
+
+        // If no valid selected candidates, fallback to opp.crafted_text
+        if (validCandidateCount === 0) {
+          if (opp.crafted_text && typeof opp.crafted_text === 'string' && opp.crafted_text.trim()) {
             candidates.push({
-              crafted_text: cand.crafted_text,
+              crafted_text: opp.crafted_text,
               brief,
               opportunityIndex: oppIdx,
-              candidateVariantType: cand.variant_type,
-              candidateLocalScore: cand._candidate_local_score,
-              candidateSelectionReason: cand._candidate_selection_reason,
               sourceKey,
             });
           }
+          // If no crafted text at all, mark opportunity as safely rejected below
         }
       } else {
         // Single-candidate mode (legacy): use the opportunity's crafted_text
-        candidates.push({
-          crafted_text: opp.crafted_text || '',
-          brief,
-          opportunityIndex: oppIdx,
-          sourceKey,
-        });
+        // HARDEN: Guard against undefined/empty crafted_text
+        if (opp.crafted_text && typeof opp.crafted_text === 'string' && opp.crafted_text.trim()) {
+          candidates.push({
+            crafted_text: opp.crafted_text,
+            brief,
+            opportunityIndex: oppIdx,
+            sourceKey,
+          });
+        }
+        // If no crafted text at all, this opportunity will have no candidates for judging
+        // and will be marked as safely rejected below
       }
+    }
+
+    // HARDEN: If no valid candidates, return early with diagnostics (don't crash)
+    if (candidates.length === 0) {
+      // Mark ALL opportunities as safely rejected with candidate_missing_crafted_text
+      const rejectedOpportunities = opportunities.map(opp => ({
+        ...opp,
+        shield_passed: false,
+        shield_issues: [...(opp.shield_issues || []), 'candidate_missing_crafted_text'],
+        _candidate_generation_error: 'no_valid_crafted_text',
+      }));
+
+      return {
+        ok: true,
+        result: {
+          judge_passed_count: 0,
+          judge_failed_count: opportunities.length,
+          judge_failure_reasons: { candidate_missing_crafted_text: opportunities.length },
+          _opportunities: rejectedOpportunities,
+          _judge_summary: null,
+          // Phase 2G.3 Hotfix diagnostics
+          multi_candidate_invalid_count: opportunities.length,
+          multi_candidate_empty_selected_count: opportunities.length,
+          candidate_validation_failed_count: 0,
+          candidate_missing_text_count: 0,
+          judge_result_missing_count: 0,
+        }
+      };
     }
 
     // Run judge on all candidates
@@ -1808,58 +1868,98 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
 
     // Phase 2G.3: Dedupe candidates from the SAME source/opportunity before applying results.
     // For opportunities with multiple candidates, keep only the best judged candidate.
-    const candidatesWithJudgeResults: CandidateWithJudgeResult[] = candidates.map((c, i) => ({
-      candidate: {
-        variant_type: c.candidateVariantType || 'legacy',
-        crafted_text: c.crafted_text,
-        format: '',
-        brief_alignment_score: 0,
-        brief_alignment_notes: [],
-        invented_personal_experience_flag: false,
-        ignored_recommended_angle_flag: false,
-        _candidate_local_score: c.candidateLocalScore,
-        _candidate_selection_reason: c.candidateSelectionReason,
-      },
-      judgeResult: results[i] ? {
-        passed: results[i].passed,
-        final_candidate_score: results[i].final_candidate_score,
-        originality_score: results[i].originality_score,
-        brief_alignment_score: results[i].brief_alignment_score,
-        evidence_safety_score: results[i].evidence_safety_score,
-      } : {
-        passed: false,
-        final_candidate_score: 1,
-        originality_score: 1,
-        brief_alignment_score: 1,
-        evidence_safety_score: 1,
-      },
-      sourceKey: c.sourceKey,
-    }));
+    // HARDEN: Synthesize failed judge result if results[i] is missing
+    const FAILED_JUDGE_RESULT: JudgeResult = {
+      originality_score: 1,
+      usefulness_score: 1,
+      niche_fit_score: 1,
+      evidence_safety_score: 1,
+      clarity_score: 1,
+      generic_bait_flag: false,
+      unsupported_claim_flag: false,
+      brief_alignment_score: 1,
+      final_candidate_score: 1,
+      passed: false,
+      failure_reasons: ['judge_result_missing'],
+    };
+
+    // Track diagnostics
+    let judgeResultMissingCount = 0;
+
+    const candidatesWithJudgeResults: CandidateWithJudgeResult[] = candidates.map((c, i) => {
+      const judgeResult: JudgeResult = results[i] || FAILED_JUDGE_RESULT;
+      if (!results[i]) {
+        judgeResultMissingCount++;
+      }
+      return {
+        candidate: {
+          variant_type: c.candidateVariantType || 'legacy',
+          crafted_text: c.crafted_text,
+          format: '',
+          brief_alignment_score: 0,
+          brief_alignment_notes: [],
+          invented_personal_experience_flag: false,
+          ignored_recommended_angle_flag: false,
+          _candidate_local_score: c.candidateLocalScore,
+          _candidate_selection_reason: c.candidateSelectionReason,
+        },
+        judgeResult: {
+          passed: judgeResult.passed,
+          final_candidate_score: judgeResult.final_candidate_score,
+          originality_score: judgeResult.originality_score,
+          brief_alignment_score: judgeResult.brief_alignment_score,
+          evidence_safety_score: judgeResult.evidence_safety_score,
+        },
+        sourceKey: c.sourceKey,
+        _candidateIndex: i, // explicit index for safe mapping (replaces indexOf)
+      };
+    });
 
     const dedupedCandidates = deduplicateJudgedCandidates(candidatesWithJudgeResults);
 
     // Build a map from sourceKey to the best candidate's judge result and metadata
+    // HARDEN: Use explicit _candidateIndex instead of fragile indexOf(entry)
     const bestCandidateBySource = new Map<string, {
       judgeResult: JudgeResult;
       variantType?: string;
       localScore?: number;
       selectionReason?: string;
       candidateIndex: number; // index into original candidates[] array
+      craftedText?: string; // best candidate's crafted_text for applying back to opportunity
     }>();
     for (const entry of dedupedCandidates) {
+      const explicitIndex = (entry as any)._candidateIndex ?? candidatesWithJudgeResults.indexOf(entry);
       bestCandidateBySource.set(entry.sourceKey, {
-        judgeResult: results[candidatesWithJudgeResults.indexOf(entry)] || results[0],
+        judgeResult: results[explicitIndex] || FAILED_JUDGE_RESULT,
         variantType: entry.candidate.variant_type,
         localScore: entry.candidate._candidate_local_score,
         selectionReason: entry.candidate._candidate_selection_reason,
-        candidateIndex: candidatesWithJudgeResults.indexOf(entry),
+        candidateIndex: explicitIndex,
+        craftedText: entry.candidate.crafted_text || undefined,
       });
     }
 
     // Apply judge results to opportunities — judge-failed ones get shield_passed=false
-    const judgedOpportunities = opportunities.map((opp, i) => {
+    // HARDEN: Also apply best candidate's crafted_text back and handle missing candidates safely
+    let candidateValidationFailedCount = 0;
+    let candidateMissingTextCount = 0;
+
+    const judgedOpportunities: OpportunityWithDiagnostics[] = opportunities.map((opp, i) => {
       const sourceKey = String((opp as any).source_text || (opp as any).text || '').slice(0, 100);
       const bestEntry = bestCandidateBySource.get(sourceKey);
+
+      // Check if this opportunity had any candidates at all
+      const oppCandidates = candidates.filter(c => c.opportunityIndex === i);
+      if (oppCandidates.length === 0) {
+        // No candidates for this opportunity — safely reject
+        candidateValidationFailedCount++;
+        return {
+          ...opp,
+          shield_passed: false,
+          shield_issues: [...(opp.shield_issues || []), 'candidate_missing_crafted_text'],
+          _candidate_generation_error: 'no_valid_crafted_text',
+        };
+      }
 
       // Find the judge result for the best candidate from this opportunity
       // If this opportunity had multiple candidates, only the best one's result is used
@@ -1867,22 +1967,41 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
       let bestVariantType: string | undefined;
       let bestLocalScore: number | undefined;
       let bestSelectionReason: string | undefined;
+      let bestCraftedText: string | undefined;
 
       if (bestEntry) {
         judgeResult = bestEntry.judgeResult;
         bestVariantType = bestEntry.variantType;
         bestLocalScore = bestEntry.localScore;
         bestSelectionReason = bestEntry.selectionReason;
+        bestCraftedText = bestEntry.craftedText;
       } else {
         // Fallback: find the first candidate for this opportunity
         const candIdx = candidates.findIndex(c => c.opportunityIndex === i);
         judgeResult = candIdx >= 0 ? results[candIdx] : undefined;
       }
 
-      if (!judgeResult) return opp;
+      if (!judgeResult) {
+        // No judge result — safely reject
+        candidateMissingTextCount++;
+        return {
+          ...opp,
+          shield_passed: false,
+          shield_issues: [...(opp.shield_issues || []), 'candidate_missing_crafted_text'],
+          _candidate_generation_error: 'no_valid_crafted_text',
+        };
+      }
+
+      // HARDEN: Apply best candidate's crafted_text back to opportunity.crafted_text
+      // This ensures the opportunity carries the best variant's text into publish_gate
+      const textToApply = bestCraftedText && bestCraftedText.trim()
+        ? bestCraftedText
+        : (opp.crafted_text || undefined);
 
       return {
         ...opp,
+        // Apply best candidate's crafted_text (if different from current)
+        ...(textToApply ? { crafted_text: textToApply, _selected_candidate_text_applied: !!bestCraftedText } : {}),
         _judge_result: {
           passed: judgeResult.passed,
           final_candidate_score: judgeResult.final_candidate_score,
@@ -1973,7 +2092,7 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
         if (isOriginalityFailure) {
           try {
             const originalityCtx = await getOriginalityContext({
-              source_text: String(opp.source_text || opp.text || ''),
+              source_text: String(opp.source_text || (opp as any).text || ''),
               source_author: opp.source_author,
               brief: brief,
               current_text: craftedText,
@@ -2312,6 +2431,12 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
         // Phase 2G.3: Multi-candidate judge diagnostics
         multi_candidate_variants_judged: candidates.length,
         multi_candidate_variants_generated: candidates.filter(c => c.candidateVariantType).map(c => c.candidateVariantType!),
+        // Phase 2G.3 Hotfix: Candidate validation diagnostics
+        candidate_validation_failed_count: candidateValidationFailedCount,
+        candidate_missing_text_count: candidateMissingTextCount,
+        judge_result_missing_count: judgeResultMissingCount,
+        multi_candidate_invalid_count: judgedOpportunities.filter(o => (o as any)._candidate_generation_error).length,
+        multi_candidate_empty_selected_count: judgedOpportunities.filter(o => (o as any)._candidate_generation_error === 'no_valid_crafted_text').length,
       }
     };
   } catch (err: any) {

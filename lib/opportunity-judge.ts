@@ -509,6 +509,47 @@ export async function judgeCraftedCandidates(
   let totalOriginalityScore = 0;
 
   for (const candidate of candidates) {
+    // HARDEN: Guard candidate before reading candidate.crafted_text
+    if (!candidate || typeof candidate !== 'object') {
+      // Synthesize a failed judge result for null/undefined candidate
+      results.push({
+        originality_score: 1,
+        usefulness_score: 1,
+        niche_fit_score: 1,
+        evidence_safety_score: 1,
+        clarity_score: 1,
+        generic_bait_flag: false,
+        unsupported_claim_flag: false,
+        brief_alignment_score: 1,
+        final_candidate_score: 1,
+        passed: false,
+        failure_reasons: ['judge_result_missing'],
+      });
+      failedCount++;
+      failureReasons['judge_result_missing'] = (failureReasons['judge_result_missing'] || 0) + 1;
+      continue;
+    }
+
+    // HARDEN: Guard crafted_text — if missing/empty, synthesize failed result
+    if (!candidate.crafted_text || typeof candidate.crafted_text !== 'string' || !candidate.crafted_text.trim()) {
+      results.push({
+        originality_score: 1,
+        usefulness_score: 1,
+        niche_fit_score: 1,
+        evidence_safety_score: 1,
+        clarity_score: 1,
+        generic_bait_flag: false,
+        unsupported_claim_flag: false,
+        brief_alignment_score: 1,
+        final_candidate_score: 1,
+        passed: false,
+        failure_reasons: ['candidate_missing_crafted_text'],
+      });
+      failedCount++;
+      failureReasons['candidate_missing_crafted_text'] = (failureReasons['candidate_missing_crafted_text'] || 0) + 1;
+      continue;
+    }
+
     const result = await judgeCraftedCandidate(
       candidate.crafted_text,
       candidate.brief || {}
