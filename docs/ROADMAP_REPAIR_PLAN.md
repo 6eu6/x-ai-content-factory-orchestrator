@@ -70,7 +70,7 @@ These items can cause broken pipeline runs, weak recommendations that slip throu
 | **Tests Needed** | (1) Opportunity with `_brief_crafting_parse_failed=true` is rejected at quality_enhance, (2) Opportunity with `_brief_crafting_parse_failed=false` is not affected, (3) Opportunity without `_brief_crafting_parse_failed` field is not affected, (4) Rejection is logged to rejection_ledger, (5) Diagnostic `brief_crafting_parse_failed_count` is emitted, (6) Full pipeline path test: all candidates fail → stale text blocked at quality gate |
 | **DB Migration Required** | No |
 | **Can Be Done Safely Now** | Yes. This is a purely additive safety check. It only adds a new rejection reason for a case that should never pass. No threshold changes. No judge bypass. No behavior change for correctly crafted opportunities. |
-| **Status** | 🔴 **NOT STARTED** — Found in comprehensive audit (2026-06-01) |
+| **Status** | ✅ **COMPLETE** — Fixed in commit 96fd4f9. Hard-reject added in quality_enhance. Shield issue never removable by polish. Diagnostic added. All 922 tests pass. |
 
 ---
 
@@ -140,7 +140,7 @@ These items won't break runs immediately but will degrade quality and increase c
 | **Tests Needed** | Run full test suite after changes. No new tests required — prompt wording changes don't affect deterministic test logic. Run PRE/POST CHANGE DEEP VERIFICATION AUDIT to confirm no regressions. |
 | **DB Migration Required** | No |
 | **Can Be Done Safely Now** | Yes. Prompt wording changes in AI system prompts are low-risk. They expand the model's understanding rather than constraining it. The worst case is slightly different AI output, which is then still subject to judge/shield/publish_gate. |
-| **Status** | 🔴 **NOT STARTED** — Precise files/lines identified in comprehensive audit (2026-06-01) |
+| **Status** | ✅ **COMPLETE** — Fixed in commit 96fd4f9. Prompt drift in originality-enhancer.ts and numeric-claim-guard.ts updated to S1.3 broad lens wording. Deprecation warning added to daily-runner.ts. Misleading comment in content-engine-v3.ts clarified. All 922 tests pass. |
 
 ---
 
