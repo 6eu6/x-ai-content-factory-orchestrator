@@ -2036,16 +2036,21 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
     let polishEligibleIndices: number[] = [];
 
     if (summary.judge_failed_count > 0) {
-      // Identify near-pass candidates (sorted by final_candidate_score descending for priority)
+      // Phase 2G.3 Hotfix #2: Iterate deduped judgedOpportunities, NOT raw results[]
+      // After multi-candidate judging + dedupe, results.length can be > judgedOpportunities.length
+      // (e.g. 2 opportunities × 2 candidates = 4 results, but only 2 judgedOpportunities).
+      // Using raw results[i] / candidates[i] / judgedOpportunities[i] crashes when i >= judgedOpportunities.length.
+      // Instead, iterate judgedOpportunities and use each opportunity's _judge_result (already set after dedupe).
       const nearPassIndices: number[] = [];
-      for (let i = 0; i < results.length; i++) {
-        const judgeResult = results[i];
+      for (let i = 0; i < judgedOpportunities.length; i++) {
         const opp = judgedOpportunities[i];
-        const candidate = candidates[i];
+        const judgeResult = (opp as any)?._judge_result;
         if (!judgeResult || judgeResult.passed) continue;
 
-        const craftedText = opp.crafted_text || candidate?.crafted_text || '';
-        const brief = candidate?.brief || (opp as any)?._brief || {};
+        const craftedText = opp.crafted_text || '';
+        // Find first candidate for this opportunity for brief access
+        const oppCandidate = candidates.find(c => c.opportunityIndex === i);
+        const brief = oppCandidate?.brief || (opp as any)?._brief || {};
 
         if (isNearPass(judgeResult, craftedText, brief)) {
           nearPassIndices.push(i);
@@ -2053,16 +2058,28 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
       }
 
       // Limit to MAX_POLISH_CANDIDATES_PER_RUN, prioritized by score (highest first)
-      nearPassIndices.sort((a, b) => results[b].final_candidate_score - results[a].final_candidate_score);
+      nearPassIndices.sort((a, b) => (judgedOpportunities[a] as any)?._judge_result?.final_candidate_score - (judgedOpportunities[b] as any)?._judge_result?.final_candidate_score);
       const eligibleIndices = nearPassIndices.slice(0, MAX_POLISH_CANDIDATES_PER_RUN);
       polishEligibleIndices = eligibleIndices;
 
       for (const idx of eligibleIndices) {
-        const judgeResult = results[idx];
         const opp = judgedOpportunities[idx];
-        const candidate = candidates[idx];
-        const brief = candidate?.brief || (opp as any)?._brief || {};
-        const craftedText = opp.crafted_text || candidate?.crafted_text || '';
+        const judgeResult = (opp as any)?._judge_result;
+
+        // Guard: no aligned judge result — mark and skip (do not crash)
+        if (!judgeResult) {
+          judgedOpportunities[idx] = {
+            ...judgedOpportunities[idx],
+            shield_passed: false,
+            shield_issues: [...(judgedOpportunities[idx].shield_issues || []), 'judge_result_missing'],
+            _judge_result_missing: true,
+          };
+          continue;
+        }
+
+        const oppCandidate = candidates.find(c => c.opportunityIndex === idx);
+        const brief = oppCandidate?.brief || (opp as any)?._brief || {};
+        const craftedText = opp.crafted_text || '';
 
         const polishInput: PolishInput = {
           crafted_text: craftedText,
@@ -2088,7 +2105,7 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
 
         // Phase 2G: If originality failure, fetch originality context for the polish
         const isOriginalityFailure = judgeResult.originality_score < 7.8 ||
-          judgeResult.failure_reasons.some(r => r.includes('originality') || r.includes('missing_originality'));
+          (judgeResult.failure_reasons || []).some((r: string) => r.includes('originality') || r.includes('missing_originality'));
         if (isOriginalityFailure) {
           try {
             const originalityCtx = await getOriginalityContext({
@@ -2096,7 +2113,7 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
               source_author: opp.source_author,
               brief: brief,
               current_text: craftedText,
-              failure_reasons: judgeResult.failure_reasons,
+              failure_reasons: judgeResult.failure_reasons || [],
               max_items: 6,
             });
             polishInput.originality_context = originalityCtx;
@@ -2270,7 +2287,9 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
 
       // Check if micro-repair is eligible
       const afterJudge = outcome.after_judge;
-      const brief = candidates[eligibleIdx]?.brief || {};
+      // Phase 2G.3 Hotfix #2: eligibleIdx is a judgedOpportunities index, not a candidates[] index
+      const oppCandidateForMicro = candidates.find(c => c.opportunityIndex === eligibleIdx);
+      const brief = oppCandidateForMicro?.brief || {};
       const currentText = outcome.polished_text || judgedOpportunities[eligibleIdx]?.crafted_text || '';
 
       // isMicroRepairEligible imported from near-pass-polish
@@ -2286,7 +2305,9 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
         : -1;
       if (eligibleIdx < 0) continue;
 
-      const brief = candidates[eligibleIdx]?.brief || {};
+      // Phase 2G.3 Hotfix #2: eligibleIdx is a judgedOpportunities index, not a candidates[] index
+      const oppCandidateForMicro = candidates.find(c => c.opportunityIndex === eligibleIdx);
+      const brief = oppCandidateForMicro?.brief || {};
       const currentText = outcome.polished_text || judgedOpportunities[eligibleIdx]?.crafted_text || '';
       const afterJudge = outcome.after_judge!;
 
@@ -2437,6 +2458,9 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
         judge_result_missing_count: judgeResultMissingCount,
         multi_candidate_invalid_count: judgedOpportunities.filter(o => (o as any)._candidate_generation_error).length,
         multi_candidate_empty_selected_count: judgedOpportunities.filter(o => (o as any)._candidate_generation_error === 'no_valid_crafted_text').length,
+        // Phase 2G.3 Hotfix #2: Raw vs deduped counts for clarity
+        raw_candidate_judged_count: results.length,
+        deduped_opportunity_judged_count: judgedOpportunities.length,
       }
     };
   } catch (err: any) {
