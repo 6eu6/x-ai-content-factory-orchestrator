@@ -151,7 +151,7 @@ export async function rewriteToRemoveNumericClaim(
     const response = await callModel('content_crafting' as TaskType, [
       {
         role: 'system',
-        content: `You are a content safety editor for @30piq (AI × productivity × career growth).
+        content: `You are a content safety editor for @30piq (AI-native operators, builders, productivity, digital leverage, career growth, tools, creator growth, internet business, and useful digital culture).
 
 Your task: Rewrite this tweet to REMOVE unsourced numeric claims while keeping the core message.
 

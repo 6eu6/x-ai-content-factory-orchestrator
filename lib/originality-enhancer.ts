@@ -228,7 +228,7 @@ export function heuristicUsefulness(text: string): number {
 
   let score = 5.0;
 
-  // Positive: actionable signals for @30piq niche (AI × productivity × career growth)
+  // Positive: actionable signals for @30piq account growth lens (AI-native operators, builders, productivity, digital leverage, career growth, tools, creator growth, internet business, useful digital culture)
   const usefulPatterns = [
     /\b(try|use|build|create|automate|setup|install|run|deploy|test|ship|launch)\b/i,
     /\b(workflow|pipeline|system|framework|tool|app|script|template)\b/i,
@@ -484,7 +484,7 @@ export async function scoreWithAI(text: string): Promise<QualityScores> {
     const response = await callModel('quality_evaluation' as TaskType, [
       {
         role: 'system',
-        content: `You are a content quality evaluator for an X account (@30piq) focused on AI × productivity × career growth.
+        content: `You are a content quality evaluator for an X account (@30piq) focused on AI-native operators, builders, productivity, digital leverage, career growth, tools, creator growth, internet business, and useful digital culture.
 
 Score this text on three dimensions (1-10 each):
 
@@ -569,7 +569,7 @@ export async function rewriteForOriginality(
     const response = await callModel('content_crafting' as TaskType, [
       {
         role: 'system',
-        content: `You are a content improvement specialist for @30piq (AI × productivity × career growth niche).
+        content: `You are a content improvement specialist for @30piq (AI-native operators, builders, productivity, digital leverage, career growth, tools, creator growth, internet business, and useful digital culture).
 
 Your task: Rewrite this tweet to be GENUINELY ORIGINAL with a specific @30piq-style angle.
 

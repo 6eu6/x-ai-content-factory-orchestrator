@@ -1251,7 +1251,7 @@ async function discoverOpportunities(
     const tweetMedia = tweet.media || [];
     const rulesUsed: string[] = [];
 
-    // ═══ Lowered thresholds — even medium tweets produce opportunities ═══
+    // ═══ Lowered scan-prefilter thresholds — more tweets analyzed, but still must pass full judge → publish_gate chain ═══
     if (tweet.has_question || tweet.score > 10) {
       const crafted = await craftEngagement('quote', tweet, algoRules || [], stylePatterns || [], rulesUsed);
       if (crafted) {

@@ -1675,6 +1675,24 @@ async function processQualityEnhance(task: PipelineTaskRow): Promise<TaskResult>
       console.log(`[pipeline-worker] quality_enhance: ${briefAlignmentFailedCount} opportunities failed brief alignment gate`);
     }
 
+    // ═══ P0-3 Fix: Hard-reject opportunities where brief crafting failed ═══
+    // When all craftFromBrief candidates fail (crafted_text=null), the opportunity
+    // keeps its stale pre-intelligence crafted_text with _brief_crafting_parse_failed=true.
+    // This text was never crafted to match the brief and must not pass to publish_gate.
+    let briefCraftingFailedCount = 0;
+    for (let i = 0; i < currentOpportunities.length; i++) {
+      const opp = currentOpportunities[i];
+      if (opp._brief_crafting_parse_failed === true) {
+        currentOpportunities[i].pre_gate_rejection_reason = 'brief_crafting_parse_failed';
+        currentOpportunities[i].shield_passed = false;
+        currentOpportunities[i].shield_issues = [...(currentOpportunities[i].shield_issues || []), 'brief_crafting_parse_failed'];
+        briefCraftingFailedCount++;
+      }
+    }
+    if (briefCraftingFailedCount > 0) {
+      console.log(`[pipeline-worker] quality_enhance: ${briefCraftingFailedCount} opportunities rejected for brief_crafting_parse_failed (stale pre-brief text)`);
+    }
+
     // ═══ Phase 2B Step 1: Originality Enhancer (self-critique/rewrite loop) ═══
     const enhanceResult = await enhanceOpportunities(currentOpportunities);
 
@@ -1728,6 +1746,8 @@ async function processQualityEnhance(task: PipelineTaskRow): Promise<TaskResult>
         transferable_angle_count: nicheResult.summary.transferable_angle_count,
         allowed_adjacency_count: nicheResult.summary.allowed_adjacency_count,
         off_lens_reasons: nicheResult.summary.off_lens_reasons,
+        // P0-3: Brief crafting parse failure diagnostic
+        brief_crafting_parse_failed_count: briefCraftingFailedCount,
         validation_passed: validationResults.summary.passed,
         validation_failed: validationResults.summary.failed,
         validation_failure_reasons: validationResults.summary.failure_reasons,
@@ -2277,6 +2297,10 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
                 if (issue === 'brief_alignment_failed' && (afterJudgeScores?.brief_alignment_score ?? 0) >= 7.5) return false;
                 // Remove missing_originality only if the re-judge confirms originality_score >= 7.8
                 if (issue === 'missing_originality' && (afterJudgeScores?.originality_score ?? 0) >= 7.8) return false;
+                // brief_crafting_parse_failed is NEVER removed by polish — the text was never
+                // properly crafted to match the brief, so even a passing judge score is unreliable.
+                // This is a hard gate (P0-3).
+                if (issue === 'brief_crafting_parse_failed') return true;
                 // Keep all other issues (numeric, non-judge, etc.)
                 return true;
               });
@@ -2340,6 +2364,9 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
               if (afterJudge && afterJudge.brief_alignment_score >= 7.5) {
                 rebuiltShieldIssues = rebuiltShieldIssues.filter((issue: string) => issue !== 'brief_alignment_failed');
               }
+
+              // brief_crafting_parse_failed is NEVER removed by polish (P0-3 hard gate)
+              // — it stays in shield_issues regardless of judge scores
 
               judgedOpportunities[idx] = {
                 ...polishedOpp,
@@ -2463,6 +2490,8 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
               if (issue.startsWith('judge_failed:')) return false;
               if (issue === 'brief_alignment_failed' && (microAfterJudge?.brief_alignment_score ?? 0) >= 7.5) return false;
               if (issue === 'missing_originality' && (microAfterJudge?.originality_score ?? 0) >= 7.8) return false;
+              // brief_crafting_parse_failed is NEVER removed by polish (P0-3 hard gate)
+              if (issue === 'brief_crafting_parse_failed') return true;
               return true;
             });
 

@@ -112,6 +112,11 @@ function endStep(name: string, startTime: number) {
 // ═══ Main pipeline ═══
 
 export async function runDailyPipeline(options: DailyPipelineOptions = {}): Promise<DailyPipelineResult> {
+  // ⚠️ DEPRECATED: This legacy pipeline bypasses opportunity_intelligence, quality_enhance,
+  // and opportunity_judge. Use the queue-based pipeline (pipeline-queue.ts + pipeline-worker.ts) instead.
+  // See docs/ACTIVE_SYSTEM_MAP.md §2.1 for details.
+  console.warn('[DEPRECATED] daily-runner bypasses opportunity_intelligence, quality_enhance, and opportunity_judge. Use the queue-based pipeline instead.');
+
   const source = options.source || 'daily_run';
   const username = options.username || optionalEnv('X_USERNAME', '30piq');
   const accountLimit = options.accountLimit ?? envNumber('DAILY_SCAN_ACCOUNT_LIMIT', 10, 1, 30);
