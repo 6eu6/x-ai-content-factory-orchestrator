@@ -64,6 +64,7 @@ import { computeLocalCandidateScore, selectCandidatesForJudge, deduplicateJudged
 import { compactRunIntoMemory, type CompactionResult } from './structured-memory-compaction';
 import { getRelevantStructuredMemory, buildMemoryPromptSection, buildPolishMemorySection, type StructuredMemoryResult } from './structured-memory-retrieval';
 import { getDefaultPostLengthPolicy, normalizePostLengthPolicy, getPostHardLimit, getPostTargetChars, countPostChars, isWithinPostLimit, validatePostLength, buildPostLengthInstruction, buildShortenInstruction, type PostLengthPolicy, type PostLengthValidationResult } from './post-length-policy';
+import { isValidXHandle } from './pipeline-queue';
 
 // Re-export CraftedCandidate for consumers
 export type { CraftedCandidate } from './candidate-selector';
@@ -444,7 +445,7 @@ async function craftFromBrief(
   const postLengthInstruction = buildPostLengthInstruction(effectivePolicy);
 
   // Phase 2G.3: Updated JSON schema for 3 candidate variants
-  const systemPrompt = `You are a content crafter for @30piq, an X account focused on AI, creators, internet culture, productivity, skills, and modern work.
+  const systemPrompt = `You are a content crafter for @30piq, an X account focused on AI-native operators, builders, productivity, digital leverage, career growth, tools, creator growth, internet business, and useful digital culture.
 
 Your task: Craft THREE tweet variants that STRICTLY follow the Opportunity Brief below. Each variant optimizes for a different priority.
 
@@ -839,6 +840,20 @@ async function processScanAccount(task: PipelineTaskRow): Promise<TaskResult> {
 
     if (!handle) {
       return { ok: false, result: {}, error: 'No account_handle specified for scan_account task' };
+    }
+
+    // Phase S1.3: Guard against invalid X handles (emoji, Arabic, UI strings, etc.)
+    if (!isValidXHandle(handle)) {
+      return {
+        ok: true,
+        result: {
+          account_handle: handle,
+          tweets_analyzed: 0,
+          viral_found: 0,
+          _skipped_invalid_handle: true,
+          _invalid_handle_reason: `Handle "${handle}" does not match valid X handle pattern (1-15 chars, letters/numbers/underscore only)`,
+        }
+      };
     }
 
     // Use the REAL content-engine-v3 per-account function — same quality as scanXAccounts
@@ -1707,6 +1722,12 @@ async function processQualityEnhance(task: PipelineTaskRow): Promise<TaskResult>
         off_niche_count: nicheResult.summary.off_niche,
         niche_aligned_count: nicheResult.summary.aligned,
         avg_niche_score: nicheResult.summary.avg_score,
+        // Phase S1.3: Account lens diagnostics
+        off_lens_count: nicheResult.summary.off_lens_count,
+        forced_angle_count: nicheResult.summary.forced_angle_count,
+        transferable_angle_count: nicheResult.summary.transferable_angle_count,
+        allowed_adjacency_count: nicheResult.summary.allowed_adjacency_count,
+        off_lens_reasons: nicheResult.summary.off_lens_reasons,
         validation_passed: validationResults.summary.passed,
         validation_failed: validationResults.summary.failed,
         validation_failure_reasons: validationResults.summary.failure_reasons,

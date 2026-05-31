@@ -381,6 +381,8 @@ describe('Phase 2E.3: Threshold Integrity', () => {
     expect(CANONICAL_REJECTION_REASONS).toContain('blocked_topic');
     expect(CANONICAL_REJECTION_REASONS).toContain('generic_only');
     expect(CANONICAL_REJECTION_REASONS).toContain('low_originality_potential');
-    expect(CANONICAL_REJECTION_REASONS).toHaveLength(11);
+    // Phase S1.3: Added 'forced_angle' as a canonical rejection reason
+    expect(CANONICAL_REJECTION_REASONS).toContain('forced_angle');
+    expect(CANONICAL_REJECTION_REASONS).toHaveLength(12);
   });
 });

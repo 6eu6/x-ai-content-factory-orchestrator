@@ -19,6 +19,10 @@
  * - generic_bait_flag = true
  * - unsupported_claim_flag = true
  *
+ * Phase S1.3: niche_fit_score uses broader account lens. Off-lens topics with
+ * strong transferable angles can score 5-7 (near-pass eligible). Pure off-lens
+ * with no transferable angle scores 1-4 (fails near-pass).
+ *
  * This module NEVER lowers any threshold or bypasses publish_gate.
  */
 
@@ -301,7 +305,7 @@ export async function judgeCraftedCandidate(
     const response = await callModel('opportunity_judge' as TaskType, [
       {
         role: 'system',
-        content: `You are a content quality judge for an X account (@30piq) focused on AI × productivity × career growth.
+        content: `You are a content quality judge for an X account (@30piq) focused on AI-native operators, builders, productivity, digital leverage, career growth, tools, creator growth, internet business, and useful digital culture.
 
 You are evaluating a crafted tweet BEFORE it goes to the publish gate. Your job is to score it rigorously.
 
@@ -315,15 +319,18 @@ Score the crafted text on six dimensions (1-10 each):
    - Decent = 5-7 (has some specificity but still feels template-ish or surface-level)
    - Original = 8-10 (unique angle, personal insight, counterintuitive framing, specific reference that surprises)
 
-2. "usefulness_score": Is this actionable and valuable for a high-value English-speaking audience interested in AI and productivity?
+2. "usefulness_score": Is this actionable and valuable for a high-value English-speaking audience of builders, operators, creators, and AI-native workers?
    - Useless = 1-4 (vague platitude, no actionability, no takeaway)
    - Somewhat useful = 5-7 (interesting but not directly actionable or too generic)
    - Very useful = 8-10 (specific, actionable, save-worthy, the reader can apply this today)
 
-3. "niche_fit_score": Does this fit the @30piq niche (AI × productivity × career growth)?
-   - Off-niche = 1-4 (unrelated to AI/productivity/career, or forced AI angle)
-   - Borderline = 5-7 (tangentially related, could be stronger)
-   - Niche-perfect = 8-10 (directly relevant, clearly belongs on this account)
+3. "niche_fit_score": Does this fit the @30piq account lens WITHOUT feeling forced?
+   - Off-lens = 1-4 (unrelated to the account lens, OR the AI/productivity angle feels forced/generic/artificial)
+   - Borderline = 5-7 (tangentially related, or the angle is plausible but not fully convincing)
+   - On-lens = 8-10 (directly relevant to AI-native operators/builders/creators, or has a strong, natural transferable angle from a broader topic)
+   
+   CRITICAL: If the text force-fits an unrelated topic into AI/productivity with a generic or artificial angle (e.g. "Superman trailer means AI will change productivity"), penalize niche_fit_score heavily (1-3).
+   REWARD: If the text extracts a specific, useful, non-obvious lesson from a broader cultural/trending source (e.g. "The reveal spread because it gave fans one concrete visual to argue about; builders can use the same mechanism in product launches"), score niche_fit_score 7-9.
 
 4. "evidence_safety_score": Are numeric claims (percentages, stats, "studies show", multipliers) properly sourced? Are there fabricated-seeming statistics?
    - Unsafe = 1-4 (fabricated statistics, unsourced "studies show", invented percentages, fabricated rankings)

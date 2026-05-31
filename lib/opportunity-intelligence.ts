@@ -154,36 +154,50 @@ export type IntelligenceSummary = {
 // ═══ Niche Model Constants ═══
 
 /**
- * Core positioning: AI, creators, internet culture, productivity,
- * skills, and modern work.
+ * Core positioning: AI-native operators, builders, productivity,
+ * digital leverage, career growth, tools, creator growth,
+ * internet business, and useful digital culture.
+ *
+ * Phase S1.3: Expanded from narrow "AI × productivity × career growth"
+ * to the broader Account Growth Lens.
  *
  * These are the topics that @30piq can legitimately speak about
  * with authority and originality.
  */
 const ALLOWED_TOPICS = [
   'AI tools',
+  'AI-native workflows',
   'automation',
   'productivity',
+  'digital leverage',
   'career growth',
+  'skill acquisition',
   'learning systems',
   'creator economy',
-  'online business',
+  'creator growth',
+  'internet business',
   'startups',
+  'indie hacking',
   'founder/operator workflows',
   'software/product workflows',
   'internet behavior',
+  'digital culture',
   'attention economy',
   'personal leverage',
   'skill-building',
   'tech culture',
+  'building',
+  'shipping',
+  'future of work',
+  'systems and tools',
 ];
 
 /**
  * Adjacent topics — allowed ONLY when they support a specific
- * @30piq-relevant angle. Pure adjacent-topic content is rejected.
+ * transferable @30piq-relevant angle. Pure adjacent-topic content is rejected.
  *
- * Expanded: also covers tool adoption, product/UX behavior,
- * work leverage, storytelling mechanics, and distribution.
+ * Phase S1.3: Expanded adjacency to include crypto, politics, and gaming
+ * with clear transfer paths (incentive design, platform dynamics, community behavior).
  */
 const ALLOWED_ADJACENT_TOPICS: Record<string, string> = {
   'entertainment': 'only if supports audience, brand, storytelling, attention economy, creative strategy, or internet culture insight',
@@ -191,10 +205,14 @@ const ALLOWED_ADJACENT_TOPICS: Record<string, string> = {
   'anime/comics/movies': 'only if supports storytelling, fandom, audience retention, brand symbols, or creator strategy',
   'internet trends': 'only if supports audience behavior, attention economy, distribution, or internet culture insight',
   'social media behavior': 'only if supports audience retention, attention economy, creator strategy, or distribution',
+  'crypto/web3': 'only if supports product adoption, community behavior, incentive design, or token economics insight — NOT price speculation or hype',
+  'politics/policy': 'only if supports platform dynamics, information behavior, or policy impact on tech/work — NOT partisan ragebait',
+  'gaming': 'only if supports product design, community building, retention mechanics, or distribution insight',
 };
 
 /**
  * Blocked topics — never allowed, regardless of angle.
+ * Phase S1.3: Added forced/generic AI angles as a blocked pattern.
  */
 const BLOCKED_TOPICS = [
   'random jokes',
@@ -202,6 +220,9 @@ const BLOCKED_TOPICS = [
   'pure sports reaction',
   'pure anime/comics opinion',
   'pure movie/TV commentary',
+  'pure crypto price speculation',
+  'pure political ragebait',
+  'forced/generic AI angle on unrelated topic',
   'political controversy',
   'insults/slurs',
   'adult content',
@@ -384,6 +405,7 @@ export const CANONICAL_REJECTION_REASONS = [
   'insufficient_context',
   'weak_source',
   'intelligence_parse_failed',
+  'forced_angle',
 ] as const;
 
 export type CanonicalRejectionReason = typeof CANONICAL_REJECTION_REASONS[number];
@@ -733,16 +755,16 @@ function buildIntelligenceSystemPrompt(): string {
     .join('\n');
   const blockedTopicsStr = BLOCKED_TOPICS.map(t => `- ${t}`).join('\n');
 
-  return `You are an Opportunity Intelligence Analyst for @30piq, an X account focused on AI, creators, internet culture, productivity, skills, and modern work.
+  return `You are an Opportunity Intelligence Analyst for @30piq, an X account focused on AI-native operators, builders, productivity, digital leverage, career growth, tools, creator growth, internet business, and useful digital culture.
 
 Your job: Evaluate a raw opportunity and produce a structured "Opportunity Brief" as JSON. Be honest but not overly strict — aim to select 2-5 genuinely promising opportunities from every 10-20 raw opportunities.
 
-═══ NICHE MODEL RULES ═══
+═══ ACCOUNT LENS RULES (Phase S1.3) ═══
 
-ALLOWED TOPICS (strong niche fit):
+ALLOWED TOPICS (strong account lens fit):
 ${allowedTopicsStr}
 
-ADJACENT TOPICS (allowed ONLY with a legitimate angle):
+ADJACENT TOPICS (allowed ONLY with a legitimate transferable angle):
 ${adjacentTopicsStr}
 
 BLOCKED TOPICS (never allowed):
@@ -750,11 +772,11 @@ ${blockedTopicsStr}
 
 ═══ EVALUATION RULES ═══
 
-1. NICHE FIT: Score 1-10 how well the opportunity fits the @30piq niche. Core topics = 7-10. Adjacent with clear angle = 5-6. No clear angle = 1-4.
+1. NICHE FIT: Score 1-10 how well the opportunity fits the @30piq account lens WITHOUT feeling forced. Core topics = 7-10. Adjacent with clear transferable angle = 5-6. No clear angle or forced/generic angle = 1-4.
 
 2. ORIGINALITY POTENTIAL: Score 1-10 how much original insight @30piq could add. If the only possible response is "nice" or generic agreement, score 1-3. If there's a unique angle, counterintuitive take, or specific expertise to share, score 7-10.
 
-3. USEFULNESS: Score 1-10 how useful the resulting content would be for @30piq's audience (builders, operators, creators, tech professionals). Actionable + specific = high. Vague + generic = low. A useful observation about internet behavior or audience patterns scores at least 6.
+3. USEFULNESS: Score 1-10 how useful the resulting content would be for @30piq's audience (builders, operators, creators, AI-native workers, tech professionals). Actionable + specific = high. Vague + generic = low. A useful observation about internet behavior or audience patterns scores at least 6.
 
 4. EVIDENCE RISK: Score 1-10 (higher = safer) how risky the claims would be. If the source makes unsourced claims that @30piq would need to repeat or endorse, score low. If the claims are self-evident or well-sourced, score high.
 
@@ -762,23 +784,33 @@ ${blockedTopicsStr}
 
 6. PUBLISHABILITY: Score 1-10 the overall likelihood that content crafted from this opportunity would pass all quality gates and be worth publishing. This is your composite judgment. IMPORTANT: If originality_potential >= 7.5 and niche_fit >= 5, a publishability score of 7.0 is acceptable (do not default-reject at 7.0). Score 7.0+ for opportunities with a clear, specific, honest angle.
 
-7. If the source does not support a useful angle for the @30piq niche, reject it. Do NOT force a fake AI angle. BUT: if the source has engagement, behavioral, or internet-culture signals, try to find a legitimate adjacent angle (attention economy, creator strategy, distribution, audience behavior, storytelling mechanics, personal brand, work leverage) BEFORE rejecting.
+7. If the source does not support a useful angle for the @30piq account lens, reject it. Do NOT force a fake AI/productivity angle. BUT: if the source has engagement, behavioral, or internet-culture signals, try to find a legitimate transferable angle (attention economy, creator strategy, distribution, audience psychology, builder lesson, operator takeaway, creator growth mechanism, product/adoption insight, workflow/system insight, career or skill leverage) BEFORE rejecting.
 
-8. The "do_not_claim" field should list specific claims from the source that @30piq should NOT repeat (unsourced stats, controversial opinions, unverified claims).
+8. Do NOT force AI angles onto unrelated topics. A Superman trailer does NOT "mean AI will change productivity." Instead, look for the real mechanism: "The reveal spread because it gave fans one concrete visual to argue about — builders can use the same mechanism in product launches."
 
-9. The "required_context" field should list context that MUST be included for the content to be honest and useful.
+9. The "do_not_claim" field should list specific claims from the source that @30piq should NOT repeat (unsourced stats, controversial opinions, unverified claims).
 
-10. The "recommended_angle" must be specific and actionable — not "share a thought" or "add perspective". It should describe the EXACT angle @30piq would take. If you can find a legitimate adjacent angle, put it here.
+10. The "required_context" field should list context that MUST be included for the content to be honest and useful.
 
-11. "content_format" should be:
+11. The "recommended_angle" must be specific and actionable — not "share a thought" or "add perspective". It should describe the EXACT angle @30piq would take. Prefer angles such as:
+    - audience psychology or behavior insight
+    - builder lesson or operator takeaway
+    - creator growth mechanism
+    - product/adoption insight
+    - workflow/system insight
+    - career or skill leverage
+    - digital leverage or attention economy insight
+    Reject or skip if the source is only entertainment/gossip/sports with no transferable lesson.
+
+12. "content_format" should be:
     - "reply" if responding directly to the source tweet
     - "quote" if quote-tweeting with added commentary
     - "standalone" if the idea can stand on its own without referencing the source
 
-12. REJECTION REASONS — use ONLY these specific reasons (do NOT use "weak_source" as a catch-all):
+13. REJECTION REASONS — use ONLY these specific reasons (do NOT use "weak_source" as a catch-all):
     - "blocked_topic" — content is in the blocked list
     - "low_originality_potential" — no original insight possible
-    - "low_niche_fit" — does not fit the niche even with adjacent angle
+    - "low_niche_fit" — does not fit the account lens even with a transferable angle, or the angle is forced/generic
     - "low_usefulness" — content would not be useful to the audience
     - "unsupported_claim_risk" — would require repeating unsourced claims
     - "generic_only" — only generic commentary possible
@@ -786,6 +818,7 @@ ${blockedTopicsStr}
     - "language_or_context_mismatch" — source language doesn't match audience
     - "insufficient_context" — source is too short or vague
     - "weak_source" — ONLY for truly empty/low-signal sources (< 15 chars)
+    - "forced_angle" — the only angle is a forced/generic AI-productivity connection that doesn't flow naturally
 
 ═══ OUTPUT FORMAT ═══
 

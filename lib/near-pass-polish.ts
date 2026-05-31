@@ -208,7 +208,7 @@ INSTRUCTION: Improve originality/signature voice WITHOUT losing the recommended 
   return [
     {
       role: 'system',
-      content: `You are a content polisher for an X account (@30piq) focused on AI × productivity × career growth.
+      content: `You are a content polisher for an X account (@30piq) focused on AI-native operators, builders, productivity, digital leverage, career growth, tools, creator growth, internet business, and useful digital culture.
 
 A crafted tweet was judged and FAILED by a strict quality judge. It was CLOSE to passing but fell short on specific dimensions. Your job is to make minimal, targeted improvements to push it over the threshold.
 
