@@ -72,9 +72,11 @@ export type CandidateWithJudgeResult = {
 
 /**
  * Check if crafted text passes local length requirements.
+ * Phase S1.2: Accepts optional hard_limit_chars from post_length_policy (defaults to 280).
  */
-function passesLengthCheck(text: string): boolean {
-  return text.length >= 40 && text.length <= 280;
+function passesLengthCheck(text: string, hardLimitChars?: number): boolean {
+  const limit = hardLimitChars ?? 280;
+  return text.length >= 40 && text.length <= limit;
 }
 
 /**
@@ -179,7 +181,8 @@ function isMissingRequiredContext(text: string, requiredContext: string[]): bool
  */
 export function computeLocalCandidateScore(
   candidate: CraftedCandidate,
-  brief: BriefForSelection
+  brief: BriefForSelection,
+  hardLimitChars?: number
 ): number {
   const text = candidate.crafted_text || '';
 
@@ -211,7 +214,7 @@ export function computeLocalCandidateScore(
 
   // 5. Evidence safety local checks pass
   const evidenceSafetyChecksPass =
-    passesLengthCheck(text) &&
+    passesLengthCheck(text, hardLimitChars) &&
     passesJsonWrapperCheck(text) &&
     passesDoNotClaimCheck(text, brief.do_not_claim || []) &&
     passesInventedExperienceCheck(text, brief.source_summary);
@@ -249,7 +252,8 @@ export function computeLocalCandidateScore(
  */
 export function selectCandidatesForJudge(
   candidates: CraftedCandidate[],
-  brief: BriefForSelection
+  brief: BriefForSelection,
+  hardLimitChars?: number
 ): SelectionResult {
   if (!candidates || candidates.length === 0) {
     return { selected: [], dropped: 0, reason: 'no_candidates' };
@@ -257,7 +261,7 @@ export function selectCandidatesForJudge(
 
   // Compute local scores for all candidates
   const scored = candidates.map(c => {
-    const localScore = computeLocalCandidateScore(c, brief);
+    const localScore = computeLocalCandidateScore(c, brief, hardLimitChars);
     return {
       candidate: { ...c, _candidate_local_score: localScore },
       localScore,

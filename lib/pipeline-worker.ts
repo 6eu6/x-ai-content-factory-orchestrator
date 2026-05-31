@@ -63,6 +63,7 @@ import { buildSignatureVoiceSection, validateSignatureVoice, type SignatureVoice
 import { computeLocalCandidateScore, selectCandidatesForJudge, deduplicateJudgedCandidates, type CraftedCandidate, type BriefForSelection, type CandidateWithJudgeResult } from './candidate-selector';
 import { compactRunIntoMemory, type CompactionResult } from './structured-memory-compaction';
 import { getRelevantStructuredMemory, buildMemoryPromptSection, buildPolishMemorySection, type StructuredMemoryResult } from './structured-memory-retrieval';
+import { getDefaultPostLengthPolicy, normalizePostLengthPolicy, getPostHardLimit, getPostTargetChars, countPostChars, isWithinPostLimit, validatePostLength, buildPostLengthInstruction, buildShortenInstruction, type PostLengthPolicy, type PostLengthValidationResult } from './post-length-policy';
 
 // Re-export CraftedCandidate for consumers
 export type { CraftedCandidate } from './candidate-selector';
@@ -330,12 +331,16 @@ export function validateBriefAlignment(
 /**
  * Phase 2D.3: Local quality checks for crafted text before accepting.
  * Returns failure reasons if any check fails, or empty array if all pass.
+ * Phase S1.2: Uses post_length_policy for hard limit instead of hardcoded 280.
  */
 function localCraftingChecks(
   craftedText: string,
   brief: { do_not_claim: string[] },
-  sourceText?: string
+  sourceText?: string,
+  postLengthPolicy?: PostLengthPolicy | null
 ): string[] {
+  const policy = postLengthPolicy || getDefaultPostLengthPolicy();
+  const hardLimit = policy.hard_limit_chars;
   const failures: string[] = [];
 
   // Check: not JSON-looking
@@ -374,12 +379,12 @@ function localCraftingChecks(
     }
   }
 
-  // Check: length 40–280
+  // Check: length — use policy-based hard limit (Phase S1.2)
   if (craftedText.length < 40) {
     failures.push('too_short_under_40');
   }
-  if (craftedText.length > 280) {
-    failures.push('too_long_over_280');
+  if (craftedText.length > hardLimit) {
+    failures.push('too_long_over_hard_limit');
   }
 
   return failures;
@@ -413,7 +418,8 @@ async function craftFromBrief(
     publishability_score: number;
   },
   originalityContext?: OriginalityContext | null,
-  memorySection?: string
+  memorySection?: string,
+  postLengthPolicy?: PostLengthPolicy | null
 ): Promise<CraftedCandidate[]> {
   const sourceText = String(opp.source_text || opp.text || '').slice(0, 400);
   const sourceAuthor = String(opp.source_author || opp.author || opp.username || '');
@@ -432,6 +438,10 @@ async function craftFromBrief(
     source_text_preview: sourceText.slice(0, 150),
     twist_type_used: undefined, // Will be determined by model
   });
+
+  // Phase S1.2: Build post length instruction from policy
+  const effectivePolicy = postLengthPolicy || getDefaultPostLengthPolicy();
+  const postLengthInstruction = buildPostLengthInstruction(effectivePolicy);
 
   // Phase 2G.3: Updated JSON schema for 3 candidate variants
   const systemPrompt = `You are a content crafter for @30piq, an X account focused on AI, creators, internet culture, productivity, skills, and modern work.
@@ -456,7 +466,7 @@ Your task: Craft THREE tweet variants that STRICTLY follow the Opportunity Brief
 
 8. Sound analytical, specific, and calm — not a hype account, not a content mill, not a life coach.
 
-9. Keep each crafted_text under 280 characters. Each must be at least 40 characters.
+9. ${postLengthInstruction} Each must be at least 40 characters.
 
 10. English ONLY.
 
@@ -573,14 +583,14 @@ Return a JSON object with a "candidates" array containing brief_faithful, signat
       // New schema — process each candidate in the array
       const candidates: CraftedCandidate[] = [];
       for (const rawCandidate of parsed.candidates) {
-        const processed = processCandidateVariant(rawCandidate, brief, sourceText, originalityContext);
+        const processed = processCandidateVariant(rawCandidate, brief, sourceText, originalityContext, undefined, effectivePolicy);
         candidates.push(processed);
       }
       return candidates;
     } else if (hasOldSchema) {
       // Old schema — backward compatibility: wrap as single "legacy" candidate
       console.log('[craftFromBrief] Model returned old single-candidate schema, wrapping as legacy candidate');
-      const processed = processCandidateVariant(parsed, brief, sourceText, originalityContext, 'legacy');
+      const processed = processCandidateVariant(parsed, brief, sourceText, originalityContext, 'legacy', effectivePolicy);
       return [processed];
     } else {
       // Neither schema — parse failure
@@ -621,7 +631,8 @@ function processCandidateVariant(
   brief: Record<string, any>,
   sourceText: string,
   originalityContext?: OriginalityContext | null,
-  overrideVariantType?: string
+  overrideVariantType?: string,
+  postLengthPolicy?: PostLengthPolicy | null
 ): CraftedCandidate {
   const variantType = overrideVariantType ||
     (typeof rawCandidate.variant_type === 'string' ? rawCandidate.variant_type : 'legacy');
@@ -681,7 +692,7 @@ function processCandidateVariant(
     required_context: brief.required_context || [],
   };
   const alignment = validateBriefAlignment(crafted, briefForValidation, sourceText);
-  const localFailures = localCraftingChecks(crafted, { do_not_claim: briefForValidation.do_not_claim }, sourceText);
+  const localFailures = localCraftingChecks(crafted, { do_not_claim: briefForValidation.do_not_claim }, sourceText, postLengthPolicy);
 
   // Phase 2G: Parse originality output fields from model response
   const originalityOutput = validateOriginalityOutput(rawCandidate);
@@ -786,6 +797,11 @@ async function processLoadAccountState(task: PipelineTaskRow): Promise<TaskResul
     const { getXUserByUsername } = await import('./x');
     const xSnapshot = await getXUserByUsername(username);
 
+    // Phase S1.2: Load or default post_length_policy for the account
+    // If the account has a stored policy, normalize it. Otherwise use defaults.
+    const storedPolicy = task.payload.post_length_policy || null;
+    const postLengthPolicy = normalizePostLengthPolicy(storedPolicy);
+
     // Store in account_state
     const supabase = supabaseAdmin();
     await supabase.from('account_state').upsert({
@@ -804,7 +820,9 @@ async function processLoadAccountState(task: PipelineTaskRow): Promise<TaskResul
         username,
         followers: xSnapshot.followers_count || 0,
         following: xSnapshot.following_count || 0,
-        tweets: xSnapshot.tweet_count || 0
+        tweets: xSnapshot.tweet_count || 0,
+        // Phase S1.2: Include post_length_policy for downstream tasks
+        post_length_policy: postLengthPolicy,
       }
     };
   } catch (err: any) {
@@ -1338,7 +1356,8 @@ async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskRe
           }
 
           // Phase 2G.3: craftFromBrief now returns CraftedCandidate[]
-          const allCandidates = await craftFromBrief(opp, brief, originalityCtx, memorySection || undefined);
+          // Phase S1.2: Pass post_length_policy so craft prompt includes length limits
+          const allCandidates = await craftFromBrief(opp, brief, originalityCtx, memorySection || undefined, undefined);
 
           // Track multi-candidate diagnostics
           multiCandidateGenerationCount += allCandidates.length;
@@ -2514,6 +2533,11 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
         deduped_opportunity_judged_count: judgedOpportunities.length,
         // Phase M1: Structured memory diagnostics (polish)
         polish_memory_used_count: polishMemoryUsedCount,
+        // Phase S1.2: Post length policy diagnostics (opportunity_judge)
+        candidate_over_limit_count: judgedOpportunities.filter(o => (o.crafted_text || '').length > getDefaultPostLengthPolicy().hard_limit_chars).length,
+        polish_over_limit_count: polishOutcomes.filter(o => o.polish_failed_reason === 'polished_text_over_hard_limit').length,
+        polish_shorten_attempted_count: polishOutcomes.filter(o => o._shorten_attempted).length,
+        polish_shorten_success_count: polishOutcomes.filter(o => o._shorten_attempted && o._shorten_applied).length,
       }
     };
   } catch (err: any) {
@@ -2565,9 +2589,29 @@ async function processPublishGate(task: PipelineTaskRow): Promise<TaskResult> {
     }
 
     const { filterPublishableOpportunities } = await import('./content-policy');
+
+    // Phase S1.2: Load post_length_policy from load_account_state results
+    let publishGatePolicy = getDefaultPostLengthPolicy();
+    try {
+      const { data: accountTask } = await supabase
+        .from('pipeline_tasks')
+        .select('result')
+        .eq('run_id', runId)
+        .eq('task_type', 'load_account_state')
+        .eq('status', 'completed')
+        .maybeSingle();
+      if (accountTask?.result?.post_length_policy) {
+        publishGatePolicy = normalizePostLengthPolicy(accountTask.result.post_length_policy);
+      }
+    } catch (policyErr: any) {
+      console.warn(`[pipeline-worker] publish_gate: failed to load post_length_policy, using defaults: ${(policyErr?.message || 'unknown').slice(0, 200)}`);
+    }
+
     // Phase S1.1: Enable freshness gate with default settings
+    // Phase S1.2: Pass hard limit from post_length_policy
     const publishGate = filterPublishableOpportunities(opportunities, {
       enableFreshnessGate: true,
+      hardLimitChars: publishGatePolicy.hard_limit_chars,
     });
 
     // Phase 2A: Persist rejections to rejection_ledger
@@ -2606,6 +2650,11 @@ async function processPublishGate(task: PipelineTaskRow): Promise<TaskResult> {
         // Phase S1.1: Freshness gate diagnostics
         _freshness_stats: freshnessStats,
         _freshness_rejection_reasons: freshnessRejectionReasons,
+        // Phase S1.2: Post length policy diagnostics
+        post_length_policy_hard_limit_chars: publishGatePolicy.hard_limit_chars,
+        post_length_policy_target_chars: publishGatePolicy.target_chars,
+        post_length_policy_allow_longform: publishGatePolicy.allow_longform,
+        publish_gate_length_rejected_count: publishGate.rejected.filter((r: any) => r.reason === 'post_over_hard_limit').length,
       }
     };
   } catch (err: any) {

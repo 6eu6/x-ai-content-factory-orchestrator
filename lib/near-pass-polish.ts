@@ -21,6 +21,7 @@ import { callModel, parseModelJson, TaskType } from './model-router';
 import { judgeCraftedCandidate, type JudgeResult } from './opportunity-judge';
 import { buildOriginalityPromptSection } from './originality-context';
 import { buildSignatureVoiceSection, validateSignatureVoice, type SignatureVoiceDiagnostics } from './signature-voice';
+import { validatePostLength, buildPostLengthInstruction, buildShortenInstruction, type PostLengthPolicy, getDefaultPostLengthPolicy } from './post-length-policy';
 
 // ═══ Types ═══
 
@@ -49,6 +50,8 @@ export type PolishInput = {
   originality_context?: import('./originality-context').OriginalityContext | null;
   /** Phase M1: Optional structured memory section for memory-informed polish */
   learning_memory_section?: string;
+  /** Phase S1.2: Optional post length policy for hard cap enforcement */
+  post_length_policy?: PostLengthPolicy | null;
 };
 
 export type PolishResult = {
@@ -87,6 +90,10 @@ export type PolishOutcome = {
   _brief_locked_polish_before_judge?: JudgeResult | null;
   _brief_locked_polish_after_judge?: JudgeResult | null;
   _brief_locked_polish_reason?: string;
+  /** Phase S1.2: Shorten pass diagnostics */
+  _shorten_attempted?: boolean;
+  _shorten_applied?: boolean;
+  _shorten_text?: string | null;
 };
 
 export type NearPassDiagnostics = {
@@ -189,6 +196,10 @@ INSTRUCTION: Improve originality/signature voice WITHOUT losing the recommended 
   // Phase M1: Add learning memory section if available
   const memorySection = input.learning_memory_section || '';
 
+  // Phase S1.2: Build post length instruction from policy
+  const policy = input.post_length_policy || getDefaultPostLengthPolicy();
+  const postLengthInstruction = buildPostLengthInstruction(policy);
+
   // Phase 2G: Add sharper originality instruction when originality is the failure
   const originalityInstruction = isOriginalityFailure
     ? `\n\nCRITICAL: This tweet failed because of LOW ORIGINALITY. Do NOT merely rephrase or slightly adjust wording. Add a SHARPER FRAME using one of the suggested twist types. The frame must change the THINKING STRUCTURE, not just the words. For example, if the source says "X is growing", an original frame is not "X is growing fast" but "the cost of ignoring X is now higher than adopting X" (inversion) or "X works because it eliminates step Y from the old workflow" (mechanism).`
@@ -206,7 +217,7 @@ STRICT RULES:
 - Do NOT invent personal experience ("I tried", "I found", "my experience", "I've been using").
 - Do NOT add generic hype ("game changer", "this is huge", "you need to", "the future of").
 - Do NOT wrap output in JSON or markdown.
-- Keep it under 280 characters.
+- ${postLengthInstruction}
 - Do NOT claim: ${doNotClaim || 'none'}
 
 IMPROVEMENT TARGETS (only these dimensions failed):
@@ -238,7 +249,7 @@ FAILURE REASONS: ${failureReasons}${originalitySection}${signatureVoiceSection}$
 
 Return JSON only:
 {
-  "polished_text": "the improved tweet text, under 280 chars, no JSON wrapper, no markdown",
+  "polished_text": "the improved tweet text, ${postLengthInstruction.toLowerCase()}, no JSON wrapper, no markdown",
   "what_changed": "short explanation of what you improved",
   "targeted_failures": ["originality_score", "usefulness_score"],
   "claims_safety_checked": true,
@@ -280,7 +291,7 @@ const JSON_LOOKING_RE = /^\s*[\{\[]|"(?:tweet|text|quote)"\s*:/i;
  * Checks:
  * - parse JSON strictly
  * - polished_text exists
- * - length 40–280
+ * - length 40–hard_limit (Phase S1.2: uses policy instead of hardcoded 280)
  * - not JSON-looking
  * - not generic praise/hype
  * - no invented personal experience
@@ -292,8 +303,11 @@ export function validatePolishedText(
   polishedText: string,
   doNotClaim: string[],
   recommendedAngle?: string,
-  originalBriefAlignmentScore?: number
+  originalBriefAlignmentScore?: number,
+  postLengthPolicy?: PostLengthPolicy | null
 ): { valid: boolean; reason?: string } {
+  const policy = postLengthPolicy || getDefaultPostLengthPolicy();
+
   // Must exist and be non-empty
   if (!polishedText || typeof polishedText !== 'string') {
     return { valid: false, reason: 'polished_text_missing_or_empty' };
@@ -301,12 +315,12 @@ export function validatePolishedText(
 
   const trimmed = polishedText.trim();
 
-  // Length check: 40–280
+  // Length check: 40–hard_limit (Phase S1.2: policy-based)
   if (trimmed.length < 40) {
     return { valid: false, reason: 'polished_text_too_short' };
   }
-  if (trimmed.length > 280) {
-    return { valid: false, reason: 'polished_text_over_280_chars' };
+  if (trimmed.length > policy.hard_limit_chars) {
+    return { valid: false, reason: 'polished_text_over_hard_limit' };
   }
 
   // Not JSON-looking
@@ -385,6 +399,107 @@ export function validatePolishedText(
   return { valid: true };
 }
 
+// ═══ Phase S1.2: Controlled Shorten Pass ═══
+
+/**
+ * Attempt ONE controlled shorten pass on text that exceeds the hard limit.
+ *
+ * The shorten pass:
+ * - Preserves the original brief, evidence, and angle
+ * - Does NOT invent new claims
+ * - Uses the same AI model route as near-pass polish
+ * - Returns the shortened text if successful, or a failure result
+ *
+ * This is only called when polished text is over the hard_limit_chars.
+ */
+async function attemptControlledShorten(
+  text: string,
+  brief: {
+    source_summary?: string;
+    recommended_angle?: string;
+    angle?: string;
+    why_it_matters?: string;
+    required_context?: string[];
+    do_not_claim?: string[];
+  },
+  policy: PostLengthPolicy,
+  doNotClaim: string[],
+  recommendedAngle?: string,
+  originalBriefAlignmentScore?: number
+): Promise<{ success: boolean; text: string | null }> {
+  const shortenInstruction = buildShortenInstruction(policy, text.length);
+  const recommendedAngleStr = brief.recommended_angle || brief.angle || '';
+  const doNotClaimStr = (doNotClaim || []).join(', ');
+
+  try {
+    const messages = [
+      {
+        role: 'system' as const,
+        content: `You are a tweet shortener for @30piq. A tweet exceeds the character limit and must be shortened.
+
+${shortenInstruction}
+
+RULES:
+- Preserve the original recommended angle: "${recommendedAngleStr}"
+- Preserve the key insight and evidence
+- Remove filler words, redundancy, or less important details
+- Do NOT change the meaning
+- Do NOT invent new claims
+- Do NOT add personal experience
+- Do NOT add generic hype
+- Do NOT wrap output in JSON or markdown
+
+Return JSON only:
+{
+  "shortened_text": "the shortened tweet, under ${policy.hard_limit_chars} characters",
+  "chars_removed": number,
+  "what_was_removed": "brief description of what was shortened"
+}`,
+      },
+      {
+        role: 'user' as const,
+        content: `Shorten this tweet:\n\n"${text}"`,
+      },
+    ];
+
+    const response = await callModel('near_pass_polish' as TaskType, messages, {
+      temperature: 0.1,
+      max_tokens: 400,
+      response_format: { type: 'json_object' },
+    });
+
+    const parsed = parseModelJson(response);
+    if (!parsed || typeof parsed !== 'string' && typeof parsed !== 'object') {
+      return { success: false, text: null };
+    }
+
+    const shortenedText = parsed.shortened_text || parsed.text;
+    if (!shortenedText || typeof shortenedText !== 'string') {
+      return { success: false, text: null };
+    }
+
+    const trimmed = shortenedText.trim();
+
+    // Validate the shortened text is within limit
+    const lengthValidation = validatePostLength(trimmed, policy);
+    if (!lengthValidation.ok && lengthValidation.reason === 'post_over_hard_limit') {
+      // Still over limit after shorten — fail
+      return { success: false, text: trimmed };
+    }
+
+    // Validate the shortened text passes other polish checks
+    const validation = validatePolishedText(trimmed, doNotClaim, recommendedAngle, originalBriefAlignmentScore, policy);
+    if (!validation.valid) {
+      return { success: false, text: trimmed };
+    }
+
+    return { success: true, text: trimmed };
+  } catch (err: any) {
+    console.warn(`[near-pass-polish] Shorten attempt failed: ${(err?.message || 'unknown').slice(0, 200)}`);
+    return { success: false, text: null };
+  }
+}
+
 // ═══ Core Polish Logic ═══
 
 /**
@@ -437,7 +552,7 @@ export async function attemptNearPassPolish(
       };
     }
 
-    const polishedText = parsed.polished_text;
+    let polishedText = parsed.polished_text;
     if (!polishedText || typeof polishedText !== 'string') {
       return {
         ...emptyOutcome,
@@ -463,17 +578,86 @@ export async function attemptNearPassPolish(
       if (operatorTakeaway) signatureVoiceDiag._operator_takeaway = operatorTakeaway;
     }
 
-    // Step 3: Validate polished text locally
+    // Step 3: Validate polished text locally (Phase S1.2: policy-based length check)
     const doNotClaim = input.brief?.do_not_claim || [];
     const recommendedAngle = input.brief?.recommended_angle || input.brief?.angle;
+    const policy = input.post_length_policy || getDefaultPostLengthPolicy();
     const validation = validatePolishedText(
       polishedText,
       doNotClaim,
       recommendedAngle,
-      input.judge_scores.brief_alignment_score
+      input.judge_scores.brief_alignment_score,
+      policy
     );
 
-    if (!validation.valid) {
+    // Phase S1.2: If over hard limit, try ONE controlled shorten pass
+    if (!validation.valid && validation.reason === 'polished_text_over_hard_limit') {
+      try {
+        const shortenResult = await attemptControlledShorten(
+          polishedText,
+          input.brief || {},
+          policy,
+          doNotClaim,
+          recommendedAngle,
+          input.judge_scores.brief_alignment_score
+        );
+
+        if (shortenResult.success && shortenResult.text) {
+          // Shortened successfully — use the shortened text instead
+          polishedText = shortenResult.text;
+          // Re-validate the shortened text
+          const revalidation = validatePolishedText(
+            polishedText,
+            doNotClaim,
+            recommendedAngle,
+            input.judge_scores.brief_alignment_score,
+            policy
+          );
+          if (!revalidation.valid) {
+            return {
+              ...emptyOutcome,
+              attempted: true,
+              polished_text: polishedText,
+              polish_failed_reason: revalidation.reason || 'polished_text_over_hard_limit',
+              what_changed: whatChanged + '; shorten attempted but revalidation failed',
+              targeted_failures: targetedFailures,
+              signature_voice_diagnostics: signatureVoiceDiag,
+              _shorten_attempted: true,
+              _shorten_applied: false,
+              _shorten_text: shortenResult.text,
+            };
+          }
+          // Continue with shortened text for re-judging below
+        } else {
+          return {
+            ...emptyOutcome,
+            attempted: true,
+            polished_text: polishedText,
+            polish_failed_reason: 'polished_text_over_hard_limit',
+            what_changed: whatChanged,
+            targeted_failures: targetedFailures,
+            signature_voice_diagnostics: signatureVoiceDiag,
+            _shorten_attempted: true,
+            _shorten_applied: false,
+            _shorten_text: null,
+          };
+        }
+      } catch (shortenErr: any) {
+        console.warn(`[near-pass-polish] Controlled shorten failed: ${(shortenErr?.message || 'unknown').slice(0, 200)}`);
+        return {
+          ...emptyOutcome,
+          attempted: true,
+          polished_text: polishedText,
+          polish_failed_reason: 'polished_text_over_hard_limit',
+          what_changed: whatChanged,
+          targeted_failures: targetedFailures,
+          signature_voice_diagnostics: signatureVoiceDiag,
+          _shorten_attempted: true,
+          _shorten_applied: false,
+          _shorten_text: null,
+        };
+      }
+    } else if (!validation.valid) {
       return {
         ...emptyOutcome,
         attempted: true,
@@ -693,7 +877,7 @@ STRICT RULES:
 - ONLY adjust brief alignment. Do NOT change the originality, evidence safety, or signature voice.
 - Preserve the existing signature frame as much as possible.
 - The recommended angle MUST be clearly expressed after your edit.
-- Keep it under 280 characters.
+- Keep it under ${getDefaultPostLengthPolicy().hard_limit_chars} characters.
 - Do NOT invent personal experience.
 - Do NOT add generic hype or unsupported claims.
 - Do NOT add hashtags or emojis.
@@ -721,7 +905,7 @@ CURRENT SCORES:
 
 Return JSON only:
 {
-  "polished_text": "the micro-repaired tweet, under 280 chars",
+  "polished_text": "the micro-repaired tweet, under ${getDefaultPostLengthPolicy().hard_limit_chars} chars",
   "what_changed": "what you adjusted for brief alignment",
   "claims_safety_checked": true
 }`,
@@ -820,7 +1004,8 @@ export async function attemptBriefLockedMicroRepair(
       trimmedRepair,
       doNotClaim,
       brief?.recommended_angle || brief?.angle,
-      afterJudge.brief_alignment_score
+      afterJudge.brief_alignment_score,
+      null // micro-repair uses default policy
     );
 
     if (!validation.valid) {

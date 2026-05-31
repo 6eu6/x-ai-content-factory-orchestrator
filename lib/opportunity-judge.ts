@@ -82,8 +82,12 @@ const NEAR_PASS_MIN_NICHE_FIT = 7;
 /** Minimum crafted_text length for near-pass eligibility */
 const NEAR_PASS_MIN_TEXT_LENGTH = 40;
 
-/** Maximum crafted_text length for near-pass eligibility */
-const NEAR_PASS_MAX_TEXT_LENGTH = 280;
+/** Maximum crafted_text length for near-pass eligibility.
+ * Phase S1.2: Increased to 400 to allow over-limit text to be polished/shortened.
+ * Text over the hard_limit_chars can be shortened by the polish/shorten pass.
+ * Text over 400 chars is unlikely to be salvageable by shortening alone.
+ */
+const NEAR_PASS_MAX_TEXT_LENGTH = 400;
 
 /** Failure reasons that are NOT fixable by polish */
 const UNFIXABLE_FAILURE_REASONS = new Set([
@@ -107,7 +111,7 @@ const LOW_EVIDENCE_SAFETY_PREFIX = 'evidence_safety_score';
  * - niche_fit_score >= 7
  * - generic_bait_flag = false
  * - unsupported_claim_flag = false
- * - crafted_text length between 40 and 280
+ * - crafted_text length between 40 and 400 (Phase S1.2: allows over-limit text to be shortened)
  * - has _brief or useful brief context
  * - failure reasons are all fixable (originality, usefulness, brief_alignment, final_score)
  * - NOT fixable if: unsupported_claim_flag, generic_bait_flag, malformed_json_output,

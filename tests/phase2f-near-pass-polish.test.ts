@@ -198,17 +198,29 @@ describe('Near-Pass Eligibility', () => {
     expect(isNearPass(judgeResult, 'Short', brief)).toBe(false);
   });
 
-  // ═══ Test 9: Candidate with text over 280 chars is NOT near-pass ═══
+  // ═══ Test 9: Candidate with text over 400 chars is NOT near-pass (Phase S1.2: raised from 280 to 400) ═══
 
-  it('rejects candidate with crafted_text over 280 chars', () => {
+  it('rejects candidate with crafted_text over 400 chars', () => {
     const judgeResult = makeJudgeResult({
       final_candidate_score: 7,
       failure_reasons: ['originality_score_7_below_7.8'],
     });
 
-    const longText = 'A'.repeat(300);
+    const longText = 'A'.repeat(410);
     const brief = makeBrief();
     expect(isNearPass(judgeResult, longText, brief)).toBe(false);
+  });
+
+  // Phase S1.2: Text between 280 and 400 chars IS now near-pass eligible (can be shortened)
+  it('accepts candidate with crafted_text between 280 and 400 chars as near-pass', () => {
+    const judgeResult = makeJudgeResult({
+      final_candidate_score: 7,
+      failure_reasons: ['originality_score_7_below_7.8'],
+    });
+
+    const overLimitText = 'A'.repeat(300);
+    const brief = makeBrief();
+    expect(isNearPass(judgeResult, overLimitText, brief)).toBe(true);
   });
 
   // ═══ Test 10: Candidate with niche_fit below 7 is NOT near-pass ═══
@@ -328,14 +340,15 @@ describe('Polished Text Validation', () => {
     expect(result.reason).toBe('polished_text_has_invented_experience');
   });
 
-  // ═══ Test 15: Polished text over 280 chars is rejected ═══
+  // ═══ Test 15: Polished text over 280 chars is rejected (Phase S1.2: policy-based) ═══
 
   it('rejects polished text over 280 characters', () => {
     const longText = 'A'.repeat(300);
     const result = validatePolishedText(longText, [], undefined, 7);
 
     expect(result.valid).toBe(false);
-    expect(result.reason).toBe('polished_text_over_280_chars');
+    // Phase S1.2: Changed from 'polished_text_over_280_chars' to 'polished_text_over_hard_limit'
+    expect(result.reason).toBe('polished_text_over_hard_limit');
   });
 
   // ═══ Test 16: Polished text under 40 chars is rejected ═══
@@ -536,7 +549,7 @@ describe('Threshold Integrity (unchanged from Phase 2D)', () => {
     expect(NEAR_PASS_THRESHOLDS.NEAR_PASS_MIN_EVIDENCE_SAFETY).toBe(7.5);
     expect(NEAR_PASS_THRESHOLDS.NEAR_PASS_MIN_NICHE_FIT).toBe(7);
     expect(NEAR_PASS_THRESHOLDS.NEAR_PASS_MIN_TEXT_LENGTH).toBe(40);
-    expect(NEAR_PASS_THRESHOLDS.NEAR_PASS_MAX_TEXT_LENGTH).toBe(280);
+    expect(NEAR_PASS_THRESHOLDS.NEAR_PASS_MAX_TEXT_LENGTH).toBe(400); // Phase S1.2: increased from 280 to allow over-limit text to be shortened
   });
 
   // ═══ Test 26: Model routing existing tasks unchanged ═══

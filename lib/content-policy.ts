@@ -428,10 +428,13 @@ export function filterPublishableOpportunities<T extends {
 }>(opportunities: T[] = [], options?: {
   referenceTime?: Date;
   enableFreshnessGate?: boolean;
+  /** Phase S1.2: Hard limit for post characters. Defaults to 280 if not specified. */
+  hardLimitChars?: number;
 }): PublishPolicyResult<T> & { freshnessStats: FreshnessGateStats } {
   const accepted: T[] = [];
   const rejected: PublishPolicyRejection[] = [];
   const enableFreshness = options?.enableFreshnessGate !== false; // default true
+  const hardLimitChars = options?.hardLimitChars ?? 280;
 
   const freshnessStats: FreshnessGateStats = {
     freshness_checked_count: 0,
@@ -459,6 +462,14 @@ export function filterPublishableOpportunities<T extends {
 
     if ((type === 'reply' || type === 'quote') && !isValidXStatusUrl(opp?.source_tweet_url || '')) {
       rejected.push({ index, type, reason: 'invalid_source_tweet_url', preview });
+      return;
+    }
+
+    // ═══ Phase S1.2: Post Length Policy — Hard Limit Enforcement ═══
+    // Even if judge scores pass, any text over hard_limit_chars is rejected.
+    const craftedTextLength = String(opp?.crafted_text || '').trim().length;
+    if (craftedTextLength > hardLimitChars) {
+      rejected.push({ index, type, reason: 'post_over_hard_limit', preview });
       return;
     }
 
