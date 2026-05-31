@@ -224,6 +224,7 @@ describe('Phase 2C.2: rewriteForOriginality cleans JSON-wrapped rewrite output b
       source_tweet_url: 'https://x.com/user/status/456',
       shield_passed: true,
       shield_issues: [],
+      source_created_at: new Date().toISOString(),
     };
 
     const validGate = filterPublishableOpportunities([validOpp]);

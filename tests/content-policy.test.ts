@@ -181,7 +181,8 @@ describe('content-policy: filterPublishableOpportunities', () => {
         crafted_text: 'The best systems are the ones you actually follow through on. Start simple.',
         source_tweet_url: 'https://x.com/naval/status/1234567890',
         shield_passed: true,
-        shield_issues: []
+        shield_issues: [],
+        source_created_at: new Date().toISOString()
       }
     ]);
     expect(result.accepted).toHaveLength(1);
@@ -216,7 +217,7 @@ describe('content-policy: filterPublishableOpportunities', () => {
   it('mixed batch: accepts valid, rejects invalid', () => {
     const result = filterPublishableOpportunities([
       { type: 'quote', crafted_text: 'Arabic content هنا', shield_passed: true, shield_issues: [], source_tweet_url: 'https://x.com/a/status/1' },
-      { type: 'reply', crafted_text: 'Great insight on building systems.', shield_passed: true, shield_issues: [], source_tweet_url: 'https://x.com/naval/status/999' },
+      { type: 'reply', crafted_text: 'Great insight on building systems.', shield_passed: true, shield_issues: [], source_tweet_url: 'https://x.com/naval/status/999', source_created_at: new Date().toISOString() },
       { type: 'quote', crafted_text: 'Shield failed content', shield_passed: false, shield_issues: ['link'], source_tweet_url: 'https://x.com/b/status/2' },
     ]);
     expect(result.accepted).toHaveLength(1);

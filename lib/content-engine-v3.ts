@@ -84,6 +84,14 @@ export type ContentOpportunity = {
   discovery_reason?: string;
   source_quality_score?: number;
   account_source_quality?: number;
+  // Phase S1.1: source freshness — canonical source tweet timestamp
+  source_created_at?: string | null;
+  // Phase S1.1: freshness gate diagnostics (set by publish_gate)
+  source_age_hours?: number | null;
+  freshness_passed?: boolean;
+  freshness_rejection_reason?: string;
+  original_recommendation_type?: string;
+  downgraded_to_standalone?: boolean;
 };
 
 export type MediaFromTweet = {
@@ -1269,6 +1277,8 @@ async function discoverOpportunities(
           engagement_score: tweet.score || tweet.engagement_score,
           discovery_score: tweet.score || 0,
           discovery_reason: tweet.has_question ? 'question_sparks_discussion' : 'high_engagement',
+          // Phase S1.1: preserve source tweet timestamp
+          source_created_at: tweet.created_at || null,
         });
       }
     }
@@ -1298,6 +1308,8 @@ async function discoverOpportunities(
           engagement_score: tweet.score || tweet.engagement_score,
           discovery_score: tweet.score || 0,
           discovery_reason: 'valuable_tweet_reply',
+          // Phase S1.1: preserve source tweet timestamp
+          source_created_at: tweet.created_at || null,
         });
       }
     }

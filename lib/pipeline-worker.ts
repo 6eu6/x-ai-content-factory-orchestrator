@@ -2488,7 +2488,10 @@ async function processPublishGate(task: PipelineTaskRow): Promise<TaskResult> {
     }
 
     const { filterPublishableOpportunities } = await import('./content-policy');
-    const publishGate = filterPublishableOpportunities(opportunities);
+    // Phase S1.1: Enable freshness gate with default settings
+    const publishGate = filterPublishableOpportunities(opportunities, {
+      enableFreshnessGate: true,
+    });
 
     // Phase 2A: Persist rejections to rejection_ledger
     if (publishGate.rejected.length > 0) {
@@ -2504,6 +2507,17 @@ async function processPublishGate(task: PipelineTaskRow): Promise<TaskResult> {
       }
     }
 
+    // Phase S1.1: Include freshness diagnostics in result
+    const freshnessStats = publishGate.freshnessStats || {};
+    const freshnessRejectionReasons = publishGate.rejected
+      .filter((r: any) =>
+        r.reason === 'missing_source_created_at_for_reply' ||
+        r.reason === 'source_too_old_for_reply' ||
+        r.reason === 'missing_source_created_at_for_quote' ||
+        r.reason === 'source_too_old_for_quote'
+      )
+      .map((r: any) => r.reason);
+
     return {
       ok: true,
       result: {
@@ -2511,7 +2525,10 @@ async function processPublishGate(task: PipelineTaskRow): Promise<TaskResult> {
         rejected: publishGate.rejected.length,
         reasons: publishGate.rejected.slice(0, 5).map((r: any) => r.reason),
         _accepted: publishGate.accepted,
-        _rejected: publishGate.rejected
+        _rejected: publishGate.rejected,
+        // Phase S1.1: Freshness gate diagnostics
+        _freshness_stats: freshnessStats,
+        _freshness_rejection_reasons: freshnessRejectionReasons,
       }
     };
   } catch (err: any) {
@@ -2789,6 +2806,22 @@ async function processTelegramDelivery(task: PipelineTaskRow): Promise<TaskResul
       judge_failed_count: judgeTask.result.judge_failed_count ?? 0,
       judge_failure_reasons: judgeTask.result.judge_failure_reasons ?? {},
     } : null;
+
+    // Phase S1.1: Attach freshness diagnostics from publish_gate to decision for Telegram
+    const { data: gateTaskForFreshness } = await supabase
+      .from('pipeline_tasks')
+      .select('result')
+      .eq('run_id', runId)
+      .eq('task_type', 'publish_gate')
+      .eq('status', 'completed')
+      .maybeSingle();
+
+    if (gateTaskForFreshness?.result?._freshness_stats) {
+      if (!(decision as any)._publishGate) {
+        (decision as any)._publishGate = {};
+      }
+      (decision as any)._publishGate._freshnessStats = gateTaskForFreshness.result._freshness_stats;
+    }
 
     // Set the decision run ID
     const decisionRunId = persistTask?.result?.decision_run_id;

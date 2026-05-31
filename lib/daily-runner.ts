@@ -209,7 +209,9 @@ export async function runDailyPipeline(options: DailyPipelineOptions = {}): Prom
     await trackStep('enrich_done', rulePerformanceStats);
 
     // ═══ 4. Publish gate ═══
-    const publishGate = filterPublishableOpportunities(scanResult.opportunities || []);
+    const publishGate = filterPublishableOpportunities(scanResult.opportunities || [], {
+      enableFreshnessGate: true,
+    });
     await trackStep('publish_gate_done', {
       accepted: publishGate.accepted.length,
       rejected: publishGate.rejected.length,
@@ -475,6 +477,30 @@ export async function deliverDecisionToTelegram(
   }
 
   lines.push(`🛡️ بوابة النشر: ${gate.accepted} صالح | ${gate.rejected} مرفوض`);
+
+  // Phase S1.1: Freshness gate diagnostics in Telegram
+  const freshnessStats = (gate as any)._freshnessStats;
+  if (freshnessStats && freshnessStats.freshness_checked_count > 0) {
+    const freshParts: string[] = [];
+    freshParts.push(`تم فحص: ${freshnessStats.freshness_checked_count}`);
+    if (freshnessStats.freshness_rejected_count > 0) {
+      freshParts.push(`مرفوض حداثة: ${freshnessStats.freshness_rejected_count}`);
+    }
+    if (freshnessStats.freshness_missing_timestamp_count > 0) {
+      freshParts.push(`بدون طابع زمني: ${freshnessStats.freshness_missing_timestamp_count}`);
+    }
+    if (freshnessStats.freshness_too_old_reply_count > 0) {
+      freshParts.push(`رد قديم (+72س): ${freshnessStats.freshness_too_old_reply_count}`);
+    }
+    if (freshnessStats.freshness_too_old_quote_count > 0) {
+      freshParts.push(`اقتباس قديم (+7أيام): ${freshnessStats.freshness_too_old_quote_count}`);
+    }
+    if (freshnessStats.freshness_downgraded_to_standalone_count > 0) {
+      freshParts.push(`خُفِّض لمستقل: ${freshnessStats.freshness_downgraded_to_standalone_count}`);
+    }
+    lines.push(`⏰ حداثة: ${freshParts.join(' | ')}`);
+  }
+
   lines.push(`🎯 القرار: ${decision.selected.length} مرسل | ${decision.held.length} مؤجل | الحد الأدنى: ${decision.budget.min_final_score}`);
   lines.push(`━━━━━━━━━━━━━━━━━━━━`);
 
@@ -503,10 +529,19 @@ export async function deliverDecisionToTelegram(
     lines.push(`<i>Run: ${runShortId}</i>`);
     for (let i = 0; i < selected.length; i++) {
       const opp = selected[i];
-      const typeLabel = opp.type === 'quote' ? '📌 Quote' : opp.type === 'reply' ? '↩️ Reply' : opp.type === 'thread' ? '🧵 Thread' : '📰 Article';
+      const typeLabel = opp.type === 'quote' ? '📌 Quote' : opp.type === 'reply' ? '↩️ Reply' : opp.type === 'thread' ? '🧵 Thread' : opp.type === 'standalone' ? '📝 Standalone' : '📰 Article';
       const score = opp.decision_score;
       const recNum = i + 1;
-      lines.push(`\n<b>Rec #${recNum}</b> ${typeLabel} — <b>${score.final_score}/10</b>`);
+      // Phase S1.1: Show downgrade badge if applicable
+      const downgradeBadge = opp.downgraded_to_standalone
+        ? ` [⬇️ from ${opp.original_recommendation_type || '?'}]`
+        : '';
+      lines.push(`\n<b>Rec #${recNum}</b> ${typeLabel}${downgradeBadge} — <b>${score.final_score}/10</b>`);
+      // Phase S1.1: Show source age for reply/quote recommendations
+      if (opp.source_age_hours != null && (opp.type === 'reply' || opp.type === 'quote' || opp.original_recommendation_type === 'reply' || opp.original_recommendation_type === 'quote')) {
+        const ageLabel = opp.source_age_hours < 1 ? '<1h' : opp.source_age_hours < 24 ? `${Math.round(opp.source_age_hours)}h` : `${(opp.source_age_hours / 24).toFixed(1)}d`;
+        lines.push(`⏰ عمر المصدر: ${ageLabel}`);
+      }
       if (opp.source_tweet_url) lines.push(`🔗 ${opp.source_tweet_url}`);
       lines.push(`<i>${htmlEscape(shortText(opp.crafted_text, opp.type === 'thread' ? 900 : 280))}</i>`);
       lines.push(`💡 ${htmlEscape((score.reasons || []).slice(0, 3).join(' | '))}`);

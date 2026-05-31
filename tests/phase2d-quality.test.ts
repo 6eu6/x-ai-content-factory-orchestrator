@@ -443,6 +443,7 @@ describe('Phase 2D: publish_gate thresholds remain unchanged', () => {
       source_tweet_url: 'https://x.com/user/status/456',
       shield_passed: true,
       shield_issues: [],
+      source_created_at: new Date().toISOString(),
     };
     const gate = filterPublishableOpportunities([opp]);
     expect(gate.accepted.length).toBe(1);

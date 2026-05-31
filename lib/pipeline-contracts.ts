@@ -9,9 +9,16 @@
  * - After judge: opportunity.crafted_text must match judged best candidate
  * - After polish: opportunity.crafted_text must match polished_text if applied
  * - publish_gate must only use opportunity.crafted_text
+ *
+ * Phase S1.1: Source timestamp preservation rule:
+ * - source_created_at is the canonical timestamp field
+ * - Normalized from: created_at, tweet_created_at, published_at, createdAt, tweetCreatedAt
+ * - Must be preserved through ALL pipeline stages
+ * - Used by freshness gate in publish_gate
  */
 
 import type { CraftedCandidate } from './candidate-selector';
+import { normalizeSourceCreatedAt, computeSourceAgeHours } from './content-policy';
 
 // ═══ Types ═══
 
@@ -169,6 +176,13 @@ export function validateOpportunityForEnrich(opportunity: Record<string, any>): 
   }
 
   // Build normalized opportunity
+  // Phase S1.1: Normalize source_created_at from various possible field names
+  const sourceCreatedAt = normalizeSourceCreatedAt(opportunity);
+  if (!sourceCreatedAt && (type === 'reply' || type === 'quote')) {
+    warnings.push('source_created_at is missing for reply/quote — freshness gate will reject');
+  }
+  const sourceAgeHours = computeSourceAgeHours(sourceCreatedAt);
+
   const normalized: Record<string, any> = {
     ...opportunity,
     crafted_text: text || safeString(opportunity, 'crafted_text'),
@@ -176,6 +190,9 @@ export function validateOpportunityForEnrich(opportunity: Record<string, any>): 
     type: type,
     shield_passed: safeBoolean(opportunity, 'shield_passed', true),
     shield_issues: safeArray(opportunity, 'shield_issues'),
+    // Phase S1.1: Preserve canonical source timestamp
+    source_created_at: sourceCreatedAt,
+    source_age_hours: sourceAgeHours,
     // Preserve _brief if present
     ...(opportunity._brief ? { _brief: opportunity._brief } : {}),
     // Preserve _selected_candidates if present
@@ -260,12 +277,20 @@ export function validateOpportunityForJudge(opportunity: Record<string, any>): V
   }
 
   // Build normalized
+  // Phase S1.1: Normalize source_created_at
+  const sourceCreatedAt = normalizeSourceCreatedAt(opportunity);
+  if (!sourceCreatedAt && (safeString(opportunity, 'type') === 'reply' || safeString(opportunity, 'type') === 'quote')) {
+    warnings.push('source_created_at is missing for reply/quote — freshness gate will reject');
+  }
+
   const normalized: Record<string, any> = {
     ...opportunity,
     crafted_text: text || safeString(opportunity, 'crafted_text'),
     shield_passed: safeBoolean(opportunity, 'shield_passed', true),
     shield_issues: safeArray(opportunity, 'shield_issues'),
     _brief: safeObject(opportunity, '_brief'),
+    // Phase S1.1: Preserve canonical source timestamp
+    source_created_at: sourceCreatedAt,
     ...(source === 'selected_candidate' ? { _official_text_source: 'selected_candidate' } : {}),
     ...(validCandidateCount > 0 ? { _valid_candidate_count: validCandidateCount } : {}),
     ...(source === 'none' || validCandidateCount === 0 && selectedCandidates.length > 0 ? {
@@ -401,11 +426,22 @@ export function validateOpportunityForPublishGate(opportunity: Record<string, an
     warnings.push('_selected_candidates present but _selected_candidate_text_applied is not set — official text may not have been applied');
   }
 
+  // Phase S1.1: Normalize source_created_at for freshness gate
+  const sourceCreatedAt = normalizeSourceCreatedAt(opportunity);
+  const sourceAgeHours = computeSourceAgeHours(sourceCreatedAt);
+  const oppType = safeString(opportunity, 'type');
+  if (!sourceCreatedAt && (oppType === 'reply' || oppType === 'quote')) {
+    warnings.push('source_created_at is missing for reply/quote — freshness gate will reject');
+  }
+
   const normalized: Record<string, any> = {
     ...opportunity,
     crafted_text: craftedText.trim(),
     shield_passed: shieldPassed,
     shield_issues: safeArray(opportunity, 'shield_issues'),
+    // Phase S1.1: Preserve canonical source timestamp for freshness gate
+    source_created_at: sourceCreatedAt,
+    source_age_hours: sourceAgeHours,
   };
 
   const valid = craftedText.trim().length > 0 && shieldPassed && (!judgeResult || judgeResult.passed);

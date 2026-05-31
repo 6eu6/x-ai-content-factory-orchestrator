@@ -693,6 +693,7 @@ describe('publish_gate thresholds remain unchanged (Phase 2C)', () => {
       source_tweet_url: 'https://x.com/user/status/123',
       shield_passed: true,
       shield_issues: [],
+      source_created_at: new Date().toISOString(),
     };
 
     const gate = filterPublishableOpportunities([validOpp]);

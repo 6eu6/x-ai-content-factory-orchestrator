@@ -437,6 +437,7 @@ describe('numeric claim sourced vs unsourced', () => {
       source_tweet_url: 'https://x.com/user/status/123',
       shield_passed: true,
       shield_issues: [],
+      source_created_at: new Date().toISOString(),
     };
 
     const gate = filterPublishableOpportunities([opp]);
@@ -454,6 +455,7 @@ describe('numeric claim sourced vs unsourced', () => {
       source_tweet_url: 'https://x.com/user/status/123',
       shield_passed: true,
       shield_issues: [],
+      source_created_at: new Date().toISOString(),
     };
 
     const gate = filterPublishableOpportunities([opp]);
@@ -701,6 +703,7 @@ describe('publish gate thresholds unchanged after numeric claim guard fix', () =
       source_tweet_url: 'https://x.com/user/status/123',
       shield_passed: true,
       shield_issues: [],
+      source_created_at: new Date().toISOString(),
     };
     const gate = filterPublishableOpportunities([opp]);
     expect(gate.accepted.length).toBe(1);
@@ -717,6 +720,7 @@ describe('publish gate thresholds unchanged after numeric claim guard fix', () =
       source_tweet_url: 'https://x.com/user/status/123',
       shield_passed: true,
       shield_issues: [],
+      source_created_at: new Date().toISOString(),
     };
     // publish gate accepts this (shield passed, English, right length)
     const gate = filterPublishableOpportunities([opp]);
