@@ -338,6 +338,24 @@ const ADJACENT_TOPIC_PATTERNS = [
     topic: 'social media behavior',
     requiredAngle: 'audience retention, attention economy, creator strategy, or distribution',
   },
+  // Phase S1.3 follow-up: Patterns for ALLOWED_ADJACENT_TOPICS that were declared
+  // but previously had no ADJACENT_TOPIC_PATTERNS entries, causing them to fall
+  // through to off-lens scoring instead of being recognized as adjacent with angle.
+  {
+    pattern: /\b(crypto|bitcoin|Ethereum|blockchain|DeFi|Web3|NFT|token|smart contract|DAO)\b/i,
+    topic: 'crypto/web3',
+    requiredAngle: 'product adoption, community behavior, incentive design, or token economics insight',
+  },
+  {
+    pattern: /\b(politics|election|policy|regulation|legislation|congress|senator|partisan|democrat|republican)\b/i,
+    topic: 'politics/policy',
+    requiredAngle: 'platform dynamics, information behavior, or policy impact on tech and work',
+  },
+  {
+    pattern: /\b(gaming|video game|esport|game design|game studio|Fortnite|Roblox|Minecraft|gamer|game mechanic|retention mechanic)\b/i,
+    topic: 'gaming',
+    requiredAngle: 'product design, community building, retention mechanics, or distribution insight',
+  },
 ];
 
 // ═══ Hard Rule Thresholds ═══

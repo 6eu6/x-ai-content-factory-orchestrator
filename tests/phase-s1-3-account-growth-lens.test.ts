@@ -353,3 +353,97 @@ describe('Phase S1.3: Guard Summary Diagnostics', () => {
     expect(result.summary.aligned).toBeGreaterThanOrEqual(1);
   });
 });
+
+// ═══ F. S1.3 Follow-up: Adjacent Topic Patterns for crypto/politics/gaming ═══
+
+describe('Phase S1.3 Follow-up: Adjacent Topic Pattern Coverage', () => {
+  // These tests verify that ALLOWED_ADJACENT_TOPICS in opportunity-intelligence.ts
+  // has corresponding ADJACENT_TOPIC_PATTERNS entries. Before the fix, crypto/web3,
+  // politics/policy, and gaming were declared in ALLOWED_ADJACENT_TOPICS but had
+  // no ADJACENT_TOPIC_PATTERNS entries, causing them to fall through to off-lens
+  // scoring instead of being recognized as adjacent with angle.
+
+  it('crypto community/incentive design topic is recognized as adjacent with angle (not blocked)', () => {
+    const result = scoreNicheAlignment({
+      crafted_text: 'Uniswap DAO governance shows how incentive design drives product adoption — community behavior patterns that any builder can apply to two-sided marketplaces',
+      type: 'standalone',
+    });
+    // Should have a transferable angle (incentive design, community behavior)
+    expect(result.transferable_angle_score).toBeGreaterThan(0);
+    // Should NOT be off-lens because there's a legitimate transferable angle
+    expect(result.niche_alignment_score).toBeGreaterThanOrEqual(4);
+  });
+
+  it('pure crypto price speculation is still rejected', () => {
+    const result = scoreNicheAlignment({
+      crafted_text: 'Bitcoin going to 100k, buy the dip, Ethereum mooning, DeFi gains are insane right now',
+      type: 'standalone',
+    });
+    expect(result.is_off_niche).toBe(true);
+    expect(result.niche_alignment_score).toBeLessThan(4);
+  });
+
+  it('politics with platform/information behavior insight is recognized as adjacent', () => {
+    const result = scoreNicheAlignment({
+      crafted_text: 'How platform algorithms amplify partisan content — the information behavior dynamics that shape what millions see, and what builders should understand about distribution',
+      type: 'standalone',
+    });
+    // Should have a transferable angle (platform dynamics, information behavior)
+    expect(result.transferable_angle_score).toBeGreaterThan(0);
+    expect(result.niche_alignment_score).toBeGreaterThanOrEqual(4);
+  });
+
+  it('partisan political ragebait is still rejected', () => {
+    const result = scoreNicheAlignment({
+      crafted_text: 'Democrats are destroying this country, the election was stolen, partisan politics is corrupt',
+      type: 'standalone',
+    });
+    expect(result.is_off_niche).toBe(true);
+    expect(result.niche_alignment_score).toBeLessThan(4);
+  });
+
+  it('gaming product design/retention mechanics is recognized as adjacent', () => {
+    const result = scoreNicheAlignment({
+      crafted_text: 'Fortnite retention mechanics reveal how game design creates habit loops — product builders can apply the same community building and distribution insights',
+      type: 'standalone',
+    });
+    // Should have a transferable angle (product design, retention, community)
+    expect(result.transferable_angle_score).toBeGreaterThan(0);
+    expect(result.niche_alignment_score).toBeGreaterThanOrEqual(4);
+  });
+
+  it('pure gaming commentary is still rejected', () => {
+    const result = scoreNicheAlignment({
+      crafted_text: 'This new gaming release is so fun, Minecraft and Fortnite updates are amazing, been playing all day with my gamer friends',
+      type: 'standalone',
+    });
+    expect(result.is_off_niche).toBe(true);
+    expect(result.niche_alignment_score).toBeLessThan(4);
+  });
+
+  it('forced AI angle on crypto topic is flagged', () => {
+    const result = scoreNicheAlignment({
+      crafted_text: 'Bitcoin price surge means AI will transform productivity — what this crypto rally means for AI tools',
+      type: 'standalone',
+    });
+    expect(result.forced_angle_flag).toBe(true);
+    // Forced angle + off-lens crypto = very low score
+    expect(result.niche_alignment_score).toBeLessThan(5);
+  });
+
+  it('forced AI angle on gaming topic is flagged', () => {
+    const result = scoreNicheAlignment({
+      crafted_text: 'This game shows why AI agents will change gaming forever — the AI lesson from this esports tournament',
+      type: 'standalone',
+    });
+    expect(result.forced_angle_flag).toBe(true);
+  });
+
+  it('forced AI angle on politics topic is flagged', () => {
+    const result = scoreNicheAlignment({
+      crafted_text: 'This election shows why AI will change politics — what AI means for democracy and productivity',
+      type: 'standalone',
+    });
+    expect(result.forced_angle_flag).toBe(true);
+  });
+});
