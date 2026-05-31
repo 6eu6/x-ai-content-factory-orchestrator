@@ -83,13 +83,21 @@ export type OpportunityBrief = {
 
 export type RejectionDebug = {
   source_author: string;
+  source_tweet_url: string;
   source_text_preview: string;
   rejection_reason: string;
+  blocked_topic_label?: string;
+  why_rejected?: string;
+  niche_adjacent?: boolean;
+  could_convert_to_operator_heuristic?: boolean;
+  what_was_missing?: string;
   publishability_score: number;
   originality_potential_score: number;
   usefulness_score: number;
   niche_fit_score: number;
+  content_format?: string;
   recommended_angle: string;
+  recommended_angle_preview?: string;
   // Phase 2D.1: Parse failure diagnostics
   parse_failed?: boolean;
   intelligence_error_type?: 'model_call_failed' | 'json_parse_failed' | 'missing_required_fields';
@@ -136,6 +144,11 @@ export type IntelligenceSummary = {
   rescued_opportunity_count: number;
   rescue_reasons: string[];
   sampled_rescue_debug: RescueDebug[];
+  // Phase 2E.3: Discovery rejection transparency
+  rejection_debug_available: boolean;
+  blocked_topic_examples: RejectionDebug[];
+  generic_only_examples: RejectionDebug[];
+  low_originality_examples: RejectionDebug[];
 };
 
 // ═══ Niche Model Constants ═══
@@ -405,10 +418,12 @@ export function quickNicheFitScore(text: string): {
   score: number;
   matched_topics: string[];
   blocked: boolean;
+  blocked_topic_labels: string[];
   adjacent_with_angle: boolean;
+  adjacent_matches: Array<{ topic: string; requiredAngle: string }>;
 } {
   if (!text || text.length < 10) {
-    return { score: 1, matched_topics: [], blocked: false, adjacent_with_angle: false };
+    return { score: 1, matched_topics: [], blocked: false, blocked_topic_labels: [], adjacent_with_angle: false, adjacent_matches: [] };
   }
 
   const matchedTopics: string[] = [];
@@ -511,7 +526,9 @@ export function quickNicheFitScore(text: string): {
     score,
     matched_topics: matchedTopics,
     blocked,
+    blocked_topic_labels: blockedTopics,
     adjacent_with_angle: adjacentWithAngle,
+    adjacent_matches: adjacentMatches,
   };
 }
 
@@ -589,6 +606,74 @@ export function determineRejectionReason(brief: OpportunityBrief): string {
 
   // Default fallback: low_niche_fit (not weak_source)
   return 'low_niche_fit';
+}
+
+// ═══ Phase 2E.3: Rejection Debug Builder ═══
+
+/**
+ * Build an enriched RejectionDebug from an OpportunityBrief.
+ * Includes per-reason detail fields for transparency:
+ * - blocked_topic: which blocked topic label, why, niche adjacency
+ * - generic_only: why generic, whether convertible to operator heuristic
+ * - low_originality_potential: what was missing
+ */
+export function buildRejectionDebug(brief: OpportunityBrief): RejectionDebug {
+  const heuristic = quickNicheFitScore(brief.source_text);
+  const reason = brief.rejection_reason || determineRejectionReason(brief);
+
+  const debug: RejectionDebug = {
+    source_author: brief.source_author,
+    source_tweet_url: brief.source_tweet_url,
+    source_text_preview: brief.source_text.slice(0, 200),
+    rejection_reason: reason,
+    publishability_score: brief.publishability_score,
+    originality_potential_score: brief.originality_potential_score,
+    usefulness_score: brief.usefulness_score,
+    niche_fit_score: brief.niche_fit_score,
+    content_format: brief.content_format,
+    recommended_angle: brief.recommended_angle,
+    recommended_angle_preview: brief.recommended_angle.slice(0, 80),
+  };
+
+  // Enrich based on rejection reason
+  if (reason === 'blocked_topic') {
+    debug.blocked_topic_label = heuristic.blocked_topic_labels.length > 0
+      ? heuristic.blocked_topic_labels.join(', ')
+      : 'unknown blocked topic';
+    debug.why_rejected = `Content matched blocked topic pattern(s): ${debug.blocked_topic_label}`;
+    debug.niche_adjacent = heuristic.adjacent_with_angle;
+    if (heuristic.adjacent_with_angle) {
+      debug.why_rejected += ' (but has adjacent angle potential — still blocked by policy)';
+    }
+  }
+
+  if (reason === 'generic_only') {
+    debug.why_rejected = `Only generic commentary possible: usefulness=${brief.usefulness_score}, originality_potential=${brief.originality_potential_score}, angle_length=${brief.recommended_angle.length}`;
+    debug.could_convert_to_operator_heuristic = brief.niche_fit_score >= 5 && brief.source_text.length >= 50;
+    if (debug.could_convert_to_operator_heuristic) {
+      debug.why_rejected += ' (might be convertible to operator heuristic with angle refinement)';
+    }
+  }
+
+  if (reason === 'low_originality_potential') {
+    debug.why_rejected = `Low originality potential: ${brief.originality_potential_score}/10`;
+    if (brief.originality_potential_score < 5) {
+      debug.what_was_missing = 'No unique angle, counterintuitive take, or specific expertise possible from this source';
+    } else {
+      debug.what_was_missing = 'Some angle exists but lacks specificity or counterintuitive element';
+    }
+  }
+
+  // Add parse failure diagnostics if present
+  const anyBrief = brief as any;
+  if (anyBrief.parse_failed) {
+    debug.parse_failed = true;
+    debug.intelligence_error_type = anyBrief.intelligence_error_type;
+    debug.intelligence_error_message_short = anyBrief.intelligence_error_message_short;
+    debug.raw_model_output_preview = anyBrief.raw_model_output_preview;
+  }
+
+  return debug;
 }
 
 // ═══ Adjacent Angle Discovery ═══
@@ -1349,6 +1434,11 @@ export async function evaluateOpportunities(
     rescued_opportunity_count: 0,
     rescue_reasons: [],
     sampled_rescue_debug: [],
+    // Phase 2E.3: Discovery rejection transparency
+    rejection_debug_available: false,
+    blocked_topic_examples: [],
+    generic_only_examples: [],
+    low_originality_examples: [],
   };
 
   if (!opportunities?.length) {
@@ -1523,30 +1613,24 @@ export async function evaluateOpportunities(
     console.warn(`[opportunity-intelligence] Parse failure rate high: ${parseFailureRate} (${parseFailedCount}/${evaluatedCount})`);
   }
 
-  // Sampled rejection debug: top 3 rejected items for future audits
-  // Phase 2D.1: Include parse_failed diagnostics in debug samples
+  // Phase 2E.3: Build enriched rejection debug using buildRejectionDebug
+  // (up to 10 items for full transparency)
   const rejectedBriefs = briefs.filter(b => !b.should_craft);
-  const sampledRejectionDebug: RejectionDebug[] = rejectedBriefs.slice(0, 3).map(b => {
-    const debug: RejectionDebug = {
-      source_author: b.source_author,
-      source_text_preview: b.source_text.slice(0, 120),
-      rejection_reason: b.rejection_reason || 'unknown',
-      publishability_score: b.publishability_score,
-      originality_potential_score: b.originality_potential_score,
-      usefulness_score: b.usefulness_score,
-      niche_fit_score: b.niche_fit_score,
-      recommended_angle: b.recommended_angle,
-    };
-    // Add parse failure diagnostics if present
-    const anyBrief = b as any;
-    if (anyBrief.parse_failed) {
-      debug.parse_failed = true;
-      debug.intelligence_error_type = anyBrief.intelligence_error_type;
-      debug.intelligence_error_message_short = anyBrief.intelligence_error_message_short;
-      debug.raw_model_output_preview = anyBrief.raw_model_output_preview;
-    }
-    return debug;
-  });
+  const allRejectionDebug = rejectedBriefs.map(b => buildRejectionDebug(b));
+  const sampledRejectionDebug = allRejectionDebug.slice(0, 10);
+
+  // Phase 2E.3: Per-reason examples for task-level diagnostics
+  const blockedTopicExamples = allRejectionDebug
+    .filter(d => d.rejection_reason === 'blocked_topic')
+    .slice(0, 5);
+  const genericOnlyExamples = allRejectionDebug
+    .filter(d => d.rejection_reason === 'generic_only')
+    .slice(0, 5);
+  const lowOriginalityExamples = allRejectionDebug
+    .filter(d => d.rejection_reason === 'low_originality_potential')
+    .slice(0, 5);
+
+  const rejectionDebugAvailable = allRejectionDebug.length > 0;
 
   return {
     briefs,
@@ -1569,6 +1653,11 @@ export async function evaluateOpportunities(
       rescued_opportunity_count: rescueSucceededCount,
       rescue_reasons: rescueReasons,
       sampled_rescue_debug: rescueDebugEntries.slice(0, 3),
+      // Phase 2E.3: Discovery rejection transparency
+      rejection_debug_available: rejectionDebugAvailable,
+      blocked_topic_examples: blockedTopicExamples,
+      generic_only_examples: genericOnlyExamples,
+      low_originality_examples: lowOriginalityExamples,
     },
   };
 }

@@ -555,6 +555,11 @@ describe('Phase 2D: Vercel routes remain lightweight', () => {
       rescued_opportunity_count: 0,
       rescue_reasons: [],
       sampled_rescue_debug: [],
+      // Phase 2E.3: Discovery rejection transparency
+      rejection_debug_available: false,
+      blocked_topic_examples: [],
+      generic_only_examples: [],
+      low_originality_examples: [],
     };
     expect(intelligenceSummary.raw_opportunity_count).toBe(10);
     expect(intelligenceSummary.intelligence_selected_count).toBe(2);
@@ -584,6 +589,11 @@ describe('Phase 2D: Intelligence summary includes all required fields', () => {
       rescued_opportunity_count: 0,
       rescue_reasons: [],
       sampled_rescue_debug: [],
+      // Phase 2E.3: Discovery rejection transparency
+      rejection_debug_available: false,
+      blocked_topic_examples: [],
+      generic_only_examples: [],
+      low_originality_examples: [],
     };
     expect(summary).toHaveProperty('raw_opportunity_count');
     expect(summary).toHaveProperty('intelligence_evaluated_count');
@@ -603,6 +613,11 @@ describe('Phase 2D: Intelligence summary includes all required fields', () => {
     expect(summary).toHaveProperty('rescued_opportunity_count');
     expect(summary).toHaveProperty('rescue_reasons');
     expect(summary).toHaveProperty('sampled_rescue_debug');
+    // Phase 2E.3: Discovery rejection transparency
+    expect(summary).toHaveProperty('rejection_debug_available');
+    expect(summary).toHaveProperty('blocked_topic_examples');
+    expect(summary).toHaveProperty('generic_only_examples');
+    expect(summary).toHaveProperty('low_originality_examples');
   });
 
   it('JudgeSummary has all required diagnostic fields', () => {
@@ -1201,6 +1216,11 @@ describe('Phase 2D.4: IntelligenceSummary includes rescue diagnostics', () => {
       rescued_opportunity_count: 0,
       rescue_reasons: [],
       sampled_rescue_debug: [],
+      // Phase 2E.3: Discovery rejection transparency
+      rejection_debug_available: false,
+      blocked_topic_examples: [],
+      generic_only_examples: [],
+      low_originality_examples: [],
     };
     expect(summary.rescue_attempted_count).toBe(0);
     expect(summary.rescue_succeeded_count).toBe(0);
