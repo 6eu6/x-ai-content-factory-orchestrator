@@ -295,6 +295,7 @@ export async function enqueuePipelineRun(options: EnqueuePipelineRunOptions = {}
 export type CreatePipelineTasksResult = {
   task_count: number;
   excluded_invalid_handles: string[];
+  source_diagnostics?: Record<string, any>;
 };
 
 export async function createPipelineTasks(
@@ -309,38 +310,56 @@ export async function createPipelineTasks(
 ): Promise<CreatePipelineTasksResult> {
   const supabase = supabaseAdmin();
 
-  // Fetch more candidate rows than accountLimit so invalid handles don't consume the limit.
-  // Invalid handles (Arabic, emoji, UI labels) often have last_checked=null, so they appear
-  // early in the sort order. Without over-fetching, they'd steal slots from valid accounts.
-  const fetchLimit = calculateFetchLimit(options.accountLimit);
+  // --- S1.4: Source Strategy Selection ---
+  // Try the new weighted category+quality strategy first.
+  // Falls back to the original last_checked/tier ordering on any failure.
+  let accounts: { handle: string }[] = [];
+  let excludedInvalidHandles: string[] = [];
+  let sourceDiagnostics: Record<string, any> | undefined;
 
-  // Fetch candidate accounts that will be scanned
-  let candidates: { handle: string }[] = [];
   try {
-    const { data, error } = await supabase
-      .from('accounts')
-      .select('handle')
-      .order('last_checked', { ascending: true, nullsFirst: true })
-      .order('tier', { ascending: true })
-      .limit(fetchLimit);
+    const { selectAccountsWithStrategy } = await import('./source-selection');
+    const selectionResult = await selectAccountsWithStrategy(options.accountLimit, options.username);
+    accounts = selectionResult.accounts;
+    excludedInvalidHandles = selectionResult.diagnostics.skipped_invalid_handles;
+    sourceDiagnostics = selectionResult.diagnostics;
 
-    if (!error && data?.length) {
-      candidates = data;
+    if (excludedInvalidHandles.length > 0) {
+      console.warn(`[pipeline-queue] Excluded ${excludedInvalidHandles.length} invalid X handles from scan: ${excludedInvalidHandles.slice(0, 5).map(h => JSON.stringify(h)).join(', ')}`);
     }
-  } catch {}
 
-  // Filter, validate, and slice accounts using the extracted logic
-  const { validAccounts, excludedInvalidHandles } = selectValidAccounts(
-    candidates,
-    options.accountLimit,
-    options.username
-  );
+    if (selectionResult.diagnostics.source_strategy_fallback_used) {
+      console.warn('[pipeline-queue] Source strategy fell back to simple ordering');
+    }
 
-  if (excludedInvalidHandles.length > 0) {
-    console.warn(`[pipeline-queue] Excluded ${excludedInvalidHandles.length} invalid X handles from scan: ${excludedInvalidHandles.slice(0, 5).map(h => JSON.stringify(h)).join(', ')}`);
+    console.log(`[pipeline-queue] Source strategy selected ${accounts.length} accounts (scores loaded: ${selectionResult.diagnostics.source_quality_scores_loaded}, exploration: ${selectionResult.diagnostics.exploration_sources_selected})`);
+  } catch (strategyErr: any) {
+    // Source strategy failed entirely — fall back to original logic
+    console.warn('[pipeline-queue] Source strategy import/execution failed, using original selection:', strategyErr?.message);
+
+    const fetchLimit = calculateFetchLimit(options.accountLimit);
+    let candidates: { handle: string }[] = [];
+    try {
+      const { data, error } = await supabase
+        .from('accounts')
+        .select('handle')
+        .order('last_checked', { ascending: true, nullsFirst: true })
+        .order('tier', { ascending: true })
+        .limit(fetchLimit);
+
+      if (!error && data?.length) {
+        candidates = data;
+      }
+    } catch {}
+
+    const validResult = selectValidAccounts(candidates, options.accountLimit, options.username);
+    accounts = validResult.validAccounts;
+    excludedInvalidHandles = validResult.excludedInvalidHandles;
+
+    if (excludedInvalidHandles.length > 0) {
+      console.warn(`[pipeline-queue] Excluded ${excludedInvalidHandles.length} invalid X handles from scan: ${excludedInvalidHandles.slice(0, 5).map(h => JSON.stringify(h)).join(', ')}`);
+    }
   }
-
-  const accounts = validAccounts;
 
   const tasks: Record<string, any>[] = [];
   let stepOrder = 10;
@@ -356,7 +375,8 @@ export async function createPipelineTasks(
       username: options.username,
       source: options.source,
       ...(excludedInvalidHandles.length > 0 ? { excluded_invalid_handles: excludedInvalidHandles } : {}),
-      scan_account_count: accounts.length
+      scan_account_count: accounts.length,
+      ...(sourceDiagnostics ? { source_diagnostics: sourceDiagnostics } : {}),
     }
   });
   stepOrder += 10;
@@ -500,14 +520,14 @@ export async function createPipelineTasks(
 
     if (error) {
       console.error('[pipeline-queue] createPipelineTasks insert error:', error.message);
-      return { task_count: 0, excluded_invalid_handles: excludedInvalidHandles };
+      return { task_count: 0, excluded_invalid_handles: excludedInvalidHandles, source_diagnostics: sourceDiagnostics };
     }
   } catch (err: any) {
     console.error('[pipeline-queue] createPipelineTasks exception:', err.message);
-    return { task_count: 0, excluded_invalid_handles: excludedInvalidHandles };
+    return { task_count: 0, excluded_invalid_handles: excludedInvalidHandles, source_diagnostics: sourceDiagnostics };
   }
 
-  return { task_count: tasks.length, excluded_invalid_handles: excludedInvalidHandles };
+  return { task_count: tasks.length, excluded_invalid_handles: excludedInvalidHandles, source_diagnostics: sourceDiagnostics };
 }
 
 // ═══ 3. getActivePipelineRun ═══

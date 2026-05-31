@@ -3065,6 +3065,21 @@ async function processTelegramDelivery(task: PipelineTaskRow): Promise<TaskResul
       console.warn(`[pipeline-worker] memory compaction failed (non-blocking): ${(compactErr?.message || 'unknown').slice(0, 200)}`);
     }
 
+    // Phase S1.4: Update source quality scores from this run (fire-and-forget, must not fail main run)
+    let sourceQualityUpdated = 0;
+    try {
+      const { updateSourceQualityFromRun } = await import('./source-quality');
+      const sqResult = await updateSourceQualityFromRun(runId);
+      sourceQualityUpdated = sqResult.updated;
+      if (sqResult.error) {
+        console.warn(`[pipeline-worker] source quality update error: ${sqResult.error}`);
+      } else if (sourceQualityUpdated > 0) {
+        console.log(`[pipeline-worker] source quality scores updated: ${sourceQualityUpdated} accounts`);
+      }
+    } catch (sqErr: any) {
+      console.warn(`[pipeline-worker] source quality update failed (non-blocking): ${(sqErr?.message || 'unknown').slice(0, 200)}`);
+    }
+
     return {
       ok: true,
       result: {
@@ -3076,6 +3091,8 @@ async function processTelegramDelivery(task: PipelineTaskRow): Promise<TaskResul
         memory_compaction_rules_updated: compactionResult?.rules_updated ?? 0,
         memory_compaction_source_memories_created: compactionResult?.source_memories_created ?? 0,
         memory_compaction_source_memories_updated: compactionResult?.source_memories_updated ?? 0,
+        // Phase S1.4: Source quality diagnostics
+        source_quality_scores_updated: sourceQualityUpdated,
       }
     };
   } catch (err: any) {
