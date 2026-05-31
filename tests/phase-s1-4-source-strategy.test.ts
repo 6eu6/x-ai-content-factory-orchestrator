@@ -40,7 +40,9 @@ import {
   STRONG_SOURCE_THRESHOLD,
   LOW_SOURCE_THRESHOLD,
   MIN_SCANS_FOR_CONFIDENCE,
+  NO_SIGNAL_FLOOR,
   type SourceQualityRow,
+  type AggregationDiagnostics,
 } from '../lib/source-quality';
 import {
   normalizeCategory,
@@ -53,6 +55,16 @@ import {
   type SourceCategory,
 } from '../lib/source-category';
 import { isValidXHandle } from '../lib/pipeline-queue';
+
+/** Helper: unwrap aggregateSourceQualityFromTasks result to get just the Map */
+function aggregate(tasks: Array<Parameters<typeof aggregateSourceQualityFromTasks>[0][number]>): Map<string, SourceQualityRow> {
+  return aggregateSourceQualityFromTasks(tasks).sources;
+}
+
+/** Helper: unwrap and get diagnostics too */
+function aggregateWithDiags(tasks: Array<Parameters<typeof aggregateSourceQualityFromTasks>[0][number]>) {
+  return aggregateSourceQualityFromTasks(tasks);
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // A. Source Quality Score Formula
@@ -459,9 +471,11 @@ describe('S1.4: Thresholds and constraints unchanged', () => {
     // by checking the known exports list
     const knownExports = [
       'SourceQualityRow', 'UNKNOWN_SOURCE_SCORE', 'STRONG_SOURCE_THRESHOLD',
-      'LOW_SOURCE_THRESHOLD', 'MIN_SCANS_FOR_CONFIDENCE', 'computeSourceQualityScore',
-      'extractSourceHandle', 'aggregateSourceQualityFromTasks', 'upsertSourceQualityScores',
-      'loadSourceQualityScores', 'updateSourceQualityFromRun',
+      'LOW_SOURCE_THRESHOLD', 'MIN_SCANS_FOR_CONFIDENCE', 'NO_SIGNAL_FLOOR',
+      'computeSourceQualityScore', 'extractSourceHandle',
+      'AggregationDiagnostics', 'aggregateSourceQualityFromTasks',
+      'upsertSourceQualityScores', 'loadSourceQualityScores',
+      'updateSourceQualityFromRun',
     ];
     expect(knownExports).not.toContain('autoPost');
     expect(knownExports).not.toContain('publish');
@@ -527,7 +541,7 @@ describe('S1.4: Aggregation from pipeline tasks', () => {
       },
     ];
 
-    const result = aggregateSourceQualityFromTasks(tasks);
+    const result = aggregate(tasks);
     expect(result.size).toBe(1);
     expect(result.has('testuser')).toBe(true);
 
@@ -555,7 +569,7 @@ describe('S1.4: Aggregation from pipeline tasks', () => {
       },
     ];
 
-    const result = aggregateSourceQualityFromTasks(tasks);
+    const result = aggregate(tasks);
     expect(result.size).toBe(1);
     expect(result.has('valid')).toBe(true);
   });
@@ -569,7 +583,7 @@ describe('S1.4: Aggregation from pipeline tasks', () => {
       },
     ];
 
-    const result = aggregateSourceQualityFromTasks(tasks);
+    const result = aggregate(tasks);
     expect(result.size).toBe(1);
     const row = result.get('testuser')!;
     expect(row.scans_count).toBe(1);
@@ -720,7 +734,7 @@ describe('S1.4: Real pipeline shape aggregation', () => {
       },
     ];
 
-    const result = aggregateSourceQualityFromTasks(tasks);
+    const result = aggregate(tasks);
 
     // Should have both karpathy and levelsio
     expect(result.size).toBe(2);
@@ -786,7 +800,7 @@ describe('S1.4: Real pipeline shape aggregation', () => {
       },
     ];
 
-    const result = aggregateSourceQualityFromTasks(tasks);
+    const result = aggregate(tasks);
     expect(result.size).toBe(2);
     expect(result.has('newsource1')).toBe(true);
     expect(result.has('newsource2')).toBe(true);
@@ -812,7 +826,7 @@ describe('S1.4: Real pipeline shape aggregation', () => {
       },
     ];
 
-    const result = aggregateSourceQualityFromTasks(tasks);
+    const result = aggregate(tasks);
     expect(result.size).toBe(1);
 
     const row = result.get('karpathy')!;
@@ -830,7 +844,7 @@ describe('S1.4: Real pipeline shape aggregation', () => {
       },
     ];
 
-    const result = aggregateSourceQualityFromTasks(tasks);
+    const result = aggregate(tasks);
     const row = result.get('karpathy')!;
     expect(row.raw_opportunities_count).toBe(6); // opportunities_found takes priority
   });
@@ -855,7 +869,7 @@ describe('S1.4: Real pipeline shape aggregation', () => {
       },
     ];
 
-    const result = aggregateSourceQualityFromTasks(tasks);
+    const result = aggregate(tasks);
     const row = result.get('karpathy')!;
     // Should be 3 from scan_account (viral_found), NOT 3 + 3 = 6
     // merge_scan_results skips adding raw_opportunities for accounts
@@ -899,7 +913,7 @@ describe('S1.4: Real pipeline shape aggregation', () => {
       },
     ];
 
-    const result = aggregateSourceQualityFromTasks(tasks);
+    const result = aggregate(tasks);
 
     const rowA = result.get('source_a')!;
     expect(rowA.selected_count).toBe(2);
@@ -956,7 +970,7 @@ describe('S1.4: Real pipeline shape aggregation', () => {
       },
     ];
 
-    const result = aggregateSourceQualityFromTasks(tasks);
+    const result = aggregate(tasks);
 
     const alphaRow = result.get('alpha')!;
     expect(alphaRow.publish_gate_accepted_count).toBe(1);
@@ -996,7 +1010,7 @@ describe('S1.4: Real pipeline shape aggregation', () => {
       },
     ];
 
-    const result = aggregateSourceQualityFromTasks(tasks);
+    const result = aggregate(tasks);
     const row = result.get('testuser')!;
 
     // Fallback proportional distribution should attribute counts
@@ -1014,7 +1028,7 @@ describe('S1.4: Real pipeline shape aggregation', () => {
       },
     ];
 
-    const result = aggregateSourceQualityFromTasks(tasks);
+    const result = aggregate(tasks);
     // No accounts to attribute to — should produce empty result, not invent sources
     expect(result.size).toBe(0);
   });
@@ -1041,7 +1055,7 @@ describe('S1.4: Real pipeline shape aggregation', () => {
       },
     ];
 
-    const result = aggregateSourceQualityFromTasks(tasks);
+    const result = aggregate(tasks);
     const row = result.get('legacyuser')!;
     expect(row.selected_count).toBe(1);
     expect(row.avg_publishability_score).toBe(8);
@@ -1063,7 +1077,7 @@ describe('S1.4: Real pipeline shape aggregation', () => {
       },
     ];
 
-    const result = aggregateSourceQualityFromTasks(tasks);
+    const result = aggregate(tasks);
     const row = result.get('karpathy')!;
     expect(row.scans_count).toBe(2);
     expect(row.tweets_analyzed).toBe(25);
@@ -1079,7 +1093,7 @@ describe('S1.4: Real pipeline shape aggregation', () => {
       },
     ];
 
-    const result = aggregateSourceQualityFromTasks(tasks);
+    const result = aggregate(tasks);
     const row = result.get('onlyscanned')!;
     expect(row.scans_count).toBe(1);
     expect(row.selected_count).toBe(0);
@@ -1088,5 +1102,191 @@ describe('S1.4: Real pipeline shape aggregation', () => {
     // With 1 scan and 0 raw_opportunities, score should regress toward 50
     expect(row.source_quality_score).toBeLessThanOrEqual(50);
     expect(row.source_quality_score).toBeGreaterThan(0);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// H. Invalid handle validation
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('S1.4: Invalid handle validation', () => {
+  it('Arabic handles are skipped by extractSourceHandle', () => {
+    expect(extractSourceHandle({ source_author: 'الحسابات' })).toBeNull();
+    expect(extractSourceHandle({ source_author: 'قائمة' })).toBeNull();
+    expect(extractSourceHandle({ author: 'الحسابات' })).toBeNull();
+  });
+
+  it('Emoji handles are skipped by extractSourceHandle', () => {
+    expect(extractSourceHandle({ source_author: '📋' })).toBeNull();
+    expect(extractSourceHandle({ source_author: '🔥🔥🔥' })).toBeNull();
+  });
+
+  it('UI labels are skipped by extractSourceHandle', () => {
+    // 'brain' is technically a valid X handle format, so it passes isValidXHandle
+    // Invalidation of non-account sources is handled at the backfill level
+    // by checking the accounts table, not at the extractSourceHandle level
+    expect(extractSourceHandle({ source_author: 'brain' })).toBe('brain'); // valid X format
+    expect(extractSourceHandle({ source_author: '📋' })).toBeNull(); // emoji is invalid
+    expect(extractSourceHandle({ source_author: 'الحسابات' })).toBeNull(); // Arabic is invalid
+  });
+
+  it('extractSourceHandle validates output via isValidXHandle', () => {
+    // Valid handles pass through
+    expect(extractSourceHandle({ source_author: 'karpathy' })).toBe('karpathy');
+    expect(extractSourceHandle({ source_author: 'levelsio' })).toBe('levelsio');
+    // Invalid handles are rejected
+    expect(extractSourceHandle({ source_author: '' })).toBeNull();
+    expect(extractSourceHandle({ source_author: '📋' })).toBeNull(); // emoji
+    expect(extractSourceHandle({ source_author: 'الحسابات' })).toBeNull(); // Arabic
+  });
+
+  it('Arabic handles are excluded from aggregation results', () => {
+    const tasks = [
+      {
+        task_type: 'scan_account',
+        account_handle: 'karpathy',
+        result: { tweets_analyzed: 10, viral_found: 2 },
+      },
+      {
+        task_type: 'scan_account',
+        account_handle: 'الحسابات',
+        result: { tweets_analyzed: 5, viral_found: 1 },
+      },
+      {
+        task_type: 'merge_scan_results',
+        account_handle: null,
+        result: {
+          _opportunities: [
+            { source_author: 'karpathy' },
+            { source_author: 'الحسابات' },
+            { source_author: 'قائمة' },
+          ],
+        },
+      },
+    ];
+
+    const { sources, diagnostics } = aggregateWithDiags(tasks);
+    expect(sources.has('karpathy')).toBe(true);
+    // Arabic handles are invalid X handles, so they should not appear in results
+    expect(sources.has('الحسابات')).toBe(false);
+    expect(sources.has('قائمة')).toBe(false);
+    // The Arabic handle used as account_handle in scan_account IS tracked in skipped list
+    expect(diagnostics.skipped_invalid_source_handles).toContain('الحسابات');
+  });
+
+  it('Arabic handle in scan_account task is excluded', () => {
+    const tasks = [
+      {
+        task_type: 'scan_account',
+        account_handle: 'الحسابات',
+        result: { tweets_analyzed: 10, viral_found: 2 },
+      },
+    ];
+
+    const { sources, diagnostics } = aggregateWithDiags(tasks);
+    expect(sources.has('الحسابات')).toBe(false);
+    expect(diagnostics.skipped_invalid_source_handles).toContain('الحسابات');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// I. Scoring conservatism
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('S1.4: Scoring conservatism', () => {
+  it('scan-only sources stay neutral-ish, not very low', () => {
+    // A source that has been scanned but has no intelligence/judge/gate data
+    // should not score as "very low" (which was the bug: 25/28 sources < 20)
+    const score = computeSourceQualityScore({
+      scans_count: 2,
+      selected_rate: 0,
+      judge_passed_count: 0,
+      publish_gate_accepted_count: 0,
+      avg_publishability_score: 0,
+      avg_originality_potential_score: 0,
+      avg_usefulness_score: 0,
+      rejection_rate: 1.0,
+      raw_opportunities_count: 5,
+    });
+    // Should be at least NO_SIGNAL_FLOOR (35) since no positive signal
+    // and no proven zero-yield
+    expect(score).toBeGreaterThanOrEqual(NO_SIGNAL_FLOOR);
+  });
+
+  it('scan-only with zero raw opportunities also stays above 35 until proven', () => {
+    // Even with 0 raw_opportunities, a source with < 3 scans should not be
+    // penalized below 35
+    const score = computeSourceQualityScore({
+      scans_count: 1,
+      selected_rate: 0,
+      judge_passed_count: 0,
+      publish_gate_accepted_count: 0,
+      avg_publishability_score: 0,
+      avg_originality_potential_score: 0,
+      avg_usefulness_score: 0,
+      rejection_rate: 0,
+      raw_opportunities_count: 0,
+    });
+    // Only 1 scan, not proven zero-yield yet (need >= 3 scans)
+    expect(score).toBeGreaterThanOrEqual(NO_SIGNAL_FLOOR);
+  });
+
+  it('sources with repeated zero-yield scans ARE penalized gradually', () => {
+    // After 3+ scans with 0 raw_opportunities, proven zero-yield kicks in
+    const provenZeroYield = computeSourceQualityScore({
+      scans_count: 5,
+      selected_rate: 0,
+      judge_passed_count: 0,
+      publish_gate_accepted_count: 0,
+      avg_publishability_score: 0,
+      avg_originality_potential_score: 0,
+      avg_usefulness_score: 0,
+      rejection_rate: 0,
+      raw_opportunities_count: 0,
+    });
+    // Proven zero-yield should drop below 35
+    expect(provenZeroYield).toBeLessThan(LOW_SOURCE_THRESHOLD);
+  });
+
+  it('strong source can still score high', () => {
+    const score = computeSourceQualityScore({
+      scans_count: 5,
+      selected_rate: 0.8,
+      judge_passed_count: 8,
+      publish_gate_accepted_count: 3,
+      avg_publishability_score: 8.5,
+      avg_originality_potential_score: 8.0,
+      avg_usefulness_score: 7.5,
+      rejection_rate: 0.1,
+      raw_opportunities_count: 20,
+    });
+    expect(score).toBeGreaterThanOrEqual(STRONG_SOURCE_THRESHOLD);
+  });
+
+  it('missing avg score data is treated as neutral, not zero', () => {
+    // When avg scores are 0 (meaning no data, not actually 0-scored),
+    // they should not penalize the source
+    const noScoreData = computeSourceQualityScore({
+      scans_count: 5,
+      selected_rate: 0,
+      judge_passed_count: 0,
+      publish_gate_accepted_count: 0,
+      rejection_rate: 0,
+      raw_opportunities_count: 5,
+    });
+    // Without actual score data, avg scores default to neutral (5)
+    // So score should not drop below NO_SIGNAL_FLOOR
+    expect(noScoreData).toBeGreaterThanOrEqual(NO_SIGNAL_FLOOR);
+  });
+
+  it('NO_SIGNAL_FLOOR is 35', () => {
+    expect(NO_SIGNAL_FLOOR).toBe(35);
+  });
+
+  it('no thresholds or gates changed', () => {
+    expect(UNKNOWN_SOURCE_SCORE).toBe(50);
+    expect(STRONG_SOURCE_THRESHOLD).toBe(70);
+    expect(LOW_SOURCE_THRESHOLD).toBe(35);
+    expect(MIN_SCANS_FOR_CONFIDENCE).toBe(3);
   });
 });

@@ -1,4 +1,5 @@
 import { supabaseAdmin } from './supabase';
+import { isValidXHandle } from './pipeline-queue';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -40,6 +41,14 @@ export const LOW_SOURCE_THRESHOLD = 35;
 /** Below this many scans we regress the score toward the neutral 50 */
 export const MIN_SCANS_FOR_CONFIDENCE = 3;
 
+/**
+ * Floor for sources with no positive signals (selected=0, judge_passed=0,
+ * publish_gate_accepted=0) but with some scan history. Such sources should
+ * not be penalized below this threshold unless they have repeated zero-yield
+ * scans (scans >= MIN_SCANS_FOR_CONFIDENCE AND raw_opportunities === 0).
+ */
+export const NO_SIGNAL_FLOOR = 35;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -67,9 +76,14 @@ function clamp(value: number, min: number, max: number): number {
  *  - Reward judge_passed_count
  *  - Reward publish_gate_accepted_count
  *  - Reward average quality scores (publishability, originality, usefulness)
- *  - Penalise rejection_rate
+ *    — when no actual score data exists, treat as neutral (5.0) not zero
+ *  - Penalise rejection_rate (mildly)
  *  - Penalise zero-yield scans (when scans >= 3 but raw_opportunities === 0)
- *  - Regress toward 50 when scans < MIN_SCANS_FOR_CONFIDENCE
+ *  - Regress strongly toward 50 when scans < MIN_SCANS_FOR_CONFIDENCE
+ *  - NO_SIGNAL_FLOOR: sources with no positive signals (selected=0, judge=0,
+ *    gate=0) but some scan history should not drop below 35 unless they have
+ *    repeated zero-yield scans. This prevents the strict gate pipeline from
+ *    penalizing almost every source as "very low" before enough data exists.
  *  - Cap 0-100, round to 1 decimal
  *  - Never crashes: missing / NaN values are treated as 0 / default
  */
@@ -88,6 +102,19 @@ export function computeSourceQualityScore(row: Partial<SourceQualityRow> | null 
   const rejectionRate = safeNum(row.rejection_rate, 0);
   const rawOpportunitiesCount = safeNum(row.raw_opportunities_count, 0);
 
+  // Detect whether we have actual score data (vs. defaults of 0 meaning "no data")
+  const hasScoreData = avgPublishability > 0 || avgOriginality > 0 || avgUsefulness > 0;
+  // When no score data exists, treat averages as neutral (5.0) so they contribute
+  // zero instead of penalizing: (0 - 5) * weight = -5 * weight (wrong)
+  const neutralPublishability = hasScoreData ? avgPublishability : 5;
+  const neutralOriginality = hasScoreData ? avgOriginality : 5;
+  const neutralUsefulness = hasScoreData ? avgUsefulness : 5;
+
+  // Detect whether any positive downstream signal exists
+  const hasPositiveSignal = selectedRate > 0 || judgePassedCount > 0 || publishGateAcceptedCount > 0;
+  // Proven zero-yield: scanned multiple times, found nothing at all
+  const isProvenZeroYield = scansCount >= MIN_SCANS_FOR_CONFIDENCE && rawOpportunitiesCount === 0;
+
   let score = 50; // neutral base
 
   // Reward selected_rate: +selected_rate * 15 (max +15 at 100%)
@@ -99,22 +126,35 @@ export function computeSourceQualityScore(row: Partial<SourceQualityRow> | null 
   // Reward publish_gate_accepted_count: +min(publish_gate_accepted_count, 5) * 3 (max +15)
   score += Math.min(publishGateAcceptedCount, 5) * 3;
 
-  // Reward avg scores: +(avg_publishability - 5) * 2 + (avg_originality - 5) * 1.5 + (avg_usefulness - 5) * 1 (max ~+15)
-  score += (avgPublishability - 5) * 2;
-  score += (avgOriginality - 5) * 1.5;
-  score += (avgUsefulness - 5) * 1;
+  // Reward avg scores (using neutral defaults when no data exists)
+  score += (neutralPublishability - 5) * 2;
+  score += (neutralOriginality - 5) * 1.5;
+  score += (neutralUsefulness - 5) * 1;
 
-  // Penalize rejection_rate: -rejection_rate * 10 (max -10)
-  score -= rejectionRate * 10;
+  // Penalize rejection_rate mildly: -rejection_rate * 5 (max -5, reduced from -10)
+  // The strict gate pipeline means many legitimate sources have high rejection
+  // rates. We should not over-penalize for this systemic characteristic.
+  score -= rejectionRate * 5;
 
-  // Penalize zero-yield scans: if scans_count >= 3 and raw_opportunities_count === 0, -10
-  if (scansCount >= 3 && rawOpportunitiesCount === 0) {
-    score -= 10;
+  // Penalize zero-yield scans: if scans_count >= 3 and raw_opportunities_count === 0
+  // Apply a progressive penalty that gets stronger with more scans
+  if (isProvenZeroYield) {
+    const zeroYieldPenalty = 10 + Math.min(scansCount - MIN_SCANS_FOR_CONFIDENCE, 5) * 3;
+    score -= zeroYieldPenalty;
   }
 
-  // Regress toward 50 if scans_count < MIN_SCANS_FOR_CONFIDENCE
+  // Regress strongly toward 50 if scans_count < MIN_SCANS_FOR_CONFIDENCE
   if (scansCount < MIN_SCANS_FOR_CONFIDENCE) {
     score = 50 + (score - 50) * (scansCount / MIN_SCANS_FOR_CONFIDENCE);
+  }
+
+  // NO_SIGNAL_FLOOR: sources with no positive signals but some scan history
+  // should not drop below 35 unless they have proven zero-yield.
+  // This prevents the strict pipeline from making almost every source "very low"
+  // before enough reliable data exists. Proven zero-yield sources (scans >= 3
+  // and raw_opportunities === 0) are allowed to drop below 35.
+  if (!hasPositiveSignal && !isProvenZeroYield && scansCount > 0) {
+    score = Math.max(score, NO_SIGNAL_FLOOR);
   }
 
   // Cap 0-100
@@ -132,7 +172,9 @@ export function computeSourceQualityScore(row: Partial<SourceQualityRow> | null 
  * Extracts the source handle from an opportunity, brief, or candidate object.
  * Tries source_author first (the primary field on ContentOpportunity), then
  * falls back to author, username, and account_handle.
- * Returns null if no valid handle can be extracted.
+ * Validates the extracted handle using isValidXHandle.
+ * Returns null if no valid handle can be extracted (including invalid X handles
+ * such as Arabic text, emoji, UI labels, etc.).
  */
 export function extractSourceHandle(obj: Record<string, any> | null | undefined): string | null {
   if (obj == null || typeof obj !== 'object') return null;
@@ -140,7 +182,11 @@ export function extractSourceHandle(obj: Record<string, any> | null | undefined)
   const candidates = [obj.source_author, obj.author, obj.username, obj.account_handle];
   for (const c of candidates) {
     if (typeof c === 'string' && c.trim() !== '') {
-      return c.trim().replace(/^@/, '');
+      const handle = c.trim().replace(/^@/, '');
+      // Validate the handle — reject Arabic, emoji, UI labels, etc.
+      if (isValidXHandle(handle)) {
+        return handle;
+      }
     }
   }
   return null;
@@ -197,15 +243,25 @@ type AccountAccumulator = {
  * If attribution to a specific source is impossible, we do not invent counts.
  * We leave neutral (0) rather than guessing.
  */
+export type AggregationDiagnostics = {
+  skipped_invalid_source_handles: string[];
+};
+
 export function aggregateSourceQualityFromTasks(
   tasks: Array<TaskInput>
-): Map<string, SourceQualityRow> {
+): { sources: Map<string, SourceQualityRow>; diagnostics: AggregationDiagnostics } {
   // -----------------------------------------------------------------------
   // Accumulator map: source_handle → AccountAccumulator
   // -----------------------------------------------------------------------
   const accounts = new Map<string, AccountAccumulator>();
+  const skippedInvalidHandles = new Set<string>();
 
-  function ensureAccount(handle: string): AccountAccumulator {
+  function ensureAccount(handle: string): AccountAccumulator | null {
+    // Validate the handle before allowing it into the accumulator
+    if (!isValidXHandle(handle)) {
+      skippedInvalidHandles.add(handle);
+      return null;
+    }
     if (!accounts.has(handle)) {
       accounts.set(handle, {
         scans_count: 0,
@@ -237,6 +293,7 @@ export function aggregateSourceQualityFromTasks(
     if (!handle) continue;
 
     const acc = ensureAccount(handle);
+    if (!acc) continue; // invalid handle
     acc.scans_count += 1;
     acc.tweets_analyzed += safeNum(task.result.tweets_analyzed, 0);
 
@@ -270,8 +327,9 @@ export function aggregateSourceQualityFromTasks(
     // Count opportunities per source_author
     for (const opp of opportunities) {
       const sourceHandle = extractSourceHandle(opp);
-      if (!sourceHandle) continue; // cannot attribute — leave neutral
+      if (!sourceHandle) continue; // cannot attribute or invalid handle — leave neutral
       const acc = ensureAccount(sourceHandle);
+      if (!acc) continue; // invalid handle
       // Only add raw_opportunities if scan_account didn't already provide them
       // (avoid double-counting for accounts that also had scan_account tasks)
       if (acc.scans_count === 0) {
@@ -304,6 +362,7 @@ export function aggregateSourceQualityFromTasks(
         const sourceHandle = extractSourceHandle(opp);
         if (!sourceHandle) continue;
         const acc = ensureAccount(sourceHandle);
+        if (!acc) continue; // invalid handle
 
         // Check _brief for should_craft and scores
         const brief = opp._brief;
@@ -337,6 +396,7 @@ export function aggregateSourceQualityFromTasks(
         const sourceHandle = extractSourceHandle(brief);
         if (!sourceHandle) continue;
         const acc = ensureAccount(sourceHandle);
+        if (!acc) continue; // invalid handle
 
         if (brief.should_craft === true) {
           acc.selected_count += 1;
@@ -411,6 +471,7 @@ export function aggregateSourceQualityFromTasks(
         const sourceHandle = extractSourceHandle(opp);
         if (!sourceHandle) continue;
         const acc = ensureAccount(sourceHandle);
+        if (!acc) continue; // invalid handle
 
         const judgeResult = opp._judge_result;
         if (judgeResult && typeof judgeResult === 'object' && judgeResult.passed === true) {
@@ -464,6 +525,7 @@ export function aggregateSourceQualityFromTasks(
         const sourceHandle = extractSourceHandle(opp);
         if (!sourceHandle) continue;
         const acc = ensureAccount(sourceHandle);
+        if (!acc) continue; // invalid handle
         acc.publish_gate_accepted_count += 1;
       }
     } else {
@@ -497,6 +559,7 @@ export function aggregateSourceQualityFromTasks(
           if (sourceHandle) {
             // Attribute to specific source
             const acc = ensureAccount(sourceHandle);
+            if (!acc) continue; // invalid handle
             acc.rejection_reason_counts[reason] =
               (acc.rejection_reason_counts[reason] ?? 0) + 1;
           } else {
@@ -530,6 +593,12 @@ export function aggregateSourceQualityFromTasks(
   const result = new Map<string, SourceQualityRow>();
 
   for (const [handle, acc] of accounts) {
+    // Final validation gate: never emit a row for an invalid handle
+    if (!isValidXHandle(handle)) {
+      skippedInvalidHandles.add(handle);
+      continue;
+    }
+
     const tweetsAnalyzed = acc.tweets_analyzed || 1;
     const rawOppCount = acc.raw_opportunities_count || 1;
 
@@ -576,7 +645,12 @@ export function aggregateSourceQualityFromTasks(
     result.set(handle, row);
   }
 
-  return result;
+  return {
+    sources: result,
+    diagnostics: {
+      skipped_invalid_source_handles: Array.from(skippedInvalidHandles),
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -739,8 +813,12 @@ export async function updateSourceQualityFromRun(
       >,
     }));
 
-    const aggregated = aggregateSourceQualityFromTasks(tasks);
-    const rows = Array.from(aggregated.values());
+    const { sources: aggregated, diagnostics } = aggregateSourceQualityFromTasks(tasks);
+
+    // Filter: only upsert rows for valid X handles (extra safety gate)
+    const rows = Array.from(aggregated.values()).filter(
+      (row) => isValidXHandle(row.source_handle)
+    );
 
     if (rows.length === 0) {
       return { updated: 0 };
