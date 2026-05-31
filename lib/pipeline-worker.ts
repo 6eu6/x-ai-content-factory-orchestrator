@@ -60,6 +60,10 @@ import { attemptNearPassPolish, attemptBriefLockedMicroRepair, isMicroRepairElig
 import { callModel, parseModelJson } from './model-router';
 import { getOriginalityContext, buildOriginalityPromptSection, detectOriginalityIndicators, validateOriginalityOutput, type OriginalityContext, type OriginalityDiagnostics } from './originality-context';
 import { buildSignatureVoiceSection, validateSignatureVoice, type SignatureVoiceDiagnostics } from './signature-voice';
+import { computeLocalCandidateScore, selectCandidatesForJudge, deduplicateJudgedCandidates, type CraftedCandidate, type BriefForSelection, type CandidateWithJudgeResult } from './candidate-selector';
+
+// Re-export CraftedCandidate for consumers
+export type { CraftedCandidate } from './candidate-selector';
 
 // ═══ Types ═══
 
@@ -382,15 +386,15 @@ function localCraftingChecks(
 /**
  * Craft content from a brief using the selected_candidate_crafting model route.
  *
- * Phase 2D.3: JSON contract — the model MUST return a JSON object:
- *   { "crafted_text": "...", "format": "...", "brief_alignment_score": N,
- *     "claims_to_avoid_checked": bool, "notes": "..." }
+ * Phase 2G.3: Multi-candidate generation — requests 3 variants from the model:
+ *   - brief_faithful: maximizes recommended_angle and required_context; practical and clear; least risky
+ *   - signature_original: maximizes originality, signature phrase, memorable frame; must remain evidence-safe
+ *   - operator_heuristic: maximizes practical usefulness; gives a rule/checklist/decision heuristic
  *
- * If JSON parse fails or crafted_text is missing, we return crafted_text=null
- * with brief_alignment_score=1 and a selected_candidate_crafting_parse_failed note.
+ * Returns CraftedCandidate[] (array of candidates).
  *
- * After successful parse, run local quality checks + validateBriefAlignment.
- * If checks fail, make ONE repair attempt.
+ * Fallback: If the model returns the old single-candidate schema (no candidates array,
+ * has crafted_text at top level), wrap it as one candidate with variant_type "legacy".
  */
 async function craftFromBrief(
   opp: Record<string, any>,
@@ -407,20 +411,7 @@ async function craftFromBrief(
     publishability_score: number;
   },
   originalityContext?: OriginalityContext | null
-): Promise<{
-  crafted_text: string | null;
-  format: string;
-  brief_alignment_score: number;
-  brief_alignment_notes: string[];
-  invented_personal_experience_flag: boolean;
-  ignored_recommended_angle_flag: boolean;
-  _brief_crafting_parse_failed?: boolean;
-  _brief_crafting_repair_attempted?: boolean;
-  _brief_crafting_repair_applied?: boolean;
-  _brief_crafting_failure_reason?: string;
-  _originality_diagnostics?: OriginalityDiagnostics;
-  _signature_voice_diagnostics?: SignatureVoiceDiagnostics;
-}> {
+): Promise<CraftedCandidate[]> {
   const sourceText = String(opp.source_text || opp.text || '').slice(0, 400);
   const sourceAuthor = String(opp.source_author || opp.author || opp.username || '');
   const originalCrafted = String(opp.crafted_text || '').slice(0, 200);
@@ -439,13 +430,12 @@ async function craftFromBrief(
     twist_type_used: undefined, // Will be determined by model
   });
 
-  // Phase 2D.3: JSON contract system prompt
-  // Phase 2G: Updated JSON schema to include originality_strategy, twist_type_used, avoided_anti_patterns
+  // Phase 2G.3: Updated JSON schema for 3 candidate variants
   const systemPrompt = `You are a content crafter for @30piq, an X account focused on AI, creators, internet culture, productivity, skills, and modern work.
 
-Your task: Craft a tweet that STRICTLY follows the Opportunity Brief below. The brief was produced by an intelligence analyst who identified this as a promising opportunity with a specific recommended angle.
+Your task: Craft THREE tweet variants that STRICTLY follow the Opportunity Brief below. Each variant optimizes for a different priority.
 
-═══ MANDATORY RULES ═══
+═══ MANDATORY RULES (ALL VARIANTS) ═══
 
 1. FOLLOW THE RECOMMENDED ANGLE exactly. The recommended_angle is your primary directive — do NOT substitute it with a different angle.
 
@@ -457,32 +447,25 @@ Your task: Craft a tweet that STRICTLY follows the Opportunity Brief below. The 
 
 5. INCLUDE all required_context items — these are facts/points that MUST be present for the content to be honest.
 
-6. INCLUDE at least one concrete takeaway for builders/operators. Not just a broad interpretation — give a specific, actionable signal or insight.
+6. Keep claims as interpretations, not facts: prefer "A useful signal is..." over "This proves..."; prefer "One way to read this..." over "This means...".
 
-7. Keep claims as interpretations, not facts: prefer "A useful signal is..." over "This proves..."; prefer "One way to read this..." over "This means...".
+7. Do NOT invent historical parallels unless the source or required_context directly supports them.
 
-8. Do NOT invent historical parallels unless the source or required_context directly supports them.
+8. Sound analytical, specific, and calm — not a hype account, not a content mill, not a life coach.
 
-9. Sound analytical, specific, and calm — not a hype account, not a content mill, not a life coach.
+9. Keep each crafted_text under 280 characters. Each must be at least 40 characters.
 
-10. Keep crafted_text under 280 characters. It must be at least 40 characters.
+10. English ONLY.
 
-11. English ONLY.
+11. No hashtags, no emojis, no AI slop words (delve, crucial, leverage, game-changer, unlock, empower, elevate, foster, streamline, harness, cutting-edge, paradigm, synergy).
 
-12. No hashtags, no AI slop words (delve, crucial, leverage, game-changer, unlock, empower, elevate, foster, streamline, harness, cutting-edge, paradigm, synergy).
+═══ THREE VARIANT TYPES ═══
 
-13. Return a JSON object with this exact schema:
-    { "crafted_text": "string under 280 chars", "format": "quote|reply|standalone", "brief_alignment_score": number, "originality_strategy": "string explaining what makes this original", "twist_type_used": "one of: inversion|mechanism|operator_heuristic|cost_of_being_stale|timeline_shift|capability_map|distribution_positioning|constraint_insight|failure_mode_insight", "signature_phrase": "3-8 word repeatable phrase from the text", "operator_takeaway": "concrete operator rule or actionable signal", "avoided_anti_patterns": ["list of anti-patterns you consciously avoided"], "claims_to_avoid_checked": boolean, "notes": "short string" }
-    - crafted_text: The tweet text, plain text only (no JSON/markdown inside it).
-    - format: The content format.
-    - brief_alignment_score: Your self-assessment 1-10 of how well the text follows the recommended_angle.
-    - originality_strategy: Brief explanation of what makes your text original (not just a summary or generic take).
-    - twist_type_used: The twist type you applied from the suggested types (or "none" if none fits).
-    - signature_phrase: A compact, repeatable phrase from your crafted text (3-8 words). Think "capability map", "stale mental model", "judgment cache for taste".
-    - operator_takeaway: A concrete operator rule or actionable signal. Think "When evaluating X, check Y" or "The signal is Z".
-    - avoided_anti_patterns: List of anti-patterns you consciously avoided.
-    - claims_to_avoid_checked: True if you verified the text avoids all do_not_claim terms.
-    - notes: Brief note on your crafting decisions.
+1. "brief_faithful" — Maximizes recommended_angle alignment and required_context inclusion. Practical and clear. Least risky. The safe, solid take that follows the brief precisely.
+
+2. "signature_original" — Maximizes originality, signature phrase, memorable frame. Must remain evidence-safe. Must still preserve recommended_angle but can reframe it with a sharper twist. This is the bold, distinctive take.
+
+3. "operator_heuristic" — Maximizes practical usefulness. Gives a rule/checklist/decision heuristic. Must include a concrete operator takeaway the reader can apply today. This is the actionable, utility-first take.
 
 ═══ OPPORTUNITY BRIEF ═══
 
@@ -504,23 +487,70 @@ ${requiredContextStr || '(none)'}
 
 Niche fit: ${brief.niche_fit_score}/10
 Originality potential: ${brief.originality_potential_score}/10
-Publishability: ${brief.publishability_score}/10${originalitySection}${signatureVoiceSection}`;
+Publishability: ${brief.publishability_score}/10${originalitySection}${signatureVoiceSection}
 
-  const userPrompt = `Craft a brief-faithful tweet for this opportunity:
+═══ JSON OUTPUT SCHEMA ═══
+
+Return a JSON object with a "candidates" array containing exactly 3 objects:
+{
+  "candidates": [
+    {
+      "variant_type": "brief_faithful",
+      "crafted_text": "string under 280 chars",
+      "format": "quote|reply|standalone",
+      "brief_alignment_score": number,
+      "originality_strategy": "string explaining what makes this original",
+      "twist_type_used": "one of: inversion|mechanism|operator_heuristic|cost_of_being_stale|timeline_shift|capability_map|distribution_positioning|constraint_insight|failure_mode_insight",
+      "signature_phrase": "3-8 word repeatable phrase from the text",
+      "operator_takeaway": "concrete operator rule or actionable signal",
+      "avoided_anti_patterns": ["list of anti-patterns you consciously avoided"],
+      "claims_to_avoid_checked": true,
+      "notes": "short string"
+    },
+    {
+      "variant_type": "signature_original",
+      "crafted_text": "string under 280 chars",
+      "format": "quote|reply|standalone",
+      "brief_alignment_score": number,
+      "originality_strategy": "...",
+      "twist_type_used": "...",
+      "signature_phrase": "...",
+      "operator_takeaway": "...",
+      "avoided_anti_patterns": [...],
+      "claims_to_avoid_checked": true,
+      "notes": "..."
+    },
+    {
+      "variant_type": "operator_heuristic",
+      "crafted_text": "string under 280 chars",
+      "format": "quote|reply|standalone",
+      "brief_alignment_score": number,
+      "originality_strategy": "...",
+      "twist_type_used": "...",
+      "signature_phrase": "...",
+      "operator_takeaway": "...",
+      "avoided_anti_patterns": [...],
+      "claims_to_avoid_checked": true,
+      "notes": "..."
+    }
+  ]
+}`;
+
+  const userPrompt = `Craft three tweet variants for this opportunity:
 
 Source by @${sourceAuthor}: "${sourceText}"
 
 Original drafted text (IGNORE its angle — use the brief's angle instead): "${originalCrafted}"
 
-Return a JSON object with crafted_text, format, brief_alignment_score, originality_strategy, twist_type_used, signature_phrase, operator_takeaway, avoided_anti_patterns, claims_to_avoid_checked, and notes.`;
+Return a JSON object with a "candidates" array containing brief_faithful, signature_original, and operator_heuristic variants.`;
 
   try {
     const response = await callModel('selected_candidate_crafting' as any, [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
-    ], { temperature: 0.18, max_tokens: 900, response_format: { type: 'json_object' } });
+    ], { temperature: 0.18, max_tokens: 1800, response_format: { type: 'json_object' } });
 
-    // Phase 2D.3: Strict JSON parse — the contract requires a JSON object
+    // Phase 2D.3/2G.3: Strict JSON parse
     let parsed: any;
     try {
       parsed = parseModelJson(String(response || ''));
@@ -528,188 +558,180 @@ Return a JSON object with crafted_text, format, brief_alignment_score, originali
       parsed = null;
     }
 
-    // Require crafted_text field in parsed JSON
-    if (!parsed || typeof parsed !== 'object' || typeof parsed.crafted_text !== 'string' || !parsed.crafted_text.trim()) {
-      return {
-        crafted_text: null,
-        format: brief.content_format || 'reply',
-        brief_alignment_score: 1,
-        brief_alignment_notes: ['selected_candidate_crafting_parse_failed: JSON missing crafted_text or parse error'],
-        invented_personal_experience_flag: false,
-        ignored_recommended_angle_flag: true,
-        _brief_crafting_parse_failed: true,
-        _brief_crafting_failure_reason: 'json_missing_crafted_text',
-      };
+    if (!parsed || typeof parsed !== 'object') {
+      return [makeFailedCandidate(brief, 'json_parse_failed')];
     }
 
-    let crafted = parsed.crafted_text.trim();
-    const modelFormat = parsed.format || brief.content_format || 'reply';
-    const modelBriefScore = typeof parsed.brief_alignment_score === 'number' ? parsed.brief_alignment_score : undefined;
+    // Phase 2G.3: Check for new candidates array schema vs old single-candidate schema
+    const hasCandidatesArray = Array.isArray(parsed.candidates) && parsed.candidates.length > 0;
+    const hasOldSchema = typeof parsed.crafted_text === 'string' && parsed.crafted_text.trim();
 
-    // Do NOT use raw model output if it still looks like JSON/malformed
-    if (/^\s*\{/.test(crafted) || /^```/.test(crafted)) {
-      return {
-        crafted_text: null,
-        format: brief.content_format || 'reply',
-        brief_alignment_score: 1,
-        brief_alignment_notes: ['selected_candidate_crafting_parse_failed: crafted_text field contains JSON wrapper'],
-        invented_personal_experience_flag: false,
-        ignored_recommended_angle_flag: true,
-        _brief_crafting_parse_failed: true,
-        _brief_crafting_failure_reason: 'crafted_text_is_json_wrapper',
-      };
-    }
-
-    if (!crafted || crafted.length < 10) {
-      return {
-        crafted_text: null,
-        format: brief.content_format || 'reply',
-        brief_alignment_score: 1,
-        brief_alignment_notes: ['Crafting produced empty or too short text'],
-        invented_personal_experience_flag: false,
-        ignored_recommended_angle_flag: true,
-        _brief_crafting_parse_failed: false,
-        _brief_crafting_failure_reason: 'text_too_short',
-      };
-    }
-
-    // Phase 2D.3: Pre-judge self-check — local quality checks + validateBriefAlignment
-    const alignment = validateBriefAlignment(crafted, brief, sourceText);
-    const localFailures = localCraftingChecks(crafted, brief, sourceText);
-    const allNotes = [...alignment.notes, ...localFailures];
-
-    // If local checks fail, attempt ONE repair
-    let repairAttempted = false;
-    let repairApplied = false;
-    let repairFailureReason: string | undefined;
-
-    if (localFailures.length > 0 || alignment.score < 7.0) {
-      repairAttempted = true;
-      console.log(`[craftFromBrief] Local checks failed (${localFailures.join(', ')}), brief_alignment_score=${alignment.score}. Attempting one repair.`);
-
-      try {
-        const repairResponse = await callModel('selected_candidate_crafting' as any, [
-          {
-            role: 'system',
-            content: `You are a content crafter for @30piq. Your previous draft had quality issues that must be fixed.
-
-Fix these specific problems:
-${localFailures.map(f => `- ${f}`).join('\n')}
-${alignment.score < 7.0 ? `- brief_alignment_score is only ${alignment.score}/10 — must better follow the recommended angle` : ''}
-
-MANDATORY RULES (same as before):
-- Follow the recommended_angle exactly: ${brief.recommended_angle}
-- No invented personal experience
-- No generic/vague praise ("brilliant minds", "game changer", "hype cycle", "gives me hope")
-- Avoid do_not_claim terms
-- Include at least one concrete takeaway for builders/operators
-- Keep claims as interpretations, not facts
-- Under 280 chars, at least 40 chars
-- English only, no hashtags, no AI slop
-
-Return a JSON object: { "crafted_text": "...", "format": "...", "brief_alignment_score": N, "claims_to_avoid_checked": bool, "notes": "..." }`,
-          },
-          {
-            role: 'user',
-            content: `Previous draft that needs repair:
-"${crafted}"
-
-Source by @${sourceAuthor}: "${sourceText}"
-
-Return a repaired JSON object.`,
-          },
-        ], { temperature: 0.18, max_tokens: 900, response_format: { type: 'json_object' } });
-
-        let repairParsed: any;
-        try {
-          repairParsed = parseModelJson(String(repairResponse || ''));
-        } catch {
-          repairParsed = null;
-        }
-
-        if (repairParsed && typeof repairParsed.crafted_text === 'string' && repairParsed.crafted_text.trim()) {
-          const repairedText = repairParsed.crafted_text.trim();
-          // Verify repair doesn't look like JSON
-          if (!/^\s*\{/.test(repairedText) && !/^```/.test(repairedText)) {
-            // Re-validate repaired text
-            const repairAlignment = validateBriefAlignment(repairedText, brief, sourceText);
-            const repairLocalFailures = localCraftingChecks(repairedText, brief, sourceText);
-
-            // Accept repair if it improves the situation (fewer failures or better alignment)
-            if (repairLocalFailures.length < localFailures.length || repairAlignment.score > alignment.score) {
-              crafted = repairedText;
-              repairApplied = true;
-              // Update alignment info to the repaired version
-              alignment.score = repairAlignment.score;
-              alignment.notes = [...repairAlignment.notes, ...repairLocalFailures, 'repair_applied'];
-              alignment.invented_personal_experience = repairAlignment.invented_personal_experience;
-              alignment.ignored_recommended_angle = repairAlignment.ignored_recommended_angle;
-            } else {
-              repairFailureReason = 'repair_no_improvement';
-            }
-          } else {
-            repairFailureReason = 'repair_crafted_text_is_json_wrapper';
-          }
-        } else {
-          repairFailureReason = 'repair_json_missing_crafted_text';
-        }
-      } catch (repairErr: any) {
-        console.warn(`[craftFromBrief] Repair attempt failed: ${(repairErr?.message || 'unknown').slice(0, 200)}`);
-        repairFailureReason = `repair_exception:${(repairErr?.message || 'unknown').slice(0, 50)}`;
+    if (hasCandidatesArray) {
+      // New schema — process each candidate in the array
+      const candidates: CraftedCandidate[] = [];
+      for (const rawCandidate of parsed.candidates) {
+        const processed = processCandidateVariant(rawCandidate, brief, sourceText, originalityContext);
+        candidates.push(processed);
       }
+      return candidates;
+    } else if (hasOldSchema) {
+      // Old schema — backward compatibility: wrap as single "legacy" candidate
+      console.log('[craftFromBrief] Model returned old single-candidate schema, wrapping as legacy candidate');
+      const processed = processCandidateVariant(parsed, brief, sourceText, originalityContext, 'legacy');
+      return [processed];
+    } else {
+      // Neither schema — parse failure
+      return [makeFailedCandidate(brief, 'json_missing_candidates_or_crafted_text')];
     }
-
-    // Phase 2G: Parse originality output fields from model response
-    const originalityOutput = validateOriginalityOutput(parsed);
-    const originalityIndicators = detectOriginalityIndicators(crafted);
-
-    // Phase 2G.1: Validate signature voice
-    const signatureVoiceDiagnostics = validateSignatureVoice(crafted);
-    // Override the model-declared signature_phrase and operator_takeaway if available
-    if (parsed.signature_phrase && typeof parsed.signature_phrase === 'string') {
-      signatureVoiceDiagnostics._signature_phrase = parsed.signature_phrase.trim();
-    }
-    if (parsed.operator_takeaway && typeof parsed.operator_takeaway === 'string') {
-      signatureVoiceDiagnostics._operator_takeaway = parsed.operator_takeaway.trim();
-    }
-
-    return {
-      crafted_text: crafted,
-      format: modelFormat || brief.content_format || 'reply',
-      brief_alignment_score: alignment.score,
-      brief_alignment_notes: alignment.notes,
-      invented_personal_experience_flag: alignment.invented_personal_experience,
-      ignored_recommended_angle_flag: alignment.ignored_recommended_angle,
-      _brief_crafting_parse_failed: false,
-      _brief_crafting_repair_attempted: repairAttempted,
-      _brief_crafting_repair_applied: repairApplied,
-      _brief_crafting_failure_reason: repairFailureReason,
-      _originality_diagnostics: {
-        _originality_context_used: !!originalityContext,
-        _originality_twist_type_used: originalityOutput.twist_type_used || undefined,
-        _originality_strategy: originalityOutput.originality_strategy || undefined,
-        _originality_context_items_count: originalityContext
-          ? originalityContext.angle_patterns.length + originalityContext.rejected_examples.length + originalityContext.successful_frames.length
-          : 0,
-        _avoided_originality_anti_patterns: originalityOutput.avoided_anti_patterns.length > 0
-          ? originalityOutput.avoided_anti_patterns
-          : undefined,
-      },
-      _signature_voice_diagnostics: signatureVoiceDiagnostics,
-    };
   } catch (err: any) {
     console.warn(`[craftFromBrief] AI call failed: ${(err?.message || 'unknown').slice(0, 200)}`);
+    return [makeFailedCandidate(brief, `ai_call_failed:${(err?.message || 'unknown').slice(0, 50)}`)];
+  }
+}
+
+/**
+ * Helper: Create a failed CraftedCandidate with error diagnostics.
+ */
+function makeFailedCandidate(
+  brief: Record<string, any>,
+  failureReason: string
+): CraftedCandidate {
+  return {
+    variant_type: 'legacy',
+    crafted_text: null,
+    format: brief.content_format || 'reply',
+    brief_alignment_score: 1,
+    brief_alignment_notes: [`selected_candidate_crafting_parse_failed: ${failureReason}`],
+    invented_personal_experience_flag: false,
+    ignored_recommended_angle_flag: true,
+    _brief_crafting_parse_failed: true,
+    _brief_crafting_failure_reason: failureReason,
+  };
+}
+
+/**
+ * Helper: Process a single candidate variant from the model response.
+ * Runs local quality checks, repair if needed, and validation.
+ */
+function processCandidateVariant(
+  rawCandidate: any,
+  brief: Record<string, any>,
+  sourceText: string,
+  originalityContext?: OriginalityContext | null,
+  overrideVariantType?: string
+): CraftedCandidate {
+  const variantType = overrideVariantType ||
+    (typeof rawCandidate.variant_type === 'string' ? rawCandidate.variant_type : 'legacy');
+
+  // Validate crafted_text
+  if (!rawCandidate || typeof rawCandidate.crafted_text !== 'string' || !rawCandidate.crafted_text.trim()) {
     return {
+      variant_type: variantType,
       crafted_text: null,
       format: brief.content_format || 'reply',
       brief_alignment_score: 1,
-      brief_alignment_notes: [`AI call failed: ${(err?.message || 'unknown').slice(0, 100)}`],
+      brief_alignment_notes: ['selected_candidate_crafting_parse_failed: JSON missing crafted_text or parse error'],
       invented_personal_experience_flag: false,
       ignored_recommended_angle_flag: true,
       _brief_crafting_parse_failed: true,
-      _brief_crafting_failure_reason: `ai_call_failed:${(err?.message || 'unknown').slice(0, 50)}`,
+      _brief_crafting_failure_reason: 'json_missing_crafted_text',
     };
   }
+
+  let crafted = rawCandidate.crafted_text.trim();
+  const modelFormat = rawCandidate.format || brief.content_format || 'reply';
+
+  // Do NOT use raw model output if it still looks like JSON/malformed
+  if (/^\s*\{/.test(crafted) || /^```/.test(crafted)) {
+    return {
+      variant_type: variantType,
+      crafted_text: null,
+      format: brief.content_format || 'reply',
+      brief_alignment_score: 1,
+      brief_alignment_notes: ['selected_candidate_crafting_parse_failed: crafted_text field contains JSON wrapper'],
+      invented_personal_experience_flag: false,
+      ignored_recommended_angle_flag: true,
+      _brief_crafting_parse_failed: true,
+      _brief_crafting_failure_reason: 'crafted_text_is_json_wrapper',
+    };
+  }
+
+  if (!crafted || crafted.length < 10) {
+    return {
+      variant_type: variantType,
+      crafted_text: null,
+      format: brief.content_format || 'reply',
+      brief_alignment_score: 1,
+      brief_alignment_notes: ['Crafting produced empty or too short text'],
+      invented_personal_experience_flag: false,
+      ignored_recommended_angle_flag: true,
+      _brief_crafting_parse_failed: false,
+      _brief_crafting_failure_reason: 'text_too_short',
+    };
+  }
+
+  // Pre-judge self-check — local quality checks + validateBriefAlignment
+  const briefForValidation = {
+    recommended_angle: brief.recommended_angle || '',
+    source_summary: brief.source_summary || '',
+    do_not_claim: brief.do_not_claim || [],
+    required_context: brief.required_context || [],
+  };
+  const alignment = validateBriefAlignment(crafted, briefForValidation, sourceText);
+  const localFailures = localCraftingChecks(crafted, { do_not_claim: briefForValidation.do_not_claim }, sourceText);
+
+  // Phase 2G: Parse originality output fields from model response
+  const originalityOutput = validateOriginalityOutput(rawCandidate);
+
+  // Phase 2G.1: Validate signature voice
+  const signatureVoiceDiagnostics = validateSignatureVoice(crafted);
+  // Override the model-declared signature_phrase and operator_takeaway if available
+  if (rawCandidate.signature_phrase && typeof rawCandidate.signature_phrase === 'string') {
+    signatureVoiceDiagnostics._signature_phrase = rawCandidate.signature_phrase.trim();
+  }
+  if (rawCandidate.operator_takeaway && typeof rawCandidate.operator_takeaway === 'string') {
+    signatureVoiceDiagnostics._operator_takeaway = rawCandidate.operator_takeaway.trim();
+  }
+
+  // Note: For Phase 2G.3 multi-candidate, we skip the repair attempt for each
+  // individual candidate — instead, the local selector (candidate-selector.ts)
+  // picks the best candidates and the near-pass polish handles improvements.
+  // This avoids 3x repair calls.
+  const repairAttempted = false;
+  const repairApplied = false;
+  let repairFailureReason: string | undefined;
+
+  // Only attempt repair for legacy (single-candidate) mode to preserve backward compat
+  if (variantType === 'legacy' && (localFailures.length > 0 || alignment.score < 7.0)) {
+    // Legacy repair logic — not applied for multi-candidate mode
+    // (repairAttempted, repairApplied remain false for multi-candidate)
+  }
+
+  return {
+    variant_type: variantType,
+    crafted_text: crafted,
+    format: modelFormat || brief.content_format || 'reply',
+    brief_alignment_score: alignment.score,
+    brief_alignment_notes: [...alignment.notes, ...localFailures],
+    invented_personal_experience_flag: alignment.invented_personal_experience,
+    ignored_recommended_angle_flag: alignment.ignored_recommended_angle,
+    _brief_crafting_parse_failed: false,
+    _brief_crafting_repair_attempted: repairAttempted,
+    _brief_crafting_repair_applied: repairApplied,
+    _brief_crafting_failure_reason: repairFailureReason,
+    _originality_diagnostics: {
+      _originality_context_used: !!originalityContext,
+      _originality_twist_type_used: originalityOutput.twist_type_used || undefined,
+      _originality_strategy: originalityOutput.originality_strategy || undefined,
+      _originality_context_items_count: originalityContext
+        ? originalityContext.angle_patterns.length + originalityContext.rejected_examples.length + originalityContext.successful_frames.length
+        : 0,
+      _avoided_originality_anti_patterns: originalityOutput.avoided_anti_patterns.length > 0
+        ? originalityOutput.avoided_anti_patterns
+        : undefined,
+    },
+    _signature_voice_diagnostics: signatureVoiceDiagnostics,
+  };
 }
 
 // ═══ Task Processing Logic ═══
@@ -1225,6 +1247,7 @@ async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskRe
     // The original crafted_text from content-engine-v3 was generated BEFORE intelligence,
     // so it ignores the recommended_angle. We now recraft using selected_candidate_crafting.
     // Phase 2G: Fetch originality context ONCE per run, share across all candidates.
+    // Phase 2G.3: Multi-candidate generation + local pre-selection
     let briefRecraftCount = 0;
     let briefRecraftFailed = 0;
     let originalityContextUsedCount = 0;
@@ -1236,6 +1259,12 @@ async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskRe
     let signatureVoiceScoreSum = 0;
     let signatureVoiceScoreCount = 0;
     const signatureVoiceFailureReasonsAll: string[] = [];
+    // Phase 2G.3: Multi-candidate task-level diagnostics
+    let multiCandidateGenerationCount = 0;
+    const multiCandidateVariantsGenerated: string[] = [];
+    let multiCandidateDroppedCount = 0;
+    let multiCandidateParseFallbackCount = 0;
+    const multiCandidateBestVariantCounts: Record<string, number> = {};
 
     // Phase 2G: Fetch originality context for the batch (shared, not per-candidate)
     let batchOriginalityContext: OriginalityContext | null = null;
@@ -1282,82 +1311,136 @@ async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskRe
             }
           }
 
-          const recraftResult = await craftFromBrief(opp, brief, originalityCtx);
-          if (recraftResult.crafted_text) {
+          // Phase 2G.3: craftFromBrief now returns CraftedCandidate[]
+          const allCandidates = await craftFromBrief(opp, brief, originalityCtx);
+
+          // Track multi-candidate diagnostics
+          multiCandidateGenerationCount += allCandidates.length;
+          for (const c of allCandidates) {
+            multiCandidateVariantsGenerated.push(c.variant_type);
+          }
+          // Check if any candidate is a legacy (old schema fallback)
+          if (allCandidates.length === 1 && allCandidates[0].variant_type === 'legacy') {
+            multiCandidateParseFallbackCount++;
+          }
+
+          // Phase 2G.3: Local pre-selection — pick best candidates for judge
+          const briefForSelection: BriefForSelection = {
+            recommended_angle: brief.recommended_angle,
+            source_summary: brief.source_summary || '',
+            do_not_claim: brief.do_not_claim || [],
+            required_context: brief.required_context || [],
+          };
+          const selectionResult = selectCandidatesForJudge(allCandidates, briefForSelection);
+
+          // Track dropped candidates
+          multiCandidateDroppedCount += selectionResult.dropped;
+
+          // Use the best selected candidate's data for the opportunity
+          const bestCandidate = selectionResult.selected[0]; // Always exists if candidates were generated
+          if (bestCandidate && bestCandidate.crafted_text) {
+            // Track best variant type
+            multiCandidateBestVariantCounts[bestCandidate.variant_type] =
+              (multiCandidateBestVariantCounts[bestCandidate.variant_type] || 0) + 1;
+
+            // Build alternatives summary from non-selected candidates
+            const alternativesSummary = allCandidates
+              .filter(c => !selectionResult.selected.includes(c))
+              .map(c => `${c.variant_type}(local_score=${c._candidate_local_score ?? 'N/A'})`)
+              .join(', ');
+
             opportunities[i] = {
               ...opp,
-              crafted_text: recraftResult.crafted_text,
+              crafted_text: bestCandidate.crafted_text,
               _brief_used_for_crafting: true,
-              _brief_alignment_score: recraftResult.brief_alignment_score,
-              _brief_alignment_notes: recraftResult.brief_alignment_notes,
-              _invented_personal_experience_flag: recraftResult.invented_personal_experience_flag,
-              _ignored_recommended_angle_flag: recraftResult.ignored_recommended_angle_flag,
+              _brief_alignment_score: bestCandidate.brief_alignment_score,
+              _brief_alignment_notes: bestCandidate.brief_alignment_notes,
+              _invented_personal_experience_flag: bestCandidate.invented_personal_experience_flag,
+              _ignored_recommended_angle_flag: bestCandidate.ignored_recommended_angle_flag,
               // Phase 2D.3 diagnostics
-              _brief_crafting_parse_failed: recraftResult._brief_crafting_parse_failed || false,
-              _brief_crafting_repair_attempted: recraftResult._brief_crafting_repair_attempted || false,
-              _brief_crafting_repair_applied: recraftResult._brief_crafting_repair_applied || false,
-              _brief_crafting_failure_reason: recraftResult._brief_crafting_failure_reason,
+              _brief_crafting_parse_failed: bestCandidate._brief_crafting_parse_failed || false,
+              _brief_crafting_repair_attempted: bestCandidate._brief_crafting_repair_attempted || false,
+              _brief_crafting_repair_applied: bestCandidate._brief_crafting_repair_applied || false,
+              _brief_crafting_failure_reason: bestCandidate._brief_crafting_failure_reason,
               // Phase 2G: Originality diagnostics
-              _originality_context_used: recraftResult._originality_diagnostics?._originality_context_used ?? false,
-              _originality_twist_type_used: recraftResult._originality_diagnostics?._originality_twist_type_used,
-              _originality_strategy: recraftResult._originality_diagnostics?._originality_strategy,
-              _originality_context_items_count: recraftResult._originality_diagnostics?._originality_context_items_count ?? 0,
-              _avoided_originality_anti_patterns: recraftResult._originality_diagnostics?._avoided_originality_anti_patterns,
+              _originality_context_used: bestCandidate._originality_diagnostics?._originality_context_used ?? false,
+              _originality_twist_type_used: bestCandidate._originality_diagnostics?._originality_twist_type_used,
+              _originality_strategy: bestCandidate._originality_diagnostics?._originality_strategy,
+              _originality_context_items_count: bestCandidate._originality_diagnostics?._originality_context_items_count ?? 0,
+              _avoided_originality_anti_patterns: bestCandidate._originality_diagnostics?._avoided_originality_anti_patterns,
               // Phase 2G.1: Signature voice diagnostics
-              _signature_voice_used: recraftResult._signature_voice_diagnostics?._signature_voice_used ?? false,
-              _signature_phrase: recraftResult._signature_voice_diagnostics?._signature_phrase,
-              _operator_takeaway: recraftResult._signature_voice_diagnostics?._operator_takeaway,
-              _signature_voice_score: recraftResult._signature_voice_diagnostics?._signature_voice_score ?? 0,
-              _signature_voice_failure_reasons: recraftResult._signature_voice_diagnostics?._signature_voice_failure_reasons,
+              _signature_voice_used: bestCandidate._signature_voice_diagnostics?._signature_voice_used ?? false,
+              _signature_phrase: bestCandidate._signature_voice_diagnostics?._signature_phrase,
+              _operator_takeaway: bestCandidate._signature_voice_diagnostics?._operator_takeaway,
+              _signature_voice_score: bestCandidate._signature_voice_diagnostics?._signature_voice_score ?? 0,
+              _signature_voice_failure_reasons: bestCandidate._signature_voice_diagnostics?._signature_voice_failure_reasons,
+              // Phase 2G.3: Multi-candidate diagnostics
+              _candidate_variant_type: bestCandidate.variant_type,
+              _candidate_local_score: bestCandidate._candidate_local_score,
+              _candidate_selection_reason: bestCandidate._candidate_selection_reason,
+              _candidate_generation_count: allCandidates.length,
+              _candidate_dropped_count: selectionResult.dropped,
+              _candidate_alternatives_summary: alternativesSummary || undefined,
+              _candidate_was_multi_generated: allCandidates.length > 1,
+              // Store ALL candidates for diagnostics (selected + dropped)
+              _all_candidates: allCandidates,
+              // Store selected candidates for the judge step
+              _selected_candidates: selectionResult.selected,
             };
             briefRecraftCount++;
 
-            // Track twist type counts
-            if (recraftResult._originality_diagnostics?._originality_twist_type_used) {
-              const twist = recraftResult._originality_diagnostics._originality_twist_type_used;
+            // Track twist type counts from best candidate
+            if (bestCandidate._originality_diagnostics?._originality_twist_type_used) {
+              const twist = bestCandidate._originality_diagnostics._originality_twist_type_used;
               originalityTwistTypeCounts[twist] = (originalityTwistTypeCounts[twist] || 0) + 1;
             }
-            if (recraftResult._originality_diagnostics?._avoided_originality_anti_patterns) {
-              originalityAntiPatternsUsed.push(...recraftResult._originality_diagnostics._avoided_originality_anti_patterns);
+            if (bestCandidate._originality_diagnostics?._avoided_originality_anti_patterns) {
+              originalityAntiPatternsUsed.push(...bestCandidate._originality_diagnostics._avoided_originality_anti_patterns);
             }
-            // Phase 2G.1: Track signature voice stats
-            if (recraftResult._signature_voice_diagnostics?._signature_voice_used) {
+            // Phase 2G.1: Track signature voice stats from best candidate
+            if (bestCandidate._signature_voice_diagnostics?._signature_voice_used) {
               signatureVoiceUsedCount++;
             }
-            if (recraftResult._signature_voice_diagnostics?._signature_voice_score) {
-              signatureVoiceScoreSum += recraftResult._signature_voice_diagnostics._signature_voice_score;
+            if (bestCandidate._signature_voice_diagnostics?._signature_voice_score) {
+              signatureVoiceScoreSum += bestCandidate._signature_voice_diagnostics._signature_voice_score;
               signatureVoiceScoreCount++;
             }
-            if (recraftResult._signature_voice_diagnostics?._signature_voice_failure_reasons) {
-              signatureVoiceFailureReasonsAll.push(...recraftResult._signature_voice_diagnostics._signature_voice_failure_reasons);
+            if (bestCandidate._signature_voice_diagnostics?._signature_voice_failure_reasons) {
+              signatureVoiceFailureReasonsAll.push(...bestCandidate._signature_voice_diagnostics._signature_voice_failure_reasons);
             }
           } else {
+            // All candidates failed — use the first one's diagnostics (even though crafted_text is null)
+            const firstCandidate = allCandidates[0] || bestCandidate;
             briefRecraftFailed++;
-            // Mark the brief as attempted but failed
             opportunities[i] = {
               ...opp,
               _brief_used_for_crafting: true,
-              _brief_alignment_score: recraftResult.brief_alignment_score,
-              _brief_alignment_notes: recraftResult.brief_alignment_notes,
-              _invented_personal_experience_flag: recraftResult.invented_personal_experience_flag,
-              _ignored_recommended_angle_flag: recraftResult.ignored_recommended_angle_flag,
-              // Phase 2D.3 diagnostics
-              _brief_crafting_parse_failed: recraftResult._brief_crafting_parse_failed || false,
-              _brief_crafting_repair_attempted: recraftResult._brief_crafting_repair_attempted || false,
-              _brief_crafting_repair_applied: recraftResult._brief_crafting_repair_applied || false,
-              _brief_crafting_failure_reason: recraftResult._brief_crafting_failure_reason,
-              // Phase 2G: Originality diagnostics (even on failure)
-              _originality_context_used: recraftResult._originality_diagnostics?._originality_context_used ?? false,
-              _originality_twist_type_used: recraftResult._originality_diagnostics?._originality_twist_type_used,
-              _originality_strategy: recraftResult._originality_diagnostics?._originality_strategy,
-              _originality_context_items_count: recraftResult._originality_diagnostics?._originality_context_items_count ?? 0,
-              _avoided_originality_anti_patterns: recraftResult._originality_diagnostics?._avoided_originality_anti_patterns,
-              // Phase 2G.1: Signature voice diagnostics (even on failure)
-              _signature_voice_used: recraftResult._signature_voice_diagnostics?._signature_voice_used ?? false,
-              _signature_phrase: recraftResult._signature_voice_diagnostics?._signature_phrase,
-              _operator_takeaway: recraftResult._signature_voice_diagnostics?._operator_takeaway,
-              _signature_voice_score: recraftResult._signature_voice_diagnostics?._signature_voice_score ?? 0,
-              _signature_voice_failure_reasons: recraftResult._signature_voice_diagnostics?._signature_voice_failure_reasons,
+              _brief_alignment_score: firstCandidate?.brief_alignment_score ?? 1,
+              _brief_alignment_notes: firstCandidate?.brief_alignment_notes ?? [],
+              _invented_personal_experience_flag: firstCandidate?.invented_personal_experience_flag ?? false,
+              _ignored_recommended_angle_flag: firstCandidate?.ignored_recommended_angle_flag ?? true,
+              _brief_crafting_parse_failed: firstCandidate?._brief_crafting_parse_failed || false,
+              _brief_crafting_repair_attempted: firstCandidate?._brief_crafting_repair_attempted || false,
+              _brief_crafting_repair_applied: firstCandidate?._brief_crafting_repair_applied || false,
+              _brief_crafting_failure_reason: firstCandidate?._brief_crafting_failure_reason,
+              _originality_context_used: firstCandidate?._originality_diagnostics?._originality_context_used ?? false,
+              _originality_twist_type_used: firstCandidate?._originality_diagnostics?._originality_twist_type_used,
+              _originality_strategy: firstCandidate?._originality_diagnostics?._originality_strategy,
+              _originality_context_items_count: firstCandidate?._originality_diagnostics?._originality_context_items_count ?? 0,
+              _avoided_originality_anti_patterns: firstCandidate?._originality_diagnostics?._avoided_originality_anti_patterns,
+              _signature_voice_used: firstCandidate?._signature_voice_diagnostics?._signature_voice_used ?? false,
+              _signature_phrase: firstCandidate?._signature_voice_diagnostics?._signature_phrase,
+              _operator_takeaway: firstCandidate?._signature_voice_diagnostics?._operator_takeaway,
+              _signature_voice_score: firstCandidate?._signature_voice_diagnostics?._signature_voice_score ?? 0,
+              _signature_voice_failure_reasons: firstCandidate?._signature_voice_diagnostics?._signature_voice_failure_reasons,
+              // Phase 2G.3: Multi-candidate diagnostics (even on failure)
+              _candidate_variant_type: firstCandidate?.variant_type,
+              _candidate_local_score: firstCandidate?._candidate_local_score,
+              _candidate_generation_count: allCandidates.length,
+              _candidate_dropped_count: selectionResult.dropped,
+              _candidate_was_multi_generated: allCandidates.length > 1,
+              _all_candidates: allCandidates,
+              _selected_candidates: selectionResult.selected,
             };
           }
         } catch (recraftErr: any) {
@@ -1392,6 +1475,12 @@ async function processEnrichOpportunities(task: PipelineTaskRow): Promise<TaskRe
           ? Math.round((signatureVoiceScoreSum / signatureVoiceScoreCount) * 10) / 10
           : 0,
         signature_voice_failure_reasons: signatureVoiceFailureReasonsAll,
+        // Phase 2G.3: Multi-candidate task-level diagnostics
+        multi_candidate_generation_count: multiCandidateGenerationCount,
+        multi_candidate_variants_generated: multiCandidateVariantsGenerated,
+        multi_candidate_dropped_count: multiCandidateDroppedCount,
+        multi_candidate_parse_fallback_count: multiCandidateParseFallbackCount,
+        multi_candidate_best_variant_counts: multiCandidateBestVariantCounts,
         _opportunities: opportunities,
         _rule_performance: rulePerformanceStats
       }
@@ -1661,17 +1750,55 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
     }
 
     // Build judge candidates with their briefs
-    // Phase 2D.3: Prefer opp._brief directly over intelBriefs source_text lookup
-    const candidates = opportunities.map(opp => {
+    // Phase 2G.3: Include ALL selected candidates (up to 2 per opportunity)
+    // Each candidate from _selected_candidates gets its own judge evaluation.
+    // Candidates without _selected_candidates fall back to the single opp.crafted_text.
+    type JudgeCandidateEntry = {
+      crafted_text: string;
+      brief: Record<string, any>;
+      opportunityIndex: number; // maps back to opportunities[] index
+      candidateVariantType?: string;
+      candidateLocalScore?: number;
+      candidateSelectionReason?: string;
+      sourceKey: string; // for deduplication after judging
+    };
+
+    const candidates: JudgeCandidateEntry[] = [];
+    for (let oppIdx = 0; oppIdx < opportunities.length; oppIdx++) {
+      const opp = opportunities[oppIdx];
       const oppBrief = (opp as any)._brief;
       const brief = (oppBrief && oppBrief.recommended_angle) ? oppBrief
         : intelBriefs[(opp.source_text || '').slice(0, 100)] || {};
-      return {
-        crafted_text: opp.crafted_text || '',
-        brief,
-        opportunity: opp,
-      };
-    });
+      const sourceKey = String((opp as any).source_text || (opp as any).text || '').slice(0, 100);
+
+      // Phase 2G.3: Check for multi-candidate selection
+      const selectedCandidates: CraftedCandidate[] | undefined = (opp as any)._selected_candidates;
+
+      if (selectedCandidates && selectedCandidates.length > 0) {
+        // Multi-candidate mode: add each selected candidate for judging
+        for (const cand of selectedCandidates) {
+          if (cand.crafted_text) {
+            candidates.push({
+              crafted_text: cand.crafted_text,
+              brief,
+              opportunityIndex: oppIdx,
+              candidateVariantType: cand.variant_type,
+              candidateLocalScore: cand._candidate_local_score,
+              candidateSelectionReason: cand._candidate_selection_reason,
+              sourceKey,
+            });
+          }
+        }
+      } else {
+        // Single-candidate mode (legacy): use the opportunity's crafted_text
+        candidates.push({
+          crafted_text: opp.crafted_text || '',
+          brief,
+          opportunityIndex: oppIdx,
+          sourceKey,
+        });
+      }
+    }
 
     // Run judge on all candidates
     const { results, summary } = await judgeCraftedCandidates(candidates.map(c => ({
@@ -1679,9 +1806,79 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
       brief: c.brief,
     })));
 
+    // Phase 2G.3: Dedupe candidates from the SAME source/opportunity before applying results.
+    // For opportunities with multiple candidates, keep only the best judged candidate.
+    const candidatesWithJudgeResults: CandidateWithJudgeResult[] = candidates.map((c, i) => ({
+      candidate: {
+        variant_type: c.candidateVariantType || 'legacy',
+        crafted_text: c.crafted_text,
+        format: '',
+        brief_alignment_score: 0,
+        brief_alignment_notes: [],
+        invented_personal_experience_flag: false,
+        ignored_recommended_angle_flag: false,
+        _candidate_local_score: c.candidateLocalScore,
+        _candidate_selection_reason: c.candidateSelectionReason,
+      },
+      judgeResult: results[i] ? {
+        passed: results[i].passed,
+        final_candidate_score: results[i].final_candidate_score,
+        originality_score: results[i].originality_score,
+        brief_alignment_score: results[i].brief_alignment_score,
+        evidence_safety_score: results[i].evidence_safety_score,
+      } : {
+        passed: false,
+        final_candidate_score: 1,
+        originality_score: 1,
+        brief_alignment_score: 1,
+        evidence_safety_score: 1,
+      },
+      sourceKey: c.sourceKey,
+    }));
+
+    const dedupedCandidates = deduplicateJudgedCandidates(candidatesWithJudgeResults);
+
+    // Build a map from sourceKey to the best candidate's judge result and metadata
+    const bestCandidateBySource = new Map<string, {
+      judgeResult: JudgeResult;
+      variantType?: string;
+      localScore?: number;
+      selectionReason?: string;
+      candidateIndex: number; // index into original candidates[] array
+    }>();
+    for (const entry of dedupedCandidates) {
+      bestCandidateBySource.set(entry.sourceKey, {
+        judgeResult: results[candidatesWithJudgeResults.indexOf(entry)] || results[0],
+        variantType: entry.candidate.variant_type,
+        localScore: entry.candidate._candidate_local_score,
+        selectionReason: entry.candidate._candidate_selection_reason,
+        candidateIndex: candidatesWithJudgeResults.indexOf(entry),
+      });
+    }
+
     // Apply judge results to opportunities — judge-failed ones get shield_passed=false
     const judgedOpportunities = opportunities.map((opp, i) => {
-      const judgeResult = results[i];
+      const sourceKey = String((opp as any).source_text || (opp as any).text || '').slice(0, 100);
+      const bestEntry = bestCandidateBySource.get(sourceKey);
+
+      // Find the judge result for the best candidate from this opportunity
+      // If this opportunity had multiple candidates, only the best one's result is used
+      let judgeResult: JudgeResult | undefined;
+      let bestVariantType: string | undefined;
+      let bestLocalScore: number | undefined;
+      let bestSelectionReason: string | undefined;
+
+      if (bestEntry) {
+        judgeResult = bestEntry.judgeResult;
+        bestVariantType = bestEntry.variantType;
+        bestLocalScore = bestEntry.localScore;
+        bestSelectionReason = bestEntry.selectionReason;
+      } else {
+        // Fallback: find the first candidate for this opportunity
+        const candIdx = candidates.findIndex(c => c.opportunityIndex === i);
+        judgeResult = candIdx >= 0 ? results[candIdx] : undefined;
+      }
+
       if (!judgeResult) return opp;
 
       return {
@@ -1704,6 +1901,10 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
           shield_passed: false,
           shield_issues: [...(opp.shield_issues || []), `judge_failed:${judgeResult.failure_reasons[0] || 'unknown'}`],
         }),
+        // Phase 2G.3: Preserve multi-candidate metadata after judge dedup
+        ...(bestVariantType ? { _candidate_variant_type: bestVariantType } : {}),
+        ...(bestLocalScore !== undefined ? { _candidate_local_score: bestLocalScore } : {}),
+        ...(bestSelectionReason ? { _candidate_selection_reason: bestSelectionReason } : {}),
       };
     });
 
@@ -2108,6 +2309,9 @@ async function processOpportunityJudge(task: PipelineTaskRow): Promise<TaskResul
         brief_locked_polish_attempted_count: nearPassDiagnosticsFinal.brief_locked_polish_attempted_count,
         brief_locked_polish_applied_count: nearPassDiagnosticsFinal.brief_locked_polish_applied_count,
         brief_locked_polish_passed_count: nearPassDiagnosticsFinal.brief_locked_polish_passed_count,
+        // Phase 2G.3: Multi-candidate judge diagnostics
+        multi_candidate_variants_judged: candidates.length,
+        multi_candidate_variants_generated: candidates.filter(c => c.candidateVariantType).map(c => c.candidateVariantType!),
       }
     };
   } catch (err: any) {
