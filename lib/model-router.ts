@@ -155,7 +155,7 @@ const DEFAULT_ROUTING: Record<TaskType, ModelConfig> = {
   },
   // Phase 2D dedicated routes — high-value judgment tasks get strongest models
   opportunity_intelligence: {
-    model: 'anthropic/claude-sonnet-4-20250514',
+    model: 'meta-llama/llama-4-maverick',
     temperature: 0.05,
     max_tokens: 2600,
     response_format: { type: 'json_object' },
@@ -163,7 +163,7 @@ const DEFAULT_ROUTING: Record<TaskType, ModelConfig> = {
     description: 'Opportunity intelligence — structured opportunity scoring and brief generation',
   },
   opportunity_judge: {
-    model: 'anthropic/claude-sonnet-4-20250514',
+    model: 'meta-llama/llama-4-maverick',
     temperature: 0.02,
     max_tokens: 1200,
     response_format: { type: 'json_object' },
@@ -180,7 +180,7 @@ const DEFAULT_ROUTING: Record<TaskType, ModelConfig> = {
   },
   // Phase 2F: Near-pass polish — targeted rewrite for judge-failed candidates close to threshold
   near_pass_polish: {
-    model: 'anthropic/claude-sonnet-4.6',
+    model: 'deepseek/deepseek-chat-v3-0324',
     temperature: 0.15,
     max_tokens: 900,
     response_format: { type: 'json_object' },
