@@ -13,7 +13,8 @@ import { pruneBrain } from '../../../lib/brain/prune';
  *
  * GET/POST /api/lean-cycle  (cron sends ?cron=1 + x-vercel-cron)
  */
-export const maxDuration = 600;
+// Hobby plan caps serverless maxDuration at 300s.
+export const maxDuration = 300;
 
 async function handle(req: Request) {
   try {
