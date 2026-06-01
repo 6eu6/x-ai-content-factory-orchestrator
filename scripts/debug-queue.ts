@@ -40,7 +40,7 @@ async function main() {
   // Try to manually lock enrich_opportunities
   const { data: enrichTask } = await supabase
     .from('pipeline_tasks')
-    .select('id, status, step_order')
+    .select('id, status, step_order, attempts, max_attempts')
     .eq('run_id', runId)
     .eq('task_type', 'enrich_opportunities')
     .single();

@@ -472,7 +472,15 @@ export function quickShieldCheck(text: string, item?: any): { safe: boolean; rea
   // Only unsourced first-person claims — patterns are defined in lib/constants.ts
   if (FIRST_PERSON_CLAIM_PATTERNS.some(p => p.test(text))) reasons.push('first_person_unverified_claim');
   if (hasUnsourcedClaims(text).length) reasons.push('unsourced_numeric_claims');
-  if (!item?.originality_element && !item?.mechanic_used) reasons.push('missing_originality');
+  // Only check originality when the item schema actually includes these fields.
+  // ContentOpportunity objects from content-engine-v3 don't have originality_element
+  // or mechanic_used — they're inherently original through AI crafting.
+  // Only content objects from the publishing pipeline have these fields.
+  const hasOriginalitySchema = item !== undefined &&
+    ('originality_element' in item || 'mechanic_used' in item);
+  if (hasOriginalitySchema && !item?.originality_element && !item?.mechanic_used) {
+    reasons.push('missing_originality');
+  }
 
   return { safe: reasons.length === 0, reasons };
 }
