@@ -11,6 +11,7 @@
  */
 
 import { callModel, parseModelJson } from '../model-router';
+import { recallBrainContext } from '../brain';
 import type { LeanConfig } from './config';
 import type { HarvestedTweet } from './harvest';
 import type { WinningExample } from './memory';
@@ -23,7 +24,9 @@ export type Suggestion = {
   rationale: string;
 };
 
-function buildSystemPrompt(cfg: LeanConfig, examples: WinningExample[]): string {
+type BrainContext = Awaited<ReturnType<typeof recallBrainContext>>;
+
+function buildSystemPrompt(cfg: LeanConfig, examples: WinningExample[], brain: BrainContext | null): string {
   const lines: string[] = [];
   lines.push(`You write X (Twitter) content for the account @${cfg.accountHandle}.`);
   lines.push(`Niche (stay strictly inside it): ${cfg.niche}.`);
@@ -33,6 +36,27 @@ function buildSystemPrompt(cfg: LeanConfig, examples: WinningExample[]): string 
   lines.push('');
   lines.push('HARD RULES:');
   for (const r of cfg.rules) lines.push(`- ${r}`);
+
+  // Ground the model in the brain: algorithm mechanics, the account's proven
+  // winners, and patterns to avoid. This is what makes output follow the mind.
+  if (brain) {
+    if (brain.algorithm.length) {
+      lines.push('');
+      lines.push('HOW THE X ALGORITHM ACTUALLY REWARDS CONTENT (apply these mechanics):');
+      for (const m of brain.algorithm.slice(0, 5)) lines.push(`- ${m.content.replace(/\s+/g, ' ').slice(0, 200)}`);
+    }
+    if (brain.winners.length) {
+      lines.push('');
+      lines.push('WHAT HAS WORKED FOR THIS ACCOUNT BEFORE (match the underlying angle, do not copy):');
+      for (const m of brain.winners.slice(0, 4)) lines.push(`- ${m.content.replace(/\s+/g, ' ').slice(0, 200)}`);
+    }
+    if (brain.avoid.length) {
+      lines.push('');
+      lines.push('PATTERNS THAT FAILED — DO NOT REPEAT THESE:');
+      for (const m of brain.avoid.slice(0, 3)) lines.push(`- ${m.content.replace(/\s+/g, ' ').slice(0, 160)}`);
+    }
+  }
+
   lines.push('');
   lines.push('WHAT MAKES A POST WORTH SUGGESTING:');
   lines.push('- It says something a knowledgeable person would actually think but most people would not bother to write.');
@@ -76,7 +100,17 @@ export async function generateSuggestions(
   examples: WinningExample[],
   runId?: string,
 ): Promise<Suggestion[]> {
-  const system = buildSystemPrompt(cfg, examples);
+  // Build a retrieval query from the freshest harvested context so the brain
+  // returns knowledge relevant to today's conversation, not generic rules.
+  const recallQuery = [cfg.niche, ...tweets.slice(0, 8).map((t) => t.text)].join(' \n ').slice(0, 2000);
+  let brain: BrainContext | null = null;
+  try {
+    brain = await recallBrainContext(recallQuery, cfg.niche);
+  } catch {
+    brain = null; // brain is optional; never block generation on it
+  }
+
+  const system = buildSystemPrompt(cfg, examples, brain);
   const user = buildUserPrompt(cfg, tweets);
 
   const raw = await callModel(
