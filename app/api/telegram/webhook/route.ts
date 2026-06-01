@@ -183,11 +183,14 @@ async function handleMessage(chatId: string, userId: string, username: string, t
           lines.push('⚠️ <b>التشغيل علِق — اضغط 🔄 إعادة تشغيل أو ⏸ إيقاف التشغيل</b>');
         }
 
-        // Decision info
-        if (status.selected !== null) lines.push(`🎯 مختار: ${status.selected} | مؤجل: ${status.rejected ?? 0}`);
+        // Decision info (non-duplicate: prefer status.pre-computed values, fallback to decision_payload)
         const dp = run.decision_payload || {};
-        if (dp.selected !== undefined) lines.push(`🎯 مختار: ${dp.selected} | مؤجل: ${dp.held || 0}`);
-        if (dp.gate_accepted !== undefined) lines.push(`🛡️ بوابة: ${dp.gate_accepted} صالح / ${dp.gate_rejected} مرفوض`);
+        const selectedVal = status.selected ?? dp.selected ?? dp.gate_accepted;
+        const rejectedVal = status.rejected ?? dp.rejected ?? dp.gate_rejected ?? dp.held;
+        if (selectedVal !== null) lines.push(`🎯 مختار: ${selectedVal} | مؤجل: ${rejectedVal ?? 0}`);
+        if (dp.gate_accepted !== undefined && dp.gate_rejected !== undefined) {
+          lines.push(`🛡️ بوابة: ${dp.gate_accepted} صالح / ${dp.gate_rejected} مرفوض`);
+        }
 
         // Error
         if (run.error_message) {

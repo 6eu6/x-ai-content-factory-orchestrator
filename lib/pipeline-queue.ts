@@ -520,10 +520,22 @@ export async function createPipelineTasks(
 
     if (error) {
       console.error('[pipeline-queue] createPipelineTasks insert error:', error.message);
+      // FIX: Clean up orphaned pipeline_run (created above but has no tasks)
+      try {
+        await supabase.from('pipeline_runs').update({ status: 'failed', error_message: `Task insert failed: ${error.message}`, failed_at: new Date().toISOString() }).eq('id', runId);
+      } catch (cleanupErr: any) {
+        console.error('[pipeline-queue] Failed to clean up orphaned run:', cleanupErr.message);
+      }
       return { task_count: 0, excluded_invalid_handles: excludedInvalidHandles, source_diagnostics: sourceDiagnostics };
     }
   } catch (err: any) {
     console.error('[pipeline-queue] createPipelineTasks exception:', err.message);
+    // FIX: Clean up orphaned pipeline_run on exception too
+    try {
+      await supabase.from('pipeline_runs').update({ status: 'failed', error_message: `Task insert exception: ${err.message}`, failed_at: new Date().toISOString() }).eq('id', runId);
+    } catch (cleanupErr: any) {
+      console.error('[pipeline-queue] Failed to clean up orphaned run:', cleanupErr.message);
+    }
     return { task_count: 0, excluded_invalid_handles: excludedInvalidHandles, source_diagnostics: sourceDiagnostics };
   }
 
@@ -732,9 +744,6 @@ export async function getPipelineRunStatus(runId?: string): Promise<RunStatusRes
  */
 export async function lockNextTask(workerId: string, options: LockNextTaskOptions = {}): Promise<LockResult> {
   const supabase = supabaseAdmin();
-  const lockDurationMinutes = options.lockDurationMinutes || 10;
-  const lockCutoff = new Date(Date.now() - lockDurationMinutes * 60 * 1000).toISOString();
-
   try {
     // Build query for eligible tasks
     let query = supabase
@@ -758,17 +767,24 @@ export async function lockNextTask(workerId: string, options: LockNextTaskOption
       return { locked: false, task: null, reason: 'No eligible tasks found' };
     }
 
-    // Filter out tasks for cancelled runs
-    for (const candidate of candidates) {
-      // Check if the run is still active (not cancelled/completed/failed)
-      const { data: runData } = await supabase
-        .from('pipeline_runs')
-        .select('status')
-        .eq('id', candidate.run_id)
-        .maybeSingle();
+    // FIX: Pre-fetch all active run IDs to avoid N+1 queries
+    const candidateRunIds = [...new Set(candidates.map(c => c.run_id))];
+    const { data: activeRuns } = await supabase
+      .from('pipeline_runs')
+      .select('id, status')
+      .in('id', candidateRunIds);
+    const activeRunMap = new Map<string, string>();
+    for (const ar of (activeRuns || [])) {
+      activeRunMap.set(ar.id, ar.status);
+    }
 
-      if (!runData || ['cancelled', 'completed', 'failed'].includes(runData.status)) {
-        continue;  // Skip tasks for inactive runs
+    // Filter out tasks for cancelled/completed/failed runs
+    for (const candidate of candidates) {
+      // Check run status from pre-fetched map (no N+1 queries)
+      const runStatus = activeRunMap.get(candidate.run_id);
+
+      if (!runStatus || ['cancelled', 'completed', 'completed_with_warnings', 'failed'].includes(runStatus)) {
+        continue;  // Skip tasks for inactive runs (including completed_with_warnings)
       }
 
       // For global tasks (step_order >= 50 and no account_handle), check prerequisites
@@ -803,7 +819,7 @@ export async function lockNextTask(workerId: string, options: LockNextTaskOption
       }
 
       // Transition pipeline_runs from 'queued' to 'running' on first task lock
-      if (runData && runData.status === 'queued') {
+      if (runStatus === 'queued') {
         await supabase
           .from('pipeline_runs')
           .update({
@@ -813,6 +829,14 @@ export async function lockNextTask(workerId: string, options: LockNextTaskOption
           })
           .eq('id', candidate.run_id)
           .eq('status', 'queued');  // CAS: only transition if still queued
+      }
+
+      // Update run current_step for subsequent task locks too
+      if (runStatus === 'running') {
+        await supabase
+          .from('pipeline_runs')
+          .update({ current_step: candidate.task_type, updated_at: now })
+          .eq('id', candidate.run_id);
       }
 
       return {
