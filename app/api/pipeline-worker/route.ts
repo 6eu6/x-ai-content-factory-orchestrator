@@ -23,8 +23,8 @@ async function run(req: Request) {
     assertAuthorized(req);
     const url = new URL(req.url);
 
-    const maxTasks = Math.min(Number(url.searchParams.get('maxTasks') || '1'), 10);
-    const maxRuntimeMs = Math.min(Number(url.searchParams.get('maxRuntime') || '30000'), 120000);
+    const maxTasks = Math.min(Number(url.searchParams.get('maxTasks')) || 1, 10);
+    const maxRuntimeMs = Math.min(Number(url.searchParams.get('maxRuntime')) || 30000, 120000);
     const runId = url.searchParams.get('runId') || undefined;
 
     const workerId = `api-worker-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

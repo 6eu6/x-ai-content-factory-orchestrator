@@ -67,7 +67,9 @@ process.on('SIGTERM', () => {
 process.on('uncaughtException', (err) => {
   console.error(`[pipeline-worker] Uncaught exception:`, err.message);
   console.error(err.stack);
-  // Don't exit — keep running unless it's a configuration error
+  // Exit on uncaught exception to allow PM2 to restart with clean state
+  // A worker with broken state (e.g., lost DB connection) cannot recover
+  process.exit(1);
 });
 
 process.on('unhandledRejection', (reason) => {

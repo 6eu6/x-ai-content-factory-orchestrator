@@ -1,4 +1,4 @@
-import { optionalEnv, requiredEnv } from '../../../../lib/env';
+import { optionalEnv, requiredEnv, assertAuthorized } from '../../../../lib/env';
 import { setTelegramWebhook, sendTelegramMessage, MAIN_KEYBOARD } from '../../../../lib/telegram';
 
 /**
@@ -13,6 +13,7 @@ import { setTelegramWebhook, sendTelegramMessage, MAIN_KEYBOARD } from '../../..
  */
 export async function GET(req: Request) {
   try {
+    assertAuthorized(req);
     const url = new URL(req.url);
     const action = url.searchParams.get('action') || 'check';
     const token = requiredEnv('TELEGRAM_BOT_TOKEN');

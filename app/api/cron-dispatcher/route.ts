@@ -29,7 +29,9 @@ export async function GET(req: Request) {
     try {
       stuckTasksMarked = await markStuckTasks(10);
       stuckRunsMarked = await markStuckPipelineRuns(10);
-    } catch {}
+    } catch (housekeepingErr: any) {
+      console.warn('[cron-dispatcher] housekeeping error:', housekeepingErr?.message);
+    }
 
     // ═══ Check for active run ═══
     const activeRun = await getActivePipelineRun();
