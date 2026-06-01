@@ -1,20 +1,60 @@
 import { runBackground } from '../../../../lib/background';
 import { optionalEnv } from '../../../../lib/env';
 import { supabaseAdmin } from '../../../../lib/supabase';
-import { assertTelegramChat, extractHandles, extractTweetUrl, htmlEscape, MAIN_KEYBOARD, sendTelegramMessage } from '../../../../lib/telegram';
-import { logPublishedDecision } from '../../../../lib/published-decision-logger';
-import {
-  enqueuePipelineRun,
-  cancelPipelineRun,
-  getPipelineRunStatus,
-  getActivePipelineRun,
-  markStuckTasks
-} from '../../../../lib/pipeline-queue';
+import { assertTelegramChat, extractHandles, extractTweetUrl, htmlEscape, sendTelegramMessage } from '../../../../lib/telegram';
+import { tweetIdFromUrl } from '../../../../lib/x';
+import { getActiveProfile, updateProfile } from '../../../../lib/lean/profile';
+import { languageName } from '../../../../lib/lean/config';
+import { runLeanLoop, formatForTelegram } from '../../../../lib/lean/run';
 
-const VERSION = 'telegram-webhook-v8-queue';
-
-// Extend Vercel function timeout to maximum allowed (requires Pro plan or higher)
+const VERSION = 'telegram-webhook-lean-v1';
 export const maxDuration = 300;
+
+/** Minimal bilingual control panel. UI language follows the active profile. */
+type Lang = 'ar' | 'en';
+
+function t(lang: Lang, key: string): string {
+  const ar: Record<string, string> = {
+    welcome: 'جاهز ✅ — هذا عقل اقتراح المحتوى. اضغط زر الاقتراحات لتوليد دفعة اليوم.\nأوامر: «نيش <النص>» لتغيير النيش · «لغة en/ar» للغة التغريدات · «بوت en/ar» للغة الواجهة · «نشرت 1 <الرابط>» لتسجيل منشور.',
+    suggest_started: '⏳ يولّد اقتراحات اليوم من العقل… ستصلك خلال لحظات.',
+    suggest_failed: '❌ فشل توليد الاقتراحات',
+    niche_set: '✅ تم تغيير النيش إلى',
+    lang_set: '✅ لغة التغريدات الآن',
+    bot_set: '✅ لغة الواجهة الآن',
+    add_account_hint: 'أرسل حسابات X للزحف والتعلّم. مثال:\nemollick naval levelsio',
+    added: 'تمت إضافة',
+    accounts_title: 'قائمة حسابات المصادر',
+    no_accounts: 'لا توجد حسابات. استخدم زر إضافة حساب.',
+    published_ok: '✅ تم تسجيل المنشور — سيُقاس أداؤه ويتعلّم منه العقل.',
+    published_bad: '❌ الصيغة: نشرت 1 ثم رابط منشور X',
+    brain_title: 'حالة العقل',
+    unknown: 'استخدم الأزرار. للاقتراحات اضغط الزر، أو اكتب «تشغيل».',
+  };
+  const en: Record<string, string> = {
+    welcome: 'Ready ✅ — this is the content brain. Tap Suggest to generate today\'s batch.\nCommands: "niche <text>" to change niche · "lang en/ar" tweet language · "bot en/ar" UI language · "published 1 <url>" to log a post.',
+    suggest_started: '⏳ Generating today\'s suggestions from the brain… arriving shortly.',
+    suggest_failed: '❌ Failed to generate suggestions',
+    niche_set: '✅ Niche changed to',
+    lang_set: '✅ Tweet language is now',
+    bot_set: '✅ UI language is now',
+    add_account_hint: 'Send X handles to crawl and learn from. Example:\nemollick naval levelsio',
+    added: 'Added',
+    accounts_title: 'Source accounts',
+    no_accounts: 'No accounts yet. Use the Add account button.',
+    published_ok: '✅ Post logged — its performance will be measured and the brain will learn from it.',
+    published_bad: '❌ Format: published 1 <X post url>',
+    brain_title: 'Brain status',
+    unknown: 'Use the buttons. Tap Suggest, or type "run".',
+  };
+  return (lang === 'en' ? en : ar)[key] || '';
+}
+
+function keyboard(lang: Lang) {
+  const labels = lang === 'en'
+    ? [['🧠 Suggest', '🧠 Brain'], ['➕ Add account', '📋 Accounts'], ['✅ Log post', '⚙️ Settings']]
+    : [['🧠 اقتراحات', '🧠 العقل'], ['➕ إضافة حساب', '📋 الحسابات'], ['✅ سجل منشور', '⚙️ إعدادات']];
+  return { keyboard: labels.map((row) => row.map((text) => ({ text }))), resize_keyboard: true, one_time_keyboard: false };
+}
 
 export async function POST(req: Request) {
   try {
@@ -22,18 +62,13 @@ export async function POST(req: Request) {
     if (secret && req.headers.get('x-telegram-bot-api-secret-token') !== secret) {
       return Response.json({ ok: false, error: 'Unauthorized' }, { status: 401 });
     }
-
     const update = await req.json();
     const message = update?.message;
     const chatId = String(message?.chat?.id || '');
-    const userId = String(message?.from?.id || '');
-    const username = String(message?.from?.username || '');
     const text = String(message?.text || '').trim();
-
     if (!chatId || !text) return Response.json({ ok: true, ignored: true, version: VERSION });
     assertTelegramChat(chatId);
-
-    runBackground(handleMessage(chatId, userId, username, text));
+    runBackground(handleMessage(chatId, text));
     return Response.json({ ok: true, version: VERSION });
   } catch (err: any) {
     return Response.json({ ok: false, version: VERSION, error: err.message }, { status: 500 });
@@ -44,385 +79,143 @@ export async function GET() {
   return Response.json({ ok: true, endpoint: VERSION });
 }
 
-async function handleMessage(chatId: string, userId: string, username: string, text: string) {
+async function handleMessage(chatId: string, text: string) {
+  const supabase = supabaseAdmin();
+  const profile = await getActiveProfile().catch(() => null);
+  const lang: Lang = (profile?.botLanguage === 'en' ? 'en' : 'ar');
+  const send = (msg: string) => sendTelegramMessage(chatId, msg, keyboard(lang));
+
   try {
-    const supabase = supabaseAdmin();
-    await supabase.from('telegram_bot_state').upsert({
-      chat_id: chatId,
-      user_id: userId,
-      username,
-      last_message: text,
-      updated_at: new Date().toISOString()
-    }, { onConflict: 'chat_id' });
-
     const { data: state } = await supabase.from('telegram_bot_state').select('*').eq('chat_id', chatId).maybeSingle();
+    await supabase.from('telegram_bot_state').upsert({ chat_id: chatId, last_message: text, updated_at: new Date().toISOString() }, { onConflict: 'chat_id' });
 
-    if (text === '/start' || text === 'القائمة' || text === 'Menu') {
+    const lower = text.toLowerCase();
+
+    if (text === '/start' || lower === 'menu' || text === 'القائمة' || lower === 'start') {
       await clearFlow(supabase, chatId);
-      await sendReply(chatId, 'جاهز. الواجهة عربية، لكن محتوى X والتوصيات English-only. استخدم زر 🧠 تشغيل كامل.');
+      await send(t(lang, 'welcome'));
       return;
     }
 
-    // ═══ 🧠 تشغيل كامل — ENQUEUE ONLY, no direct pipeline execution ═══
-    if (text === '🧠 تشغيل كامل') {
+    // Suggest (run the lean+brain loop)
+    if (text.includes('اقتراح') || text.includes('تشغيل') || lower.includes('suggest') || lower === 'run') {
+      await send(t(lang, 'suggest_started'));
       try {
-        // Mark stuck tasks/runs first
-        await markStuckTasks(10);
-
-        // Check if there's already an active run
-        const activeRun = await getActivePipelineRun();
-        if (activeRun) {
-          const shortId = String(activeRun.id).slice(0, 8);
-          const status = await getPipelineRunStatus(activeRun.id);
-          const ts = status.task_summary;
-          await sendReply(chatId, [
-            `⚠️ يوجد تشغيل جارٍ بالفعل!`,
-            `🆔 ${shortId} | الحالة: ${htmlEscape(activeRun.status || '—')} | الخطوة: ${htmlEscape(activeRun.current_step || '—')}`,
-            `📊 المهام: ${ts.completed}/${ts.total} مكتملة | ${ts.failed} فاشلة | ${ts.queued} في الانتظار`,
-            ts.running > 0 ? `🔄 جاري التنفيذ: ${ts.running} مهمة` : '',
-            status.current_account ? `👤 الحساب الحالي: @${htmlEscape(status.current_account)}` : '',
-            '',
-            'اضغط 🧾 حالة التشغيل للمتابعة أو 🔄 إعادة تشغيل للبدء من جديد أو ⏸ إيقاف التشغيل للإيقاف.'
-          ].filter(Boolean).join('\n'));
-          return;
-        }
-
-        // Enqueue new pipeline run
-        const result = await enqueuePipelineRun({
-          source: 'telegram-unified',
-          notifyTelegram: true
-        });
-
-        if (result.ok && result.run_id) {
-          const shortId = result.run_id.slice(0, 8);
-          await sendReply(chatId, [
-            '✅ تم إنشاء تشغيل جديد',
-            `🆔 Run ID: ${shortId}`,
-            `📊 عدد المهام: ${result.task_count}`,
-            '⚙️ سيتم التنفيذ عبر العامل الخلفي',
-            '',
-            'اضغط 🧾 حالة التشغيل للمتابعة'
-          ].join('\n'));
-        } else {
-          await sendReply(chatId, `❌ فشل إنشاء التشغيل: ${htmlEscape(result.message || 'unknown error')}`);
-        }
-      } catch (err: any) {
-        await sendReply(chatId, `❌ خطأ: ${htmlEscape(err.message || 'unknown error')}`);
+        const result = await runLeanLoop({ deliverTelegram: false });
+        await sendTelegramMessage(chatId, formatForTelegram(result), keyboard(lang));
+      } catch (e: any) {
+        await send(`${t(lang, 'suggest_failed')}: ${htmlEscape(e?.message || '')}`);
       }
       return;
     }
 
-    // ═══ 🧾 حالة التشغيل — show task progress, NO pipeline execution ═══
-    if (text === '🧾 حالة التشغيل' || text === 'حالة التشغيل') {
-      try {
-        // Auto-detect and mark stuck tasks/runs
-        const stuckTasksMarked = await markStuckTasks(10);
-
-        const status = await getPipelineRunStatus();
-
-        if (!status.ok || !status.run) {
-          await sendReply(chatId, 'ℹ️ لا توجد عمليات تشغيل مسجلة بعد.');
-          return;
-        }
-
-        const run = status.run;
-        const shortId = String(run.id).slice(0, 8);
-        const ts = status.task_summary;
-        const startedAt = run.started_at ? new Date(run.started_at) : null;
-
-        let durationStr = '—';
-        const isRunning = run.status === 'running' || run.status === 'queued';
-
-        if (startedAt) {
-          if (isRunning) {
-            durationStr = formatDuration(Date.now() - startedAt.getTime());
-          } else {
-            const endTime = run.completed_at ? new Date(run.completed_at)
-              : run.failed_at ? new Date(run.failed_at)
-              : run.cancelled_at ? new Date(run.cancelled_at)
-              : run.updated_at ? new Date(run.updated_at)
-              : null;
-            if (endTime) durationStr = formatDuration(endTime.getTime() - startedAt.getTime());
-          }
-        }
-
-        const statusEmoji = run.status === 'completed' ? '✅'
-          : run.status === 'completed_with_warnings' ? '⚠️'
-          : run.status === 'failed' ? '❌'
-          : run.status === 'stuck' ? '⚠️'
-          : run.status === 'cancelled' ? '🚫'
-          : run.status === 'queued' ? '📋'
-          : '⏳';
-
-        const lines: string[] = [
-          `${statusEmoji} <b>حالة التشغيل</b>`,
-          '━━━━━━━━━━━━━━━━━━━━',
-          `🆔 Run: ${shortId}`,
-          `📡 المصدر: ${htmlEscape(run.source || '—')}`,
-          `📊 الحالة: <b>${htmlEscape(run.status || '—')}</b>`,
-          `🔄 الخطوة: ${htmlEscape(run.current_step || '—')}`,
-          `⏱ المدة: ${durationStr}`,
-          `📊 المهام: ${ts.completed}/${ts.total} مكتملة | ${ts.failed} فاشلة | ${ts.queued} في الانتظار`,
-        ];
-
-        if (status.current_account) {
-          lines.push(`👤 الحساب الحالي: @${htmlEscape(status.current_account)}`);
-        }
-
-        if (isRunning && startedAt) {
-          const elapsedMin = (Date.now() - startedAt.getTime()) / 60000;
-          if (elapsedMin > 5) {
-            lines.push('');
-            lines.push(`⚠️ التشغيل جارٍ منذ ${Math.round(elapsedMin)} دقيقة`);
-          }
-        }
-
-        // Stuck warning
-        if (run.status === 'stuck') {
-          lines.push('');
-          lines.push('⚠️ <b>التشغيل علِق — اضغط 🔄 إعادة تشغيل أو ⏸ إيقاف التشغيل</b>');
-        }
-
-        // Decision info (non-duplicate: prefer status.pre-computed values, fallback to decision_payload)
-        const dp = run.decision_payload || {};
-        const selectedVal = status.selected ?? dp.selected ?? dp.gate_accepted;
-        const rejectedVal = status.rejected ?? dp.rejected ?? dp.gate_rejected ?? dp.held;
-        if (selectedVal !== null) lines.push(`🎯 مختار: ${selectedVal} | مؤجل: ${rejectedVal ?? 0}`);
-        if (dp.gate_accepted !== undefined && dp.gate_rejected !== undefined) {
-          lines.push(`🛡️ بوابة: ${dp.gate_accepted} صالح / ${dp.gate_rejected} مرفوض`);
-        }
-
-        // Error
-        if (run.error_message) {
-          lines.push(`❌ الخطأ: ${htmlEscape(run.error_message.slice(0, 200))}`);
-        }
-
-        // Last 3 tasks
-        const recentTasks = status.tasks.slice(-3).filter(t => t.status === 'completed' || t.status === 'failed');
-        if (recentTasks.length > 0) {
-          lines.push('');
-          lines.push('<b>آخر المهام:</b>');
-          for (const t of recentTasks) {
-            const emoji = t.status === 'completed' ? '✅' : '❌';
-            const account = t.account_handle ? ` @${t.account_handle}` : '';
-            lines.push(`${emoji} ${htmlEscape(t.task_type)}${account}`);
-          }
-        }
-
-        if (stuckTasksMarked > 0) {
-          lines.push('');
-          lines.push(`🔄 تم تعليم ${stuckTasksMarked} مهمة علِقة تلقائيًا`);
-        }
-
-        await sendReply(chatId, lines.join('\n'));
-      } catch (err: any) {
-        await sendReply(chatId, `❌ فشل جلب الحالة: ${htmlEscape(err.message || 'unknown')}`);
-      }
+    // Change niche:  "niche ..."  /  "نيش ..."
+    const nicheMatch = text.match(/^(?:niche|نيش)\s+(.{3,})/i);
+    if (nicheMatch && profile) {
+      const niche = nicheMatch[1].trim();
+      await updateProfile(profile.accountHandle, { niche });
+      await send(`${t(lang, 'niche_set')}: ${htmlEscape(niche)}`);
       return;
     }
 
-    // ═══ 🔄 إعادة تشغيل — cancel active run + enqueue new, NO pipeline execution ═══
-    if (text === '🔄 إعادة تشغيل' || text === 'إعادة تشغيل') {
-      try {
-        // Mark stuck tasks first
-        await markStuckTasks(10);
-
-        // Cancel any active run
-        const activeRun = await getActivePipelineRun();
-        if (activeRun) {
-          const cancelResult = await cancelPipelineRun(activeRun.id, 'telegram_retry');
-          if (cancelResult.ok) {
-            const shortId = String(activeRun.id).slice(0, 8);
-            await sendReply(chatId, `🚫 تم إلغاء التشغيل السابق ${shortId} (${cancelResult.cancelled_tasks} مهمة ملغاة)`);
-          }
-        }
-
-        // Enqueue new pipeline run
-        const result = await enqueuePipelineRun({
-          source: 'telegram-retry',
-          notifyTelegram: true
-        });
-
-        if (result.ok && result.run_id) {
-          const shortId = result.run_id.slice(0, 8);
-          await sendReply(chatId, [
-            '✅ تم إنشاء تشغيل جديد',
-            `🆔 Run ID: ${shortId}`,
-            `📊 عدد المهام: ${result.task_count}`,
-            '⚙️ سيتم التنفيذ عبر العامل الخلفي',
-            '',
-            'اضغط 🧾 حالة التشغيل للمتابعة'
-          ].join('\n'));
-        } else {
-          await sendReply(chatId, `❌ فشل إنشاء التشغيل: ${htmlEscape(result.message || 'unknown error')}`);
-        }
-      } catch (err: any) {
-        await sendReply(chatId, `❌ خطأ: ${htmlEscape(err.message || 'unknown error')}`);
-      }
+    // Tweet language:  "lang en" / "لغة ar"
+    const langMatch = text.match(/^(?:lang|language|لغة)\s+([a-z]{2})/i);
+    if (langMatch && profile) {
+      const code = langMatch[1].toLowerCase();
+      await updateProfile(profile.accountHandle, { tweetLanguage: code });
+      await send(`${t(lang, 'lang_set')}: ${languageName(code)}`);
       return;
     }
 
-    // ═══ ⏸ إيقاف التشغيل — cancel active run and unfinished tasks ═══
-    if (text === '⏸ إيقاف التشغيل' || text === 'إيقاف التشغيل') {
-      try {
-        const activeRun = await getActivePipelineRun();
-        if (!activeRun) {
-          await sendReply(chatId, 'ℹ️ لا يوجد تشغيل جارٍ لإيقافه.');
-          return;
-        }
-
-        const shortId = String(activeRun.id).slice(0, 8);
-        const cancelResult = await cancelPipelineRun(activeRun.id, 'telegram_manual_stop');
-
-        if (cancelResult.ok) {
-          await sendReply(chatId, [
-            '🚫 <b>تم إيقاف التشغيل</b>',
-            `🆔 ${shortId}`,
-            `📊 مهام ملغاة: ${cancelResult.cancelled_tasks}`,
-            '',
-            'اضغط 🧠 تشغيل كامل للبدء من جديد'
-          ].join('\n'));
-        } else {
-          await sendReply(chatId, `❌ فشل الإيقاف: ${htmlEscape(cancelResult.reason || 'unknown error')}`);
-        }
-      } catch (err: any) {
-        await sendReply(chatId, `❌ خطأ: ${htmlEscape(err.message || 'unknown error')}`);
-      }
+    // Bot UI language:  "bot en" / "بوت ar"
+    const botMatch = text.match(/^(?:bot|بوت)\s+(ar|en)/i);
+    if (botMatch && profile) {
+      const code = botMatch[1].toLowerCase();
+      await updateProfile(profile.accountHandle, { botLanguage: code });
+      const newLang: Lang = code === 'en' ? 'en' : 'ar';
+      await sendTelegramMessage(chatId, `${t(newLang, 'bot_set')}: ${languageName(code)}`, keyboard(newLang));
       return;
     }
 
-    // ═══ نشرت — log published decision directly ═══
-    if (/^نشرت\s+/i.test(text)) {
-      const parsed = parsePublishedCommand(text);
-      if (!parsed.published_url) {
-        await sendReply(chatId, '❌ الصيغة الصحيحة:\nنشرت 1 ثم رابط منشور X');
+    // Log a published post
+    if (/^(?:نشرت|published)\s+/i.test(text)) {
+      const after = text.replace(/^(?:نشرت|published)\s+/i, '').trim();
+      const url = extractTweetUrl(after);
+      if (!url || !tweetIdFromUrl(url)) {
+        await send(t(lang, 'published_bad'));
         return;
       }
-
-      const result = await logPublishedDecision({
-        published_url: parsed.published_url,
-        recommendation_index: parsed.recommendation_index
+      await supabase.from('published_decisions').insert({
+        account_handle: profile?.accountHandle || optionalEnv('X_USERNAME', '30piq').replace(/^@/, ''),
+        published_url: url,
+        status: 'published',
+        content_type: 'manual',
       });
-
-      if (!result.ok) {
-        await sendReply(chatId, `❌ فشل تسجيل المنشور: ${htmlEscape(result.error || 'unknown error')}`);
-        return;
-      }
-
-      await sendReply(chatId, [
-        '✅ <b>تم تسجيل المنشور</b>',
-        '━━━━━━━━━━━━━━━━━━━━',
-        `🔗 ${htmlEscape(parsed.published_url)}`,
-        parsed.recommendation_index ? `📋 توصية رقم: ${parsed.recommendation_index}` : '',
-        result.recommendation_linked ? '🔗 مربوط بالتوصية: نعم' : '🔗 مربوط بآخر قرار: نعم',
-        result.content_type ? `📝 النوع: ${htmlEscape(result.content_type)}` : '',
-        result.decision_score !== undefined ? `نقاط: ${result.decision_score}` : '',
-        result.brain_rules_count !== undefined ? `🧠 قواعد: ${result.brain_rules_count}` : '',
-        '',
-        '<i>سيتم فحص الأداء لاحقًا.</i>'
-      ].filter(Boolean).join('\n'));
+      await send(t(lang, 'published_ok'));
       return;
     }
 
-    if (text === '➕ إضافة حساب') {
+    // Add account flow
+    if (text.includes('إضافة حساب') || lower.includes('add account')) {
       await setFlow(supabase, chatId, 'awaiting_account');
-      await sendReply(chatId, 'أرسل حسابات X للتعلم فقط. مثال:\nemollick naval sama');
+      await send(t(lang, 'add_account_hint'));
       return;
     }
-
     if (state?.current_flow === 'awaiting_account') {
       await clearFlow(supabase, chatId);
-      const handles = extractHandles(text).slice(0, 10);
-      if (!handles.length) {
-        await sendReply(chatId, 'أرسل يوزر صحيح مثل: emollick أو @naval');
-        return;
-      }
+      const handles = extractHandles(text).slice(0, 15);
+      if (!handles.length) { await send(t(lang, 'add_account_hint')); return; }
       for (const handle of handles) {
-        try {
-          await supabase.from('accounts').upsert({ handle, tier: 2, notes: 'Added from Telegram unified webhook' }, { onConflict: 'handle' });
-        } catch {
-          try { await supabase.from('accounts').upsert({ handle }, { onConflict: 'handle' }); } catch {}
-        }
+        try { await supabase.from('accounts').upsert({ handle, tier: 2, active: true, notes: 'Added from Telegram' }, { onConflict: 'handle' }); }
+        catch { try { await supabase.from('accounts').upsert({ handle }, { onConflict: 'handle' }); } catch {} }
       }
-      await sendReply(chatId, `✅ تمت إضافة ${handles.length} حساب تعلم:\n${handles.map(h => `• @${htmlEscape(h)}`).join('\n')}\n\nاضغط 🧠 تشغيل كامل لتشغيل المسار الموحّد.`);
+      await send(`${t(lang, 'added')} ${handles.length}: ${handles.map((h) => `@${htmlEscape(h)}`).join(', ')}`);
       return;
     }
 
-    if (text === '📋 قائمة الحسابات') {
-      const { data: accounts } = await supabase.from('accounts').select('handle, tier, last_checked').order('tier', { ascending: true }).limit(50);
-      if (!accounts?.length) {
-        await sendReply(chatId, 'ℹ️ لا توجد حسابات. استخدم ➕ إضافة حساب.');
-        return;
-      }
-      await sendReply(chatId, `📋 <b>قائمة الحسابات (${accounts.length})</b>\n━━━━━━━━━━━━━━━━━━━━\n${accounts.map((a: any) => `• @${htmlEscape(a.handle)} | tier ${a.tier || '-'}`).join('\n')}`);
+    // List accounts
+    if (text.includes('الحسابات') || lower.includes('accounts')) {
+      const { data: accounts } = await supabase.from('accounts').select('handle, tier').eq('active', true).order('tier').limit(60);
+      if (!accounts?.length) { await send(t(lang, 'no_accounts')); return; }
+      await send(`<b>${t(lang, 'accounts_title')} (${accounts.length})</b>\n${accounts.map((a: any) => `• @${htmlEscape(a.handle)} · t${a.tier ?? '-'}`).join('\n')}`);
       return;
     }
 
-    if (text === '🧩 محتويات العقل') {
-      await sendReply(chatId, `🧩 ملخص العقل في المتصفح:\n<a href="${publicBaseUrl()}/api/brain-viewer">عرض تفصيلي</a>`);
+    // Brain status
+    if (text.includes('العقل') || lower.includes('brain')) {
+      const { data } = await supabase.from('brain_memory').select('kind, status');
+      const rows = (data || []) as any[];
+      const active = rows.filter((r) => r.status === 'active').length;
+      const byKind: Record<string, number> = {};
+      for (const r of rows) byKind[r.kind] = (byKind[r.kind] || 0) + 1;
+      const lines = Object.entries(byKind).map(([k, n]) => `• ${k}: ${n}`).join('\n');
+      await send(`<b>🧠 ${t(lang, 'brain_title')}</b>\nactive: ${active}/${rows.length}\n${lines}`);
       return;
     }
 
-    if (['📊 تقرير الأداء', '✍️ اقتراح محتوى', '🔗 إضافة تغريدة'].includes(text)) {
-      await sendReply(chatId, 'هذا الزر موقوف مؤقتًا في النسخة الموحدة حتى لا يختلط مع مسار النشر. استخدم 🧠 تشغيل كامل فقط.');
+    // Settings
+    if (text.includes('إعدادات') || lower.includes('settings')) {
+      const p = profile;
+      await send([
+        `<b>⚙️</b>`,
+        `account: @${htmlEscape(p?.accountHandle || '-')}`,
+        `niche: ${htmlEscape(p?.niche || '-')}`,
+        `tweet language: ${languageName(p?.tweetLanguage || 'en')}`,
+        `bot language: ${languageName(p?.botLanguage || 'ar')}`,
+        `mix: ${p?.mix.replies}/${p?.mix.quotes}/${p?.mix.standalone} (replies/quotes/standalone)`,
+      ].join('\n'));
       return;
     }
 
-    if (text === '✅ سجل منشور') {
-      await sendReply(chatId, 'اكتب مباشرة: نشرت 1 ثم رابط منشور X');
-      return;
-    }
-
-    if (text === '🔄 تصفير البيانات') {
-      await sendReply(chatId, 'زر التصفير موقوف في النسخة الموحدة للحماية. أي تصفير يتم يدويًا فقط بعد مراجعة.');
-      return;
-    }
-
-    await sendReply(chatId, 'استخدم الأزرار. للتشغيل: 🧠 تشغيل كامل. للحالة: 🧾 حالة التشغيل. لإعادة: 🔄 إعادة تشغيل. للإيقاف: ⏸ إيقاف التشغيل. بعد النشر: نشرت 1 الرابط');
+    await send(t(lang, 'unknown'));
   } catch (err: any) {
-    console.error('[telegram unified] error:', err.message);
-    await sendReply(chatId, `❌ خطأ: ${htmlEscape(err.message || 'unknown error')}`);
+    await send(`❌ ${htmlEscape(err?.message || 'error')}`);
   }
 }
 
-// ═══ Helpers ═══
-
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  const seconds = Math.floor(ms / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  const remainSeconds = seconds % 60;
-  if (minutes < 60) return `${minutes}m ${remainSeconds}s`;
-  const hours = Math.floor(minutes / 60);
-  const remainMinutes = minutes % 60;
-  return `${hours}h ${remainMinutes}m`;
-}
-
-function parsePublishedCommand(text: string): { recommendation_index: number | null; published_url: string | null } {
-  const after = text.replace(/^نشرت\s+/i, '').trim();
-  const indexed = after.match(/^(\d+)\s+(https?:\/\/\S+)/i);
-  const recommendationIndex = indexed ? Number(indexed[1]) : null;
-  const urlPart = indexed ? indexed[2] : after;
-  return { recommendation_index: recommendationIndex, published_url: extractTweetUrl(urlPart) };
-}
-
-function publicBaseUrl(): string {
-  const explicit = optionalEnv('PUBLIC_BASE_URL');
-  if (explicit) return explicit.replace(/\/$/, '');
-  const vercel = optionalEnv('VERCEL_URL');
-  if (vercel) return `https://${vercel.replace(/^https?:\/\//, '').replace(/\/$/, '')}`;
-  return 'https://x-ai-content-factory-orchestrator.vercel.app';
-}
-
-async function sendReply(chatId: string, text: string) {
-  await sendTelegramMessage(chatId, text, MAIN_KEYBOARD);
-}
-
 async function clearFlow(supabase: any, chatId: string) {
-  await supabase.from('telegram_bot_state').update({ current_flow: null, flow_payload: {}, updated_at: new Date().toISOString() }).eq('chat_id', chatId);
+  await supabase.from('telegram_bot_state').update({ current_flow: null, updated_at: new Date().toISOString() }).eq('chat_id', chatId);
 }
-
 async function setFlow(supabase: any, chatId: string, flow: string) {
-  await supabase.from('telegram_bot_state').upsert({ chat_id: chatId, current_flow: flow, flow_payload: {}, updated_at: new Date().toISOString() }, { onConflict: 'chat_id' });
+  await supabase.from('telegram_bot_state').upsert({ chat_id: chatId, current_flow: flow, updated_at: new Date().toISOString() }, { onConflict: 'chat_id' });
 }

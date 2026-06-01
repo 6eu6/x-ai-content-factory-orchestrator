@@ -1,186 +1,95 @@
-# X AI Content Factory Orchestrator
+# X Growth Brain
 
-English-only X content recommendation system for the 30-day `@30piq` growth experiment.
+A lean, self-improving system that suggests X (Twitter) **replies, quotes, and
+original tweets** for organic account growth. Publishing is **manual** — the tool
+proposes, a human decides. Deployed on Vercel; data and memory live in Supabase.
 
-This repository is **not** a SaaS product, **not** an Arabic account project, **not** an auto-posting bot, and currently **does not** use Apify or local models.
+It replaces an earlier, over-engineered pipeline (80+ tables, 5 stacked AI gates,
+~0 usable output) with one readable loop grounded in a real retrieval-augmented
+**brain** that learns from the account's own results.
 
-Telegram is only an Arabic control panel. Final publishable X content must be English only. Publishing is always manual.
+## How it works
 
-## Current confirmed operating state
-
-Phase 1 is complete:
-
-- Oracle Cloud worker is running on Ubuntu ARM64.
-- The worker runs `npm run worker:pipeline` under PM2 as `pipeline-worker`.
-- Supabase queue processing works through `pipeline_runs` and `pipeline_tasks`.
-- Telegram receives Arabic decision-run reports.
-- The latest confirmed full run completed all pipeline tasks for `@30piq`.
-- The publish gate correctly blocked weak recommendations instead of lowering quality.
-
-Do **not** restart the full pipeline just to validate documentation changes.
-
-## Current production architecture
-
-```text
-Telegram Arabic UI
-  -> Vercel webhook / enqueue / status routes
-  -> Supabase pipeline_runs + pipeline_tasks queue
-  -> Oracle Cloud persistent worker
-  -> TwitterAPI.io read-only X data
-  -> OpenRouter model calls
-  -> English publish gate
-  -> decision engine
-  -> decision_runs + Telegram report
-  -> manual publishing only
+```
+daily cycle (one cron call → /api/lean-cycle)
+  1. crawl    distil fresh niche patterns into the brain   (outward learning)
+  2. feedback measure yesterday's posts, learn from them   (inward learning)
+  3. suggest  generate today's batch, grounded in the brain → Telegram
+  4. prune    (weekly) forget stale / contradicted memories
+human reviews in Telegram → publishes manually → logs the post → loop improves
 ```
 
-## Runtime responsibility split
+### The brain (real RAG, not storage)
 
-| Layer | Responsibility |
-| --- | --- |
-| Vercel | Telegram webhook, lightweight APIs, enqueue, cancel, status, health checks |
-| Supabase | Durable queue, memory, run state, task state, results, decision logs |
-| Oracle Cloud worker | Heavy pipeline task execution outside Vercel request lifecycle |
-| TwitterAPI.io | Read-only X/Twitter data fetching |
-| OpenRouter | Model gateway for AI calls |
-| Telegram | Arabic control panel and report delivery only |
-| Human operator | Final manual publishing decision |
+- `brain_memory` (pgvector + pg_trgm): every memory has an embedding, a kind
+  (`algorithm` / `voice` / `outcome` / `source_pattern` / `anti_pattern`), a
+  weight, and reinforcement/contradiction counters.
+- **Retrieval**: generation recalls the most relevant algorithm mechanics, live
+  niche patterns, the account's proven winners, and patterns to avoid — so output
+  follows the brain instead of being generic.
+- **Learning in**: measured outcomes become weighted memories (good → `outcome`,
+  weak → `anti_pattern`).
+- **Learning out**: continuous crawl distils transferable patterns.
+- **Forgetting**: weekly pruning decays unused memories and archives the
+  contradicted ones, keeping the proven core sharp.
 
-## Hard product rules
+## Project layout
 
-1. Final X content must be English only.
-2. Telegram UI can be Arabic.
-3. Publishing is manual only.
-4. No auto-posting to X/Twitter.
-5. No Arabic inside `crafted_text`.
-6. No JSON wrappers or raw invalid model output in Telegram recommendations.
-7. No invalid source URLs such as `x.com/📋/status/...`.
-8. Do not lower quality thresholds as an architectural fix.
-9. Do not reduce account count to hide runtime problems.
-10. Do not reduce `tweetsPerAccount` to hide runtime problems.
-11. Do not use `lightMode` as the permanent architecture.
-12. Final decision must happen globally after scan results are merged, not per account.
-13. Do not add Apify in the current phase.
-14. Do not add local models in the current phase.
-15. Do not turn this into a SaaS architecture during the current 30-day experiment.
+```
+app/api/
+  lean-cycle/    daily: crawl → feedback → suggest → (weekly) prune   [cron]
+  lean-run/      generate + deliver suggestions on demand
+  lean-crawl/    outward learning only
+  lean-feedback/ inward learning only
+  brain/         stats / backfill embeddings / prune / recall
+  telegram/      webhook (bilingual control panel), setup, diagnose
+  health/
+lib/
+  lean/   config, profile, harvest, memory, generate, gate, run, feedback, crawl
+  brain/  embed, store, retrieve, prune
+  (infra) env, supabase, retry, telegram, x, model-router, cost-ledger, ...
+supabase/schema.sql   canonical schema (run on a fresh project)
+docs/LEAN_ARCHITECTURE.md
+```
 
-## Pipeline terminology
+## Setup
 
-Use these names consistently:
+1. Create a Supabase project and run `supabase/schema.sql`.
+2. Set environment variables (see `.env.example`).
+3. Deploy to Vercel. The daily cron in `vercel.json` hits `/api/lean-cycle`.
+4. Point the Telegram webhook at `/api/telegram/webhook` (via `/api/telegram/setup`).
+5. Seed brain embeddings once: `POST /api/brain?action=backfill&limit=600`.
 
-| Preferred term | Meaning |
-| --- | --- |
-| `pipeline_runs` | Durable run tracker in Supabase |
-| `pipeline_tasks` | Durable task queue in Supabase |
-| `pipeline-worker` | PM2 process name for the Oracle worker |
-| Oracle worker | Persistent Ubuntu worker that processes queued tasks |
-| Telegram control panel | Arabic UI for commands, status, and reports |
-| English publish gate | Final language/quality/sourcing gate before decision |
-| Decision Run | Telegram-facing report for one completed pipeline run |
-| Cost Ledger | Phase 2 cost tracking for provider/model/API usage |
-| Rejection Ledger | Phase 2 diagnostics for publish-gate rejections |
+## Telegram control panel
 
-Avoid using outdated labels such as:
+Bilingual (Arabic/English, per profile). Buttons + commands:
 
-- `x-content-worker` for the PM2 process.
-- `local models` as a current implementation target.
-- `Apify` as a current data source.
-- `SaaS` as the current product goal.
-- `Arabic content account` for `@30piq`.
-- `full pipeline in Telegram webhook` as an acceptable architecture.
+- **Suggest** — generate today's batch now
+- `niche <text>` — change the niche
+- `lang en|ar` — language of published tweets
+- `bot en|ar` — language of the control panel
+- **Add account** / **Accounts** — manage source handles
+- `published 1 <url>` — log a post you published (so the brain can learn from it)
+- **Brain** / **Settings** — status
 
-## Current npm scripts
+## Multi-account / multi-language / SaaS
+
+Each account is a row in `profiles` (handle, niche, languages, voice, mix). The
+same engine runs any profile, so adding an account or a language needs data, not
+code. Prove growth on one account first, then generalize. See
+`docs/LEAN_ARCHITECTURE.md`.
+
+## What the tool does not do
+
+- It does not auto-publish. Publishing is always a human decision.
+- It does not guarantee growth. Growth = a strong brain + a real account
+  foundation (name, bio, avatar, one narrow niche) + consistent human replies.
+  The tool is the first of those three.
+
+## Development
 
 ```bash
-npm run build
-npm run test
-npm run worker:pipeline
+npm install
+npm test          # vitest
+npm run build     # next build
 ```
-
-`npm run worker:pipeline` starts `scripts/pipeline-worker.ts`, which loads `.env.worker`, `.env.local`, then `.env`, validates Supabase configuration, and continuously processes the queue.
-
-## Worker deployment notes
-
-Current confirmed Oracle deployment:
-
-- Region: `eu-frankfurt-1`
-- Shape: `VM.Standard.A1.Flex`
-- OCPU: `1`
-- RAM: `6GB`
-- OS: Ubuntu 20.04 ARM64
-- Runtime: Node.js `v22.22.2`, npm `10.9.7`, PM2 `7.0.1`
-- PM2 process: `pipeline-worker`
-
-Expected worker commands:
-
-```bash
-npm run build
-pm2 start "npm run worker:pipeline" --name pipeline-worker
-pm2 save
-pm2 startup
-pm2 save
-```
-
-## Environment variables
-
-Server-side runtime variables include:
-
-```text
-SUPABASE_URL
-SUPABASE_SERVICE_ROLE_KEY
-ORCHESTRATOR_SECRET
-OPENAI_API_KEY
-OPENAI_BASE_URL
-OPENAI_MODEL
-OPENROUTER_REFERER
-OPENROUTER_TITLE
-X_USERNAME
-TWITTERAPI_IO_KEY
-TWITTERAPI_IO_BASE_URL
-TELEGRAM_BOT_TOKEN
-TELEGRAM_WEBHOOK_SECRET
-TELEGRAM_ALLOWED_CHAT_ID
-PUBLIC_BASE_URL
-```
-
-Keep secrets in Vercel/Oracle environment files only. Do not commit `.env.local` or `.env.worker`.
-
-## Current next phase
-
-The next phase is **Phase 2A: Cost Ledger + Rejection Ledger**.
-
-Do not start by weakening the publish gate. The latest confirmed result showed:
-
-- `0` publish recommendations
-- main rejection causes: `missing_originality` and `unsourced_numeric_claims`
-
-That is a diagnostics problem first, not a reason to lower quality.
-
-Phase 2A should add durable observability for:
-
-- total estimated cost per run
-- cost by provider
-- cost by task type
-- model/token usage where available
-- publish-gate rejection reasons
-- shield rejection reasons
-- source URL count
-- numeric-claim diagnostics
-- opportunity preview/hash
-
-## Development workflow
-
-Before changing behavior:
-
-1. Confirm the change preserves the current architecture.
-2. Confirm Telegram buttons enqueue/status/cancel instead of running heavy work inline.
-3. Confirm the Oracle worker remains the heavy task processor.
-4. Confirm publish gate and decision thresholds are not lowered.
-5. Run `npm run build` and `npm test` when code changes are made.
-
-Documentation-only changes do not require restarting the worker.
-
-## Repository
-
-GitHub: `6eu6/x-ai-content-factory-orchestrator`
-Default branch: `main`
