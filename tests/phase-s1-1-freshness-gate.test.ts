@@ -378,8 +378,9 @@ describe('Phase S1.1: Source Freshness Gate', () => {
     expect(QUOTE_MAX_AGE_HOURS).toBe(168);
   });
 
-  it('downgrade to standalone produces accepted standalone with proper diagnostics', () => {
-    // A reply that's too old but can be safely downgraded
+  it('stale reply is always rejected — never downgraded to standalone', () => {
+    // A reply that's too old — even though it could theoretically be standalone,
+    // the system NO LONGER downgrades. Stale content is always rejected.
     const opp = makeOpportunity({
       type: 'reply',
       source_created_at: hoursAgo(100),
@@ -391,14 +392,11 @@ describe('Phase S1.1: Source Freshness Gate', () => {
 
     const result = filterPublishableOpportunities([opp], { enableFreshnessGate: true });
 
-    // Should be accepted as standalone (downgraded)
-    expect(result.accepted).toHaveLength(1);
-    expect(result.accepted[0].type).toBe('standalone');
-    expect(result.accepted[0].downgraded_to_standalone).toBe(true);
-    expect(result.accepted[0].original_recommendation_type).toBe('reply');
-    expect(result.freshnessStats.freshness_downgraded_to_standalone_count).toBe(1);
-    // Source URL should be cleared so standalone doesn't need a valid X status URL
-    expect(result.accepted[0].source_tweet_url).toBe('');
+    // Must be rejected — never downgraded to standalone
+    expect(result.accepted).toHaveLength(0);
+    expect(result.rejected).toHaveLength(1);
+    expect(result.rejected[0].reason).toBe('source_too_old_for_reply');
+    expect(result.freshnessStats.freshness_downgraded_to_standalone_count).toBe(0);
   });
 
   it('thread type always passes freshness regardless of source age', () => {
@@ -417,32 +415,32 @@ describe('Phase S1.1: Source Freshness Gate', () => {
   it('freshness stats are correctly computed for mixed opportunities', () => {
     const opportunities = [
       // Fresh reply → accepted as reply
-      makeOpportunity({ type: 'reply', source_created_at: hoursAgo(24) }),
-      // Old reply, CAN downgrade (has source credit, no dependency) → accepted as standalone
+      makeOpportunity({ type: 'reply', source_created_at: hoursAgo(12) }),
+      // Old reply → REJECTED (no downgrade)
       makeOpportunity({ type: 'reply', source_created_at: hoursAgo(100) }),
-      // Missing timestamp reply → rejected (cannot downgrade without timestamp)
+      // Missing timestamp reply → rejected
       makeOpportunity({ type: 'reply', source_created_at: null }),
       // Fresh quote → accepted as quote
       makeOpportunity({ type: 'quote', source_created_at: hoursAgo(48) }),
-      // Old quote, CAN downgrade → accepted as standalone
+      // Old quote → REJECTED (no downgrade)
       makeOpportunity({ type: 'quote', source_created_at: hoursAgo(200) }),
-      // Old standalone → accepted
-      makeOpportunity({ type: 'standalone', source_created_at: hoursAgo(720), source_tweet_url: '' }),
+      // Old standalone (beyond 7d) → REJECTED
+      makeOpportunity({ type: 'standalone', source_created_at: hoursAgo(200), source_tweet_url: '' }),
     ];
 
     const result = filterPublishableOpportunities(opportunities, { enableFreshnessGate: true });
 
     expect(result.freshnessStats.freshness_checked_count).toBe(6);
-    // Rejected by freshness: missing timestamp (1) + old reply downgraded (1) + old quote downgraded (1) = 3
-    // freshness_rejected_count counts ALL that failed freshness, including downgraded ones
-    expect(result.freshnessStats.freshness_rejected_count).toBe(3);
+    // Rejected by freshness: old reply (1) + missing timestamp (1) + old quote (1) + old standalone (1) = 4
+    expect(result.freshnessStats.freshness_rejected_count).toBe(4);
     expect(result.freshnessStats.freshness_missing_timestamp_count).toBe(1);
     expect(result.freshnessStats.freshness_too_old_reply_count).toBe(1);
     expect(result.freshnessStats.freshness_too_old_quote_count).toBe(1);
-    expect(result.freshnessStats.freshness_downgraded_to_standalone_count).toBe(2);
-    // Accepted: fresh reply + downgraded reply + fresh quote + downgraded quote + old standalone = 5
-    expect(result.accepted).toHaveLength(5);
-    // Rejected: missing timestamp reply = 1
-    expect(result.rejected).toHaveLength(1);
+    // No downgrades anymore
+    expect(result.freshnessStats.freshness_downgraded_to_standalone_count).toBe(0);
+    // Accepted: fresh reply + fresh quote = 2
+    expect(result.accepted).toHaveLength(2);
+    // Rejected: old reply + missing timestamp reply + old quote + old standalone = 4
+    expect(result.rejected).toHaveLength(4);
   });
 });

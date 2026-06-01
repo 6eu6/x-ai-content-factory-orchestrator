@@ -516,32 +516,8 @@ export function filterPublishableOpportunities<T extends {
           freshnessStats.freshness_too_old_quote_count++;
         }
 
-        // Check if we can downgrade to standalone
-        if (freshness.downgraded_to_standalone) {
-          freshnessStats.freshness_downgraded_to_standalone_count++;
-
-          // Downgrade: convert type to standalone, remove source_tweet_url requirement
-          const downgradedOpp = {
-            ...opp,
-            type: 'standalone' as any,
-            original_recommendation_type: freshness.original_recommendation_type,
-            downgraded_to_standalone: true as boolean,
-            // Keep source metadata for credit but clear the reply/quote URL
-            // so it doesn't fail the source_tweet_url validation
-            source_tweet_url: '' as string,
-            // Add shield issue for the downgrade
-            shield_issues: [...(opp?.shield_issues || []), `freshness_downgraded_from_${freshness.original_recommendation_type}`],
-          };
-
-          // Re-check as standalone: must still pass text policy
-          const downgradeTextCheck = isEnglishPublishableText(downgradedOpp.crafted_text || '');
-          if (downgradeTextCheck.ok) {
-            accepted.push(downgradedOpp as T);
-            return;
-          }
-        }
-
-        // Cannot downgrade — reject with freshness reason
+        // HARD RULE: Never downgrade stale reply/quote to standalone.
+        // If freshness_failed, always reject. Stale content must not reach decision.
         rejected.push({
           index,
           type,

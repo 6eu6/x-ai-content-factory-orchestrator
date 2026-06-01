@@ -33,37 +33,37 @@ export type DecidedOpportunity = ContentOpportunity & {
 
 const DEFAULT_BUDGETS: Record<DecisionStage, DecisionBudget> = {
   stage_0_new: {
-    max_total: 4,
-    max_quotes: 2,
+    max_total: 2,
+    max_quotes: 1,
     max_replies: 1,
-    max_threads: 1,
-    min_final_score: 6.5,
+    max_threads: 0,
+    min_final_score: 7.0,
     allow_links: false,
     allow_hashtags: false
   },
   stage_1_under_500: {
-    max_total: 5,
-    max_quotes: 2,
-    max_replies: 2,
-    max_threads: 1,
-    min_final_score: 6.5,
+    max_total: 3,
+    max_quotes: 1,
+    max_replies: 1,
+    max_threads: 0,
+    min_final_score: 7.0,
     allow_links: false,
     allow_hashtags: false
   },
   stage_2_500_to_2000: {
-    max_total: 4,
+    max_total: 3,
     max_quotes: 1,
-    max_replies: 2,
-    max_threads: 1,
-    min_final_score: 7.0,  // Lowered from 7.2: unified threshold
+    max_replies: 1,
+    max_threads: 0,
+    min_final_score: 7.0,
     allow_links: true,
     allow_hashtags: false
   },
   stage_3_stable: {
-    max_total: 5,
+    max_total: 4,
     max_quotes: 2,
-    max_replies: 2,
-    max_threads: 1,
+    max_replies: 1,
+    max_threads: 0,
     min_final_score: 7.0,
     allow_links: true,
     allow_hashtags: false
@@ -234,7 +234,7 @@ export function decideTelegramOpportunities(
     return {
       ...opp,
       decision_score,
-      decision_label: decision_score.final_score >= budget.min_final_score && decision_score.safety_score >= 6.5 ? 'send' : 'hold'
+      decision_label: decision_score.final_score >= budget.min_final_score && decision_score.safety_score >= 7.0 ? 'send' : 'hold'
     };
   });
 

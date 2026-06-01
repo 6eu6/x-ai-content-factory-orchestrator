@@ -2868,7 +2868,23 @@ async function processDecision(task: PipelineTaskRow): Promise<TaskResult> {
       .eq('status', 'completed')
       .maybeSingle();
 
-    const accepted = gateTask?.result?._accepted || [];
+    const rawAccepted = gateTask?.result?._accepted || [];
+
+    // ═══ DEFENSE-IN-DEPTH: Exclude stale items from decision ═══
+    // Any item with freshness_passed=false OR freshness_rejection_reason not null
+    // must be excluded from selected decisions. Do not downgrade stale
+    // quote/reply to standalone and select it.
+    const accepted = rawAccepted.filter((opp: any) => {
+      if (opp.freshness_passed === false) {
+        console.log(`[decision] EXCLUDING stale item (freshness_passed=false): type=${opp.type}, reason=${opp.freshness_rejection_reason || 'unknown'}`);
+        return false;
+      }
+      if (opp.freshness_rejection_reason && opp.freshness_rejection_reason !== null) {
+        console.log(`[decision] EXCLUDING stale item (freshness_rejection_reason=${opp.freshness_rejection_reason}): type=${opp.type}`);
+        return false;
+      }
+      return true;
+    });
 
     // Get load_account_state results for follower count
     const { data: accountTask } = await supabase
