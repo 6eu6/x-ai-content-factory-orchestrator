@@ -61,9 +61,11 @@ export type OpportunityBrief = {
 
   // Phase 2D.1: Parse failure diagnostics (only set when AI call/parse fails)
   parse_failed?: boolean;
-  intelligence_error_type?: 'model_call_failed' | 'json_parse_failed' | 'missing_required_fields';
+  intelligence_error_type?: 'model_call_failed' | 'json_parse_failed' | 'missing_required_fields' | 'schema_missing_required_fields';
   intelligence_error_message_short?: string;
   raw_model_output_preview?: string;
+  // P1: Schema repair tracking (only set when normalization was applied)
+  schema_repairs?: string[];
 
   // Phase 2D.4: Borderline rescue fields (only set when rescue was applied)
   rescue_applied?: boolean;
@@ -100,9 +102,10 @@ export type RejectionDebug = {
   recommended_angle_preview?: string;
   // Phase 2D.1: Parse failure diagnostics
   parse_failed?: boolean;
-  intelligence_error_type?: 'model_call_failed' | 'json_parse_failed' | 'missing_required_fields';
+  intelligence_error_type?: 'model_call_failed' | 'json_parse_failed' | 'missing_required_fields' | 'schema_missing_required_fields';
   intelligence_error_message_short?: string;
   raw_model_output_preview?: string;
+  schema_repairs?: string[];
 };
 
 export type RescueDebug = {
@@ -137,6 +140,12 @@ export type IntelligenceSummary = {
   // Phase 2D.1: Parse failure tracking
   intelligence_parse_failed_count: number;
   parse_failure_rate: number;
+  // P1: Schema hardening diagnostics
+  intelligence_schema_missing_fields_count: number;
+  intelligence_schema_missing_fields_by_name: Record<string, number>;
+  intelligence_schema_repaired_count: number;
+  intelligence_schema_rejected_count: number;
+  intelligence_schema_repair_examples: Array<{ source_author: string; repairs: string[] }>;
   // Phase 2D.4: Borderline rescue tracking
   rescue_attempted_count: number;
   rescue_succeeded_count: number;
@@ -423,6 +432,7 @@ export const CANONICAL_REJECTION_REASONS = [
   'insufficient_context',
   'weak_source',
   'intelligence_parse_failed',
+  'schema_missing_required_fields',
   'forced_angle',
 ] as const;
 
@@ -713,6 +723,11 @@ export function buildRejectionDebug(brief: OpportunityBrief): RejectionDebug {
     debug.raw_model_output_preview = anyBrief.raw_model_output_preview;
   }
 
+  // P1: Add schema repair info if present
+  if (anyBrief.schema_repairs && Array.isArray(anyBrief.schema_repairs) && anyBrief.schema_repairs.length > 0) {
+    debug.schema_repairs = anyBrief.schema_repairs;
+  }
+
   return debug;
 }
 
@@ -754,6 +769,158 @@ export function discoverAdjacentAngle(sourceText: string): string | null {
   }
 
   return null;
+}
+
+// ═══ P1: Schema Normalization ═══
+
+/**
+ * Field alias mapping for model output normalization.
+ *
+ * Problem: LLMs sometimes return different field names than expected,
+ * e.g., "publishability" instead of "publishability_score", or
+ * "score" instead of "publishability_score". This mapping allows
+ * the parser to recognize common aliases and map them to canonical names.
+ *
+ * Each entry maps a canonical field name to an array of known aliases,
+ * checked in priority order. The first alias found wins.
+ */
+const FIELD_ALIASES: Record<string, string[]> = {
+  'publishability_score': ['publishability', 'publish_score', 'publishabilityScore', 'overall_score', 'score'],
+  'niche_fit_score': ['niche_fit', 'niche_score', 'nicheFit', 'nicheFitScore', 'account_lens_score'],
+  'originality_potential_score': ['originality', 'originality_score', 'originalityScore', 'originality_potential'],
+  'usefulness_score': ['usefulness', 'useful_score', 'usefulnessScore'],
+  'evidence_risk_score': ['evidence_risk', 'evidence_score', 'evidenceRisk', 'evidenceRiskScore'],
+  'viral_context_score': ['viral_context', 'viral_score', 'viralContext', 'viralContextScore'],
+  'recommended_angle': ['angle', 'recommended_angle_text', 'crafting_angle'],
+  'should_craft': ['craft', 'shouldCraft', 'recommended'],
+  'rejection_reason': ['rejection', 'reject_reason', 'reason'],
+  'content_format': ['format', 'post_format'],
+  'source_summary': ['summary'],
+  'core_observation': ['observation', 'key_insight'],
+  'why_it_matters': ['why_important', 'significance'],
+  'audience_relevance': ['audience', 'target_audience'],
+  'do_not_claim': ['dont_claim', 'do_not_repeat', 'claims_to_avoid'],
+  'required_context': ['context', 'required_facts', 'needed_context'],
+};
+
+/**
+ * Required score fields that MUST be present after normalization.
+ * If any of these are still missing after alias mapping and coercion,
+ * the brief is rejected with `schema_missing_required_fields`.
+ */
+const REQUIRED_SCORE_FIELDS = [
+  'niche_fit_score',
+  'originality_potential_score',
+  'usefulness_score',
+  'evidence_risk_score',
+  'viral_context_score',
+  'publishability_score',
+  'recommended_angle',
+  'should_craft',
+];
+
+/**
+ * Normalize the parsed AI model output to match the expected schema.
+ *
+ * This function:
+ * 1. Maps known aliases to canonical field names
+ * 2. Coerces numeric strings to numbers for score fields
+ * 3. Clamps score values to valid 1-10 range
+ * 4. Tracks all repairs made for diagnostics
+ *
+ * Returns the normalized parsed object and an array of repair descriptions.
+ *
+ * IMPORTANT: This does NOT fabricate high scores. If a critical score field
+ * is truly missing (no alias found), it remains missing and the brief will
+ * be rejected with schema_missing_required_fields.
+ */
+export function normalizeIntelligenceSchema(parsed: Record<string, any>): {
+  normalized: Record<string, any>;
+  repairs: string[];
+} {
+  const repairs: string[] = [];
+  const normalized = { ...parsed };
+
+  // Pass 1: Map aliases to canonical field names
+  for (const [canonical, aliases] of Object.entries(FIELD_ALIASES)) {
+    if (normalized[canonical] !== undefined && normalized[canonical] !== null) {
+      continue; // Canonical field already present
+    }
+    for (const alias of aliases) {
+      if (normalized[alias] !== undefined && normalized[alias] !== null) {
+        normalized[canonical] = normalized[alias];
+        repairs.push(`alias:${alias}->${canonical}`);
+        break;
+      }
+    }
+  }
+
+  // Pass 2: Coerce numeric strings for score fields
+  const scoreFields = [
+    'niche_fit_score',
+    'originality_potential_score',
+    'usefulness_score',
+    'evidence_risk_score',
+    'viral_context_score',
+    'publishability_score',
+  ];
+  for (const field of scoreFields) {
+    const value = normalized[field];
+    if (value === undefined || value === null) continue;
+    if (typeof value === 'string') {
+      const coerced = Number(value);
+      if (Number.isFinite(coerced)) {
+        normalized[field] = coerced;
+        repairs.push(`coerce:${field}:"${value}"->${coerced}`);
+      } else {
+        // Non-numeric string — remove so it's flagged as missing
+        delete normalized[field];
+        repairs.push(`invalid_coerce:${field}:"${value}"->removed`);
+      }
+    } else if (typeof value === 'number' && !Number.isFinite(value)) {
+      // NaN or Infinity — remove so it's flagged as missing
+      delete normalized[field];
+      repairs.push(`invalid_number:${field}:${value}->removed`);
+    }
+  }
+
+  // Pass 3: Clamp score fields to valid 1-10 range (but don't fill missing)
+  for (const field of scoreFields) {
+    const value = normalized[field];
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      const clamped = Math.max(1, Math.min(10, Math.round(value * 10) / 10));
+      if (clamped !== Math.round(value * 10) / 10) {
+        normalized[field] = clamped;
+        repairs.push(`clamp:${field}:${value}->${clamped}`);
+      }
+    }
+  }
+
+  // Pass 4: Coerce should_craft from string
+  if (typeof normalized.should_craft === 'string') {
+    const lower = normalized.should_craft.toLowerCase().trim();
+    if (lower === 'true' || lower === 'yes') {
+      normalized.should_craft = true;
+      repairs.push('coerce:should_craft:"true"->true');
+    } else if (lower === 'false' || lower === 'no') {
+      normalized.should_craft = false;
+      repairs.push('coerce:should_craft:"false"->false');
+    } else {
+      delete normalized.should_craft;
+      repairs.push(`invalid_coerce:should_craft:"${normalized.should_craft}"->removed`);
+    }
+  }
+
+  // Pass 5: Validate recommended_angle is a string (not null/number)
+  if (normalized.recommended_angle !== undefined && normalized.recommended_angle !== null) {
+    if (typeof normalized.recommended_angle !== 'string') {
+      const str = String(normalized.recommended_angle);
+      normalized.recommended_angle = str;
+      repairs.push(`coerce:recommended_angle:${typeof normalized.recommended_angle}->string`);
+    }
+  }
+
+  return { normalized, repairs };
 }
 
 // ═══ AI-Powered Evaluation ═══
@@ -1024,23 +1191,25 @@ Produce the Opportunity Brief JSON now.`,
       };
     }
 
-    // Phase 2D.1: Validate required score fields after parsing
-    // If any critical score field is missing, treat as intelligence_parse_failed
-    const REQUIRED_SCORE_FIELDS = [
-      'niche_fit_score',
-      'originality_potential_score',
-      'usefulness_score',
-      'evidence_risk_score',
-      'viral_context_score',
-      'publishability_score',
-      'recommended_angle',
-      'should_craft',
-    ];
+    // P1: Normalize schema — map aliases, coerce types, clamp scores
+    // This runs BEFORE the missing-field check so that alias fields like
+    // "publishability" are mapped to "publishability_score" first.
+    const { normalized, repairs } = normalizeIntelligenceSchema(parsed);
+    parsed = normalized;
+
+    // Log repairs for diagnostics
+    if (repairs.length > 0) {
+      console.log(`[opportunity-intelligence] Schema repairs for @${sourceAuthor}: ${repairs.join(', ')}`);
+    }
+
+    // P1: Validate required score fields AFTER normalization
+    // If any critical score field is still missing, reject with schema_missing_required_fields
+    // (distinct from intelligence_parse_failed — the JSON was valid but schema was incomplete)
     const missingFields = REQUIRED_SCORE_FIELDS.filter(f => parsed[f] === undefined || parsed[f] === null);
     if (missingFields.length > 0) {
-      console.error(`[opportunity-intelligence] Missing required fields for @${sourceAuthor}: ${missingFields.join(', ')}`);
+      console.error(`[opportunity-intelligence] Missing required fields for @${sourceAuthor}: ${missingFields.join(', ')}${repairs.length > 0 ? ` (repairs attempted: ${repairs.join(', ')})` : ''}`);
       return {
-        source_summary: `Intelligence parse failed: missing_required_fields (${missingFields.join(', ')})`,
+        source_summary: `Intelligence schema failed: missing_required_fields (${missingFields.join(', ')})`,
         source_text: sourceText,
         source_author: sourceAuthor,
         source_tweet_url: sourceTweetUrl,
@@ -1059,11 +1228,12 @@ Produce the Opportunity Brief JSON now.`,
         do_not_claim: [],
         required_context: [],
         should_craft: false,
-        rejection_reason: 'intelligence_parse_failed',
+        rejection_reason: 'schema_missing_required_fields',
         parse_failed: true,
-        intelligence_error_type: 'missing_required_fields' as const,
+        intelligence_error_type: 'schema_missing_required_fields' as const,
         intelligence_error_message_short: `Missing: ${missingFields.join(', ')}`,
         raw_model_output_preview: (aiResponse || '').slice(0, 200),
+        schema_repairs: repairs.length > 0 ? repairs : undefined,
         // Phase 2E.1: Copy discovery metadata from opportunity input
         tweet_type: opp.tweet_type as 'original' | 'reply' | 'quote' | 'retweet' | undefined,
         engagement_score: typeof opp.engagement_score === 'number' ? opp.engagement_score : undefined,
@@ -1100,6 +1270,8 @@ Produce the Opportunity Brief JSON now.`,
         : [],
       should_craft: Boolean(parsed.should_craft),
       rejection_reason: parsed.rejection_reason || undefined,
+      // P1: Attach schema repairs for diagnostics
+      schema_repairs: repairs.length > 0 ? repairs : undefined,
       // Phase 2E.1: Copy discovery metadata from opportunity input
       tweet_type: opp.tweet_type as 'original' | 'reply' | 'quote' | 'retweet' | undefined,
       engagement_score: typeof opp.engagement_score === 'number' ? opp.engagement_score : undefined,
@@ -1479,6 +1651,12 @@ export async function evaluateOpportunities(
     sampled_rejection_debug: [],
     intelligence_parse_failed_count: 0,
     parse_failure_rate: 0,
+    // P1: Schema hardening diagnostics
+    intelligence_schema_missing_fields_count: 0,
+    intelligence_schema_missing_fields_by_name: {},
+    intelligence_schema_repaired_count: 0,
+    intelligence_schema_rejected_count: 0,
+    intelligence_schema_repair_examples: [],
     rescue_attempted_count: 0,
     rescue_succeeded_count: 0,
     rescue_failed_count: 0,
@@ -1683,6 +1861,35 @@ export async function evaluateOpportunities(
 
   const rejectionDebugAvailable = allRejectionDebug.length > 0;
 
+  // P1: Schema hardening diagnostics
+  const schemaMissingFieldsCount = briefs.filter(
+    (b: any) => b.intelligence_error_type === 'schema_missing_required_fields'
+  ).length;
+  const schemaMissingFieldsByName: Record<string, number> = {};
+  for (const b of briefs) {
+    const anyB = b as any;
+    if (anyB.intelligence_error_type === 'schema_missing_required_fields' && anyB.intelligence_error_message_short) {
+      // Parse "Missing: field1, field2" to extract individual field names
+      const fieldNames = anyB.intelligence_error_message_short
+        .replace('Missing: ', '')
+        .split(', ')
+        .filter(Boolean);
+      for (const f of fieldNames) {
+        schemaMissingFieldsByName[f] = (schemaMissingFieldsByName[f] || 0) + 1;
+      }
+    }
+  }
+  const schemaRepairedCount = briefs.filter(
+    (b: any) => Array.isArray(b.schema_repairs) && b.schema_repairs.length > 0 && b.should_craft !== false
+  ).length;
+  const schemaRejectedCount = briefs.filter(
+    (b: any) => b.intelligence_error_type === 'schema_missing_required_fields'
+  ).length;
+  const schemaRepairExamples: Array<{ source_author: string; repairs: string[] }> = briefs
+    .filter((b: any) => Array.isArray(b.schema_repairs) && b.schema_repairs.length > 0)
+    .slice(0, 5)
+    .map((b: any) => ({ source_author: b.source_author, repairs: b.schema_repairs }));
+
   return {
     briefs,
     summary: {
@@ -1697,6 +1904,12 @@ export async function evaluateOpportunities(
       sampled_rejection_debug: sampledRejectionDebug,
       intelligence_parse_failed_count: parseFailedCount,
       parse_failure_rate: parseFailureRate,
+      // P1: Schema hardening diagnostics
+      intelligence_schema_missing_fields_count: schemaMissingFieldsCount,
+      intelligence_schema_missing_fields_by_name: schemaMissingFieldsByName,
+      intelligence_schema_repaired_count: schemaRepairedCount,
+      intelligence_schema_rejected_count: schemaRejectedCount,
+      intelligence_schema_repair_examples: schemaRepairExamples,
       // Phase 2D.4: Rescue diagnostics
       rescue_attempted_count: rescueAttemptedCount,
       rescue_succeeded_count: rescueSucceededCount,

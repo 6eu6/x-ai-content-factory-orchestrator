@@ -383,6 +383,8 @@ describe('Phase 2E.3: Threshold Integrity', () => {
     expect(CANONICAL_REJECTION_REASONS).toContain('low_originality_potential');
     // Phase S1.3: Added 'forced_angle' as a canonical rejection reason
     expect(CANONICAL_REJECTION_REASONS).toContain('forced_angle');
-    expect(CANONICAL_REJECTION_REASONS).toHaveLength(12);
+    // P1: Added 'schema_missing_required_fields' as a canonical rejection reason
+    expect(CANONICAL_REJECTION_REASONS).toContain('schema_missing_required_fields');
+    expect(CANONICAL_REJECTION_REASONS).toHaveLength(13);
   });
 });
