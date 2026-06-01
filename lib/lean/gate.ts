@@ -31,11 +31,16 @@ const BAIT_PATTERNS: RegExp[] = [
 ];
 
 const ARABIC = /[؀-ۿ]/;
-// Allow latin, digits, punctuation, common symbols, emoji. Flag if the text is
-// dominated by a non-latin script (other than allowed emoji/symbols).
+// Non-latin scripts that indicate the model wrote in the wrong language when
+// English content was requested.
 const NON_LATIN_WORD = /[؀-ۿЀ-ӿ一-鿿぀-ヿ가-힯]/;
 
-export function gateSuggestion(text: string, maxLen = 280): GateResult {
+/**
+ * @param language expected publish language ('en', 'ar', ...). Language checks
+ *   are only enforced for 'en' (must be latin script). For non-English profiles
+ *   we trust the generator + human review rather than guess every script.
+ */
+export function gateSuggestion(text: string, maxLen = 280, language = 'en'): GateResult {
   const t = String(text || '').trim();
 
   if (!t) return { ok: false, reason: 'empty' };
@@ -46,9 +51,13 @@ export function gateSuggestion(text: string, maxLen = 280): GateResult {
   if (/^[[{]/.test(t) && /[\]}]\s*$/.test(t)) return { ok: false, reason: 'looks_like_json' };
   if (/"(text|reply|quote|content)"\s*:/.test(t)) return { ok: false, reason: 'json_field_leak' };
 
-  // English-only rule for publishable X content.
-  if (ARABIC.test(t)) return { ok: false, reason: 'arabic_detected' };
-  if (NON_LATIN_WORD.test(t)) return { ok: false, reason: 'non_english_script' };
+  // Language enforcement (English profiles must be latin script).
+  if (language === 'en') {
+    if (ARABIC.test(t)) return { ok: false, reason: 'arabic_in_english_profile' };
+    if (NON_LATIN_WORD.test(t)) return { ok: false, reason: 'non_english_script' };
+  } else if (language === 'ar') {
+    if (!ARABIC.test(t)) return { ok: false, reason: 'expected_arabic' };
+  }
 
   for (const re of BAIT_PATTERNS) {
     if (re.test(t)) return { ok: false, reason: 'engagement_bait' };

@@ -9,7 +9,8 @@
  * worker / durable queue required for the lean path.
  */
 
-import { getLeanConfig, loadSourceAccounts } from './config';
+import { getLeanConfig, configFromProfile, loadSourceAccounts } from './config';
+import { getActiveProfile } from './profile';
 import { harvestSources } from './harvest';
 import { getWinningExamples, getRecentlyPublished } from './memory';
 import { generateSuggestions, type Suggestion } from './generate';
@@ -28,9 +29,13 @@ export type LeanRunResult = {
   suggestions: Suggestion[];
 };
 
-export async function runLeanLoop(opts?: { deliverTelegram?: boolean; runId?: string }): Promise<LeanRunResult> {
-  const cfg = getLeanConfig();
-  const sources = await loadSourceAccounts(cfg.sourceLimit);
+export async function runLeanLoop(opts?: { deliverTelegram?: boolean; runId?: string; accountHandle?: string }): Promise<LeanRunResult> {
+  // Profile is the canonical config source; env config is the cold-start fallback.
+  const profile = await getActiveProfile(opts?.accountHandle).catch(() => null);
+  const cfg = profile ? configFromProfile(profile) : getLeanConfig();
+  const sources = cfg.sourceHandles.length
+    ? cfg.sourceHandles.slice(0, cfg.sourceLimit).map((handle) => ({ handle, tier: null, category: null, followers: null }))
+    : await loadSourceAccounts(cfg.sourceLimit);
   const tweets = await harvestSources(sources, cfg.tweetsPerSource);
   const examples = await getWinningExamples(cfg.accountHandle, 6);
   const recent = await getRecentlyPublished(cfg.accountHandle, 25);
@@ -40,7 +45,7 @@ export async function runLeanLoop(opts?: { deliverTelegram?: boolean; runId?: st
   const accepted: Suggestion[] = [];
   const rejected: { reason: string; text: string }[] = [];
   for (const s of generated) {
-    const gate = gateSuggestion(s.text);
+    const gate = gateSuggestion(s.text, 280, cfg.tweetLanguage);
     if (!gate.ok) {
       rejected.push({ reason: gate.reason, text: s.text });
       continue;

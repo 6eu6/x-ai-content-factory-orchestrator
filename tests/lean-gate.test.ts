@@ -18,10 +18,17 @@ describe('lean gate', () => {
     if (!r.ok) expect(r.reason).toContain('280');
   });
 
-  it('rejects arabic content (must be english only)', () => {
-    const r = gateSuggestion('هذه تغريدة بالعربية وليست مسموحة في المحتوى المنشور');
+  it('rejects arabic content in an english profile', () => {
+    const r = gateSuggestion('هذه تغريدة بالعربية وليست مسموحة في المحتوى المنشور', 280, 'en');
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toBe('arabic_detected');
+    if (!r.ok) expect(r.reason).toBe('arabic_in_english_profile');
+  });
+
+  it('accepts arabic content in an arabic profile but rejects english there', () => {
+    expect(gateSuggestion('أدوات الذكاء الاصطناعي الجديدة تغيّر طريقة بناء المنتجات فعلاً', 280, 'ar').ok).toBe(true);
+    const r = gateSuggestion('This is english but the profile expects arabic content', 280, 'ar');
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('expected_arabic');
   });
 
   it('rejects json leakage', () => {

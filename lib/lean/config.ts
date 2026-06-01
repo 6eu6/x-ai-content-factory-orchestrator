@@ -12,6 +12,7 @@
 
 import { optionalEnv, envNumber } from '../env';
 import { supabaseAdmin } from '../supabase';
+import type { Profile } from './profile';
 
 export type LeanMix = {
   replies: number;
@@ -24,6 +25,8 @@ export type LeanConfig = {
   accountHandle: string;
   /** One narrow niche. Broad niches give no identity and do not grow. */
   niche: string;
+  /** Language of PUBLISHED content (e.g. 'en', 'ar'). Follows the profile. */
+  tweetLanguage: string;
   /** The voice the suggestions must be written in. Edit this as the account develops a real voice. */
   voice: string;
   /** Hard rules every suggestion must obey (kept short on purpose). */
@@ -34,7 +37,27 @@ export type LeanConfig = {
   sourceLimit: number;
   /** How many recent tweets to pull per source account. */
   tweetsPerSource: number;
+  /** Optional explicit source handles (from the profile); empty = use accounts table. */
+  sourceHandles: string[];
 };
+
+/** Human-readable language name for prompts. */
+export function languageName(code: string): string {
+  const map: Record<string, string> = { en: 'English', ar: 'Arabic', es: 'Spanish', fr: 'French', de: 'German', pt: 'Portuguese', hi: 'Hindi', tr: 'Turkish', id: 'Indonesian', ja: 'Japanese' };
+  return map[code] || 'English';
+}
+
+function rulesForLanguage(langCode: string): string[] {
+  const langName = languageName(langCode);
+  return [
+    `Write only in ${langName}.`,
+    'Max 280 characters.',
+    'One clear idea per post — specific, not vague.',
+    'No engagement-bait openers ("hot take", "this is huge", "game changer", "thoughts?").',
+    'No invented statistics. If a number is not in the source, do not state it as fact.',
+    'A reply must add value to the original tweet, not just agree with it.',
+  ];
+}
 
 /**
  * The default persona. The account @30piq currently has no established voice,
@@ -48,21 +71,15 @@ const DEFAULT_VOICE = [
   'No hashtags. At most one emoji, and only if it adds meaning. No threads.',
 ].join(' ');
 
-const DEFAULT_RULES = [
-  'English only.',
-  'Max 280 characters.',
-  'One clear idea per post — specific, not vague.',
-  'No engagement-bait openers ("hot take", "this is huge", "game changer", "thoughts?").',
-  'No invented statistics. If a number is not in the source, do not state it as fact.',
-  'A reply must add value to the original tweet, not just agree with it.',
-];
-
+/** Env-only fallback config (used when no profile exists yet). */
 export function getLeanConfig(): LeanConfig {
+  const lang = optionalEnv('LEAN_TWEET_LANGUAGE', 'en');
   return {
     accountHandle: optionalEnv('X_USERNAME', '30piq').replace(/^@/, ''),
     niche: optionalEnv('LEAN_NICHE', 'AI tools, AI workflows, and building with AI'),
+    tweetLanguage: lang,
     voice: optionalEnv('LEAN_VOICE', DEFAULT_VOICE),
-    rules: DEFAULT_RULES,
+    rules: rulesForLanguage(lang),
     mix: {
       replies: envNumber('LEAN_REPLIES', 6, 0, 30),
       quotes: envNumber('LEAN_QUOTES', 3, 0, 30),
@@ -70,6 +87,22 @@ export function getLeanConfig(): LeanConfig {
     },
     sourceLimit: envNumber('LEAN_SOURCE_LIMIT', 8, 1, 40),
     tweetsPerSource: envNumber('LEAN_TWEETS_PER_SOURCE', 5, 1, 20),
+    sourceHandles: [],
+  };
+}
+
+/** Build config from a profile (the canonical path), with env tuning for limits. */
+export function configFromProfile(p: Profile): LeanConfig {
+  return {
+    accountHandle: p.accountHandle,
+    niche: p.niche,
+    tweetLanguage: p.tweetLanguage,
+    voice: p.voice || DEFAULT_VOICE,
+    rules: rulesForLanguage(p.tweetLanguage),
+    mix: p.mix,
+    sourceLimit: envNumber('LEAN_SOURCE_LIMIT', 8, 1, 40),
+    tweetsPerSource: envNumber('LEAN_TWEETS_PER_SOURCE', 5, 1, 20),
+    sourceHandles: p.sourceHandles,
   };
 }
 
