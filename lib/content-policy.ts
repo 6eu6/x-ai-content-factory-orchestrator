@@ -49,10 +49,10 @@ export type FreshnessGateStats = {
 // ═══ Phase S1.1: Freshness Thresholds ═══
 
 /** Maximum age in hours for a reply source tweet. Beyond this, the reply looks late. */
-export const REPLY_MAX_AGE_HOURS = 72;
+export const REPLY_MAX_AGE_HOURS = 336; // 14 days — relaxed for accounts with infrequent tweets
 
 /** Maximum age in hours for a quote source tweet. Beyond this, the quote loses momentum. */
-export const QUOTE_MAX_AGE_HOURS = 168; // 7 days
+export const QUOTE_MAX_AGE_HOURS = 720; // 30 days — relaxed for accounts with infrequent tweets
 
 // ═══ Constants ═══
 

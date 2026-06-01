@@ -1,113 +1,73 @@
-/**
- * continue-run.ts — Continue processing remaining tasks for a specific run
- */
-import { config } from 'dotenv';
-import { resolve } from 'path';
-config({ path: resolve(__dirname, '../.env') });
-
+import { config } from 'dotenv'; import { resolve } from 'path'; config({ path: resolve(process.cwd(), '.env') });
+import { createClient } from '@supabase/supabase-js';
 import { processPipelineTaskBatch } from '../lib/pipeline-worker';
-import { supabaseAdmin } from '../lib/supabase';
-
-const WORKER_ID = `local-debug-continuation-${Date.now()}`;
-const MAX_RUNTIME_MS = 600000; // 10 min
+const supabase = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
 
 async function main() {
-  const supabase = supabaseAdmin();
+  const { data: run } = await supabase.from('pipeline_runs').select('id').eq('status', 'running').order('started_at', { ascending: false }).limit(1).single();
+  if (!run) { console.log('No running run'); return; }
+  const runId = run.id!;
+  console.log(`Processing run ${runId.slice(0,8)}...`);
   
-  // Get the latest active run
-  const { data: run } = await supabase.from('pipeline_runs')
-    .select('id, status, total_tasks, completed_tasks, failed_tasks')
-    .in('status', ['queued', 'running', 'stuck'])
-    .order('started_at', { ascending: false })
-    .limit(1)
-    .single();
+  // Unlock any stuck tasks
+  const { data: unlocked } = await supabase.from('pipeline_tasks')
+    .update({ status: 'queued', locked_by: null, locked_at: null })
+    .eq('run_id', runId)
+    .in('status', ['locked', 'running', 'stuck'])
+    .select();
+  if (unlocked?.length) console.log(`Unlocked ${unlocked.length} tasks`);
   
-  if (!run) {
-    // Try the last completed run
-    const { data: lastRun } = await supabase.from('pipeline_runs')
-      .select('id, status, total_tasks, completed_tasks, failed_tasks')
-      .order('started_at', { ascending: false })
-      .limit(1)
-      .single();
-    
-    console.log('No active runs. Latest run:', lastRun);
-    if (!lastRun) {
-      console.log('No runs found at all');
-      return;
+  let totalOk = 0, totalFail = 0;
+  for (let i = 0; i < 100; i++) {
+    try {
+      const br = await processPipelineTaskBatch({
+        workerId: 'continue-worker',
+        maxTasks: 1,
+        maxRuntimeMs: 300000,
+        runId
+      });
+      totalOk += br.tasks_completed;
+      totalFail += br.tasks_failed;
+      console.log(`[${br.stopped_reason}] +${br.tasks_processed} ok=${br.tasks_completed} fail=${br.tasks_failed} ms=${br.runtime_ms}`);
+      for (const err of br.errors.slice(0, 3)) console.error(`  ERR: ${err.slice(0, 200)}`);
+      if (br.stopped_reason === 'no_tasks' || br.stopped_reason === 'no_more_tasks') break;
+      await new Promise(r => setTimeout(r, 2000));
+    } catch (err: any) {
+      console.error(`FATAL: ${err.message?.slice(0, 300)}`);
+      await new Promise(r => setTimeout(r, 5000));
     }
-    
-    // If latest run is completed/failed but has unfinished tasks, resume it
-    const { data: unfinishedTasks } = await supabase.from('pipeline_tasks')
-      .select('id, status')
-      .eq('run_id', lastRun.id)
-      .in('status', ['running', 'queued']);
-    
-    if (unfinishedTasks && unfinishedTasks.length > 0) {
-      console.log(`Found ${unfinishedTasks.length} unfinished tasks for run ${lastRun.id}`);
-      // Reset running tasks to queued
-      for (const t of unfinishedTasks) {
-        await supabase.from('pipeline_tasks').update({ status: 'queued', locked_at: null, locked_by: null }).eq('id', t.id);
-      }
-      await supabase.from('pipeline_runs').update({ status: 'running' }).eq('id', lastRun.id);
-      processTasks(lastRun.id);
-    } else {
-      console.log('All tasks completed for this run');
-    }
-    return;
   }
+  console.log(`\nTOTAL: ok=${totalOk} fail=${totalFail}`);
   
-  processTasks(run.id);
-}
-
-async function processTasks(runId: string) {
-  console.log(`Processing tasks for run: ${runId}`);
-  const startTime = Date.now();
-  let iteration = 0;
-  let totalProcessed = 0;
-  let totalCompleted = 0;
-  let totalFailed = 0;
+  // Final results
+  const { data: finalRun } = await supabase.from('pipeline_runs').select('status, decision_payload, telegram_payload').eq('id', runId).single();
+  console.log(`Status: ${finalRun?.status}`);
+  const dp = finalRun?.decision_payload as any;
+  console.log(`Selected: ${dp?.selected}`);
+  console.log(`Held: ${dp?.held}`);
+  const tp = finalRun?.telegram_payload as any;
+  console.log(`Telegram delivered: ${tp?.delivered}`);
   
-  while (Date.now() - startTime < MAX_RUNTIME_MS) {
-    iteration++;
-    
-    const result = await processPipelineTaskBatch({
-      workerId: WORKER_ID,
-      maxTasks: 3,
-      maxRuntimeMs: 180000,
-      runId: runId
-    });
-    
-    totalProcessed += result.tasks_processed;
-    totalCompleted += result.tasks_completed;
-    totalFailed += result.tasks_failed;
-    
-    console.log(
-      `[worker] Batch ${iteration}: ` +
-      `processed=${result.tasks_processed} completed=${result.tasks_completed} failed=${result.tasks_failed} ` +
-      `total=${totalProcessed}/${totalCompleted} time=${Math.round((Date.now()-startTime)/1000)}s ` +
-      `reason=${result.stopped_reason}`
-    );
-    
-    if (result.errors.length > 0) {
-      for (const err of result.errors.slice(0, 3)) {
-        console.error(`[worker] ERROR: ${err.slice(0, 150)}`);
+  // Check individual decision
+  const { data: decTask } = await supabase.from('pipeline_tasks').select('result').eq('run_id', runId).eq('task_type', 'decision').maybeSingle();
+  const decision = decTask?.result?._decision;
+  if (decision) {
+    console.log(`\nDecision stage: ${decision.stage}`);
+    if (decision.selected?.length) {
+      console.log('\n✅ SELECTED CONTENT:');
+      for (const s of decision.selected) {
+        console.log(`  Score: ${s.decision_score?.final_score}`);
+        console.log(`  Text: ${s.crafted_text}`);
+        console.log();
       }
     }
-    
-    if (result.stopped_reason === 'no_tasks' || result.stopped_reason === 'no_more_tasks') {
-      console.log('[worker] All tasks done!');
-      break;
+    if (decision.held?.length) {
+      console.log(`\n⏸ HELD (${decision.held.length}):`);
+      for (const h of decision.held.slice(0, 3)) {
+        console.log(`  Score: ${h.decision_score?.final_score} | ${String(h.crafted_text).slice(0, 100)}`);
+      }
     }
-    
-    await new Promise(r => setTimeout(r, 3000));
   }
-  
-  console.log(`\n=== FINAL ===`);
-  console.log(`Processed: ${totalProcessed}, Completed: ${totalCompleted}, Failed: ${totalFailed}`);
-  console.log(`Runtime: ${Math.round((Date.now()-startTime)/1000)}s`);
 }
 
-main().catch(err => {
-  console.error('FATAL:', err.message);
-  process.exit(1);
-});
+main().catch(e => { console.error(e); process.exit(1); });
