@@ -49,10 +49,13 @@ export type FreshnessGateStats = {
 // ═══ Phase S1.1: Freshness Thresholds ═══
 
 /** Maximum age in hours for a reply source tweet. Beyond this, the reply looks late. */
-export const REPLY_MAX_AGE_HOURS = 336; // 14 days — relaxed for accounts with infrequent tweets
+export const REPLY_MAX_AGE_HOURS = 24; // 1 day — replies must be timely for growth
 
 /** Maximum age in hours for a quote source tweet. Beyond this, the quote loses momentum. */
-export const QUOTE_MAX_AGE_HOURS = 720; // 30 days — relaxed for accounts with infrequent tweets
+export const QUOTE_MAX_AGE_HOURS = 72; // 3 days — quotes need momentum window
+
+/** Maximum age in hours for standalone content derived from a source. Beyond this, standalone looks stale. */
+export const STANDALONE_MAX_AGE_HOURS = 168; // 7 days — standalone content should reference recent events
 
 // ═══ Constants ═══
 
@@ -265,8 +268,19 @@ export function checkFreshness(
     ? computeSourceAgeHoursFromReference(sourceCreatedAt, referenceTime)
     : computeSourceAgeHours(sourceCreatedAt);
 
-  // Standalone types: freshness is not required (evergreen allowed)
+  // Standalone types: check source age but don't require freshness strictly
   if (type === 'standalone' || type === 'thread' || type === 'article' || type === 'repo_tweet') {
+    // If source has a timestamp, reject if too old even for standalone
+    if (sourceAgeHours !== null && sourceAgeHours > STANDALONE_MAX_AGE_HOURS) {
+      return {
+        source_created_at: sourceCreatedAt,
+        source_age_hours: sourceAgeHours,
+        freshness_passed: false,
+        freshness_rejection_reason: 'source_too_old_for_standalone',
+        original_recommendation_type: type,
+        downgraded_to_standalone: false,
+      };
+    }
     return {
       source_created_at: sourceCreatedAt,
       source_age_hours: sourceAgeHours,

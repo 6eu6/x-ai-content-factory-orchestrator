@@ -1,4 +1,5 @@
 import type { ContentOpportunity } from './content-engine-v3';
+import { detectAIPatterns } from './crafted-text-cleaner';
 
 export type DecisionStage = 'stage_0_new' | 'stage_1_under_500' | 'stage_2_500_to_2000' | 'stage_3_stable';
 
@@ -32,20 +33,20 @@ export type DecidedOpportunity = ContentOpportunity & {
 
 const DEFAULT_BUDGETS: Record<DecisionStage, DecisionBudget> = {
   stage_0_new: {
-    max_total: 2,
-    max_quotes: 1,
+    max_total: 4,
+    max_quotes: 2,
     max_replies: 1,
-    max_threads: 0,
-    min_final_score: 7.0,  // Lowered from 7.8: new account needs content to grow, judge already validates quality
+    max_threads: 1,
+    min_final_score: 6.5,
     allow_links: false,
     allow_hashtags: false
   },
   stage_1_under_500: {
-    max_total: 3,
-    max_quotes: 1,
-    max_replies: 1,
+    max_total: 5,
+    max_quotes: 2,
+    max_replies: 2,
     max_threads: 1,
-    min_final_score: 7.0,  // Lowered from 7.5: consistent threshold across early stages
+    min_final_score: 6.5,
     allow_links: false,
     allow_hashtags: false
   },
@@ -106,7 +107,18 @@ function looksDuplicative(text: string): boolean {
     'in this thread',
     'everything you need to know',
     'game-changer',
-    'unlock the power'
+    'unlock the power',
+    'at the end of the day',
+    'in today\'s world',
+    'it\'s worth noting',
+    'the bottom line is',
+    'needless to say',
+    'make no mistake',
+    'here\'s what you need to know',
+    'the truth is',
+    'let\'s be clear',
+    'deep dive',
+    'think about it',
   ];
   return repeatedHooks.some(h => lower.includes(h));
 }
@@ -121,8 +133,8 @@ export function scoreOpportunity(opp: ContentOpportunity, budget: DecisionBudget
   const bookmarks = metricNumber(metrics, 'bookmark_count');
   const views = metricNumber(metrics, 'view_count');
 
-  const engagement = likes + replies * 2 + retweets * 3 + quotes * 4 + bookmarks * 2 + Math.min(views, 100000) / 1000;
-  const momentum_score = clamp10(Math.log10(engagement + 1) * 3.2 + (bookmarks > 0 ? 0.8 : 0) + (replies > 2 ? 0.6 : 0));
+  const engagement = likes * 1.5 + replies * 3 + retweets * 4 + quotes * 5 + bookmarks * 3 + Math.min(views, 100000) / 800;
+  const momentum_score = clamp10(Math.log10(engagement + 1) * 3.5 + (bookmarks > 0 ? 1.0 : 0) + (replies > 5 ? 0.8 : 0) + (likes > 100 ? 0.5 : 0));
 
   const brainRules = Array.isArray(opp.brain_rules_used) ? opp.brain_rules_used.filter(Boolean) : [];
   const brain_match_score = clamp10(4.5 + Math.min(brainRules.length, 5) * 1.0 + (opp.why ? 0.7 : 0));
@@ -154,9 +166,14 @@ export function scoreOpportunity(opp: ContentOpportunity, budget: DecisionBudget
     safety_score -= 2;
     rejection_reasons.push('Text contains repeated/AI-like hook pattern');
   }
+  if (detectAIPatterns(text).is_ai_sounding) {
+    safety_score -= 2;
+    rejection_reasons.push('Text matches common AI-generated tweet patterns');
+  }
   safety_score = clamp10(safety_score);
 
-  const originality_score = clamp10(5.5 + (text.length > 40 ? 0.7 : 0) + (/[?]/.test(text) ? 0.3 : 0) + (opp.why ? 0.8 : 0) - (looksDuplicative(text) ? 2.5 : 0));
+  const aiPenalty = detectAIPatterns(text).penalty_score;
+  const originality_score = clamp10(5.5 + (text.length > 40 ? 0.7 : 0) + (/[?]/.test(text) ? 0.3 : 0) + (opp.why ? 0.8 : 0) - (looksDuplicative(text) ? 2.5 : 0) - aiPenalty);
   const media_fit_score = clamp10(5 + Math.min((opp.media_urls || []).length, 3) * 1.2 + (isQuote && (opp.media_urls || []).length ? 0.8 : 0));
 
   // Phase 6: Rule performance weight adjustment

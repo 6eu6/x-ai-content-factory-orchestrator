@@ -290,6 +290,66 @@ function unescapeJsonString(text: string): string {
     .replace(/\\'/g, "'");
 }
 
+// ═══ Anti-AI Pattern Detection ═══
+
+/**
+ * Common AI-generated tweet patterns that make content feel inauthentic.
+ * These patterns are detected AFTER cleaning and BEFORE publishing.
+ */
+const AI_TWEET_PATTERNS = [
+  // "The real X isn't Y — it's Z" formula
+  /^the real (?:\w+\s+)?isn't\b/i,
+  // "X distorts Y" / "The X lens distorts Y"
+  /\b\w+ lens distorts\b/i,
+  // "not just X, but Y" / "not just better tools, but"
+  /not just \w+,? but\b/i,
+  // "It's not about X — it's about Y"
+  /it'?s not about \w+ —? it'?s about/i,
+  // "The shift from X to Y suggests"
+  /\bthe shift (?:from|to)\b.*\bsuggests\b/i,
+  // "What [they] stop working on"
+  /\bwhat they stop\b/i,
+  // Overuse of em-dash (—) as a crutch
+  /(?:^|\w)\s*—\s*(?:the |it'|they |this |that )/i,
+  // Generic AI filler phrases
+  /\b(reveals|signals|suggests|indicates|highlights|underscores)\s+(?:a |the |that )\b/i,
+  // "cognitive infrastructure" / "new cognitive" type academic phrasing
+  /\b(cognitive infrastructure|new cognitive|paradigm shift|fundamental shift)\b/i,
+  // Excessive tool name dropping (3+ proper nouns in sequence)
+  /(?:[A-Z][a-z0-9]+(?:\s+[A-Z][a-z0-9]+)){2,}/,
+];
+
+/**
+ * Detect AI-sounding patterns in crafted text.
+ * Returns pattern matches for diagnostics but does NOT reject —
+ * the decision engine uses this as a quality signal.
+ */
+export function detectAIPatterns(text: string): { 
+  is_ai_sounding: boolean; 
+  matched_patterns: string[];
+  penalty_score: number; // 0-3, higher = more AI-sounding
+} {
+  if (!text || text.length < 20) {
+    return { is_ai_sounding: false, matched_patterns: [], penalty_score: 0 };
+  }
+  
+  const matched: string[] = [];
+  let penalty = 0;
+  
+  for (const pattern of AI_TWEET_PATTERNS) {
+    if (pattern.test(text)) {
+      matched.push(pattern.toString().slice(1, 40));
+      penalty += 0.5;
+    }
+  }
+  
+  return {
+    is_ai_sounding: penalty >= 1.0,
+    matched_patterns: matched,
+    penalty_score: Math.min(3, penalty),
+  };
+}
+
 /**
  * Batch clean all opportunities' crafted_text.
  * Returns cleaned opportunities and a summary.
