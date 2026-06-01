@@ -10,14 +10,28 @@ It replaces an earlier, over-engineered pipeline (80+ tables, 5 stacked AI gates
 
 ## How it works
 
+A persistent **Oracle worker** (`npm run worker`) drives everything — it has no
+serverless time limit, rests between cycles, and runs autonomously:
+
 ```
-daily cycle (one cron call → /api/lean-cycle)
-  1. crawl    distil fresh niche patterns into the brain   (outward learning)
-  2. feedback measure yesterday's posts, learn from them   (inward learning)
-  3. suggest  generate today's batch, grounded in the brain → Telegram
-  4. prune    (weekly) forget stale / contradicted memories
+every ~20 min (continuous opportunity radar)
+  harvest fresh niche tweets
+  → free deterministic prefilter (fresh + momentum + unseen)   ← keeps cost low
+  → one batched model call scores the best, writes ready reply/quote + media tip
+  → push an instant Telegram notification (link + suggestion)  ← seize the moment
+  (strict daily cap per account — quality over quantity, no flooding)
+
+once a day (heavier routine, same worker)
+  crawl    distil fresh niche patterns into the brain          (outward learning)
+  feedback measure yesterday's posts, learn from them          (inward learning)
+  media    learn which media type wins in the niche right now
+  digest   standalone tweet ideas + mix, grounded in the brain → Telegram
+  prune    (weekly) forget stale / contradicted memories
+
 human reviews in Telegram → publishes manually → logs the post → loop improves
 ```
+
+The same logic is also exposed as `/api/lean-*` routes for manual/backup runs.
 
 ### The brain (real RAG, not storage)
 

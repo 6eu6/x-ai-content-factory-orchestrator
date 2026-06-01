@@ -12,6 +12,8 @@
 import { getXUserTimeline, scoreXTweet } from '../x';
 import type { SourceAccount } from './config';
 
+export type MediaType = 'text' | 'photo' | 'video' | 'gif';
+
 export type HarvestedTweet = {
   source_handle: string;
   source_tier: number | null;
@@ -22,6 +24,9 @@ export type HarvestedTweet = {
   created_at: string | null;
   age_hours: number | null;
   engagement: number;
+  /** engagement per hour — momentum signal for opportunity detection */
+  velocity: number;
+  media_type: MediaType;
   is_reply: boolean;
   is_quote: boolean;
 };
@@ -31,6 +36,23 @@ function ageHours(createdAt: string | null): number | null {
   const t = Date.parse(createdAt);
   if (Number.isNaN(t)) return null;
   return Math.max(0, (Date.now() - t) / 3_600_000);
+}
+
+/** Detect the dominant media type from a normalized tweet's entities. */
+export function detectMediaType(t: any): MediaType {
+  const media =
+    t?.extended_entities?.media ||
+    t?.entities?.media ||
+    t?.raw?.extendedEntities?.media ||
+    [];
+  const arr = Array.isArray(media) ? media : [];
+  for (const m of arr) {
+    const type = String(m?.type || '').toLowerCase();
+    if (type === 'video') return 'video';
+    if (type === 'animated_gif' || type === 'gif') return 'gif';
+  }
+  if (arr.some((m: any) => String(m?.type || '').toLowerCase() === 'photo')) return 'photo';
+  return 'text';
 }
 
 /**
@@ -57,6 +79,8 @@ export async function harvestSources(
       const text = String(t.text || '').trim();
       if (!text) continue;
       if (t.is_reply) continue; // reacting to someone's reply rarely pays off
+      const age = ageHours(t.created_at || null);
+      const engagement = scoreXTweet(t);
       out.push({
         source_handle: src.handle,
         source_tier: src.tier,
@@ -65,8 +89,10 @@ export async function harvestSources(
         tweet_url: `https://x.com/${src.handle.replace(/^@/, '')}/status/${t.id}`,
         text,
         created_at: t.created_at || null,
-        age_hours: ageHours(t.created_at || null),
-        engagement: scoreXTweet(t),
+        age_hours: age,
+        engagement,
+        velocity: age && age > 0.5 ? Number((engagement / age).toFixed(1)) : engagement,
+        media_type: detectMediaType(t),
         is_reply: Boolean(t.is_reply),
         is_quote: Boolean(t.is_quote_tweet),
       });
