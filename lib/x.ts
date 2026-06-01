@@ -196,6 +196,29 @@ export async function getXUserAndTimeline(username: string, maxResults = 5, incl
   return { user, tweets };
 }
 
+/**
+ * Fetch tweets by id (for measuring the performance of our own published posts).
+ * Returns normalized tweets; missing ids are simply absent from the result.
+ */
+export async function getTweetsByIds(ids: string[]) {
+  const clean = ids.map((i) => String(i).replace(/\D/g, '')).filter(Boolean);
+  if (!clean.length) return [];
+  const url = new URL(`${twitterApiBase()}/twitter/tweets`);
+  url.searchParams.set('tweet_ids', clean.join(','));
+  try {
+    const json = await fetchTwitterApiJson(url.toString(), { task_type: 'performance_scan' });
+    return extractTweets(json).map(normalizeTwitterApiTweet);
+  } catch {
+    return [];
+  }
+}
+
+/** Extract the numeric status id from an x.com/twitter.com status URL. */
+export function tweetIdFromUrl(url: string): string {
+  const m = String(url || '').match(/status\/(\d+)/);
+  return m ? m[1] : '';
+}
+
 export function scoreXTweet(tweet: any) {
   const m = tweet.public_metrics || {};
   return (m.like_count || 0) + (m.reply_count || 0) * 2 + (m.retweet_count || 0) * 3 + (m.quote_count || 0) * 4 + (m.bookmark_count || 0) * 2 + Math.min(m.view_count || 0, 100000) / 1000;

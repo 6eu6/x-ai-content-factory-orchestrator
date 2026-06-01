@@ -123,15 +123,17 @@ async function lexicalRecall(
  */
 export async function recallBrainContext(query: string, niche?: string | null): Promise<{
   algorithm: Recalled[];
+  patterns: Recalled[];
   voice: Recalled[];
   winners: Recalled[];
   avoid: Recalled[];
 }> {
-  const [algorithm, voice, winners, avoid] = await Promise.all([
+  const [algorithm, patterns, voice, winners, avoid] = await Promise.all([
     recall(query, { kind: 'algorithm', niche, matchCount: 5, minWeight: 3, markUsage: false }),
+    recall(query, { kind: 'source_pattern', niche, matchCount: 4, markUsage: false }),
     recall(query, { kind: 'voice', niche, matchCount: 3, markUsage: false }),
     recall(query, { kind: 'outcome', niche, matchCount: 4, markUsage: false }),
     recall(query, { kind: 'anti_pattern', niche, matchCount: 3, markUsage: false }),
   ]);
-  return { algorithm, voice, winners, avoid };
+  return { algorithm, patterns, voice, winners, avoid };
 }

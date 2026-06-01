@@ -45,6 +45,11 @@ function buildSystemPrompt(cfg: LeanConfig, examples: WinningExample[], brain: B
       lines.push('HOW THE X ALGORITHM ACTUALLY REWARDS CONTENT (apply these mechanics):');
       for (const m of brain.algorithm.slice(0, 5)) lines.push(`- ${m.content.replace(/\s+/g, ' ').slice(0, 200)}`);
     }
+    if (brain.patterns.length) {
+      lines.push('');
+      lines.push('PATTERNS THAT PERFORM IN THIS NICHE RIGHT NOW (apply the tactic, never copy the wording):');
+      for (const m of brain.patterns.slice(0, 4)) lines.push(`- ${m.content.replace(/\s+/g, ' ').slice(0, 200)}`);
+    }
     if (brain.winners.length) {
       lines.push('');
       lines.push('WHAT HAS WORKED FOR THIS ACCOUNT BEFORE (match the underlying angle, do not copy):');

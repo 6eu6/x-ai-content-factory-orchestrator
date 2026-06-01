@@ -1,7 +1,7 @@
 {
   "crons": [
     {
-      "path": "/api/cron-dispatcher?cron=1",
+      "path": "/api/lean-cycle?cron=1",
       "schedule": "0 6 * * *"
     }
   ],
