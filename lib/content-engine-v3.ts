@@ -1362,29 +1362,45 @@ async function craftEngagement(
     const response = await callModel('content_crafting' as TaskType, [
       {
         role: 'system',
-        content: `Write for X account @${optionalEnv('X_USERNAME', '30piq')}.
+        content: `Write for X account @${optionalEnv('X_USERNAME', '30piq')} — AI-native operators, builders, digital leverage, productivity tools.
 
-Strict rules:
-1. No AI slop words (delve, crucial, leverage, game-changer, unlock, etc.)
-2. No hashtags
-3. No numbers without source
-4. No identical numbered or bullet lists
-5. Natural voice — like a smart friend talking, not a content machine
-6. Under 240 characters
-7. No repeating the same idea in different words
-8. Add a personal element or specific reference
+ABSOLUTE RULES:
+1. NO AI slop words: delve, crucial, leverage, game-changer, unlock, empower, elevate, foster, streamline, harness, cutting-edge, paradigm, synergy, transformative, revolutionary, essential, comprehensive, remarkable, furthermore, moreover, notably
+2. NO hashtags, NO emojis
+3. NO numbers/stats/percentages without a verifiable source
+4. NO numbered lists (1) 2) 3) — write in flowing prose instead
+5. NO bullet-point style writing — write like a human, not a summary machine
+6. UNDER 240 characters
+7. NO repeating the same idea in different words
+8. NO generic takes like "This is interesting because..." or "Great point about..."
+9. DO NOT summarize the source tweet — ADD a new angle, insight, or question
+10. Sound like a specific person with real expertise, not a content mill
+
+WHAT MAKES GOOD CONTENT:
+- A counterintuitive angle the source author didn't mention
+- A specific mechanism or pattern hidden in the source
+- A practical lesson the reader can apply today
+- A sharp question that reveals deeper implications
+- A surprising connection to something else in AI/tools/productivity
+
+WHAT TO AVOID (these get rejected):
+- Summarizing what someone else said without adding insight
+- Generic "frameworks" or "checklists" pulled from thin air
+- Hype language about how big/important something is
+- Repeating the source's own words back to them
+- Vague wisdom that could apply to anything
 
 ${learningContext}
 
-IMPORTANT: When you write, you MUST follow the APPLICATION INSTRUCTION for each concept. Each concept tells you HOW to apply it — read the "HOW TO APPLY" instruction and follow it precisely. Do not just reference the concept — embody it in your writing technique.
+IMPORTANT: Follow the APPLICATION INSTRUCTION for each brain concept precisely. Embody it in your writing technique.
 
-Return final text only. No explanation or notes.`
+Return final tweet text only. No explanation.`
       },
       {
         role: 'user',
         content: type === 'quote'
-          ? `Write a quote tweet for this:\n\n"${tweet.text?.slice(0, 300)}"\n\nThe quote must add value or a different angle.`
-          : `Write a useful reply to this tweet:\n\n"${tweet.text?.slice(0, 300)}"\n\nThe reply must add information, experience, or a follow-up question.`
+          ? `Write a QUOTE tweet commenting on this. Do NOT summarize it. Instead, add ONE specific insight, counterintuitive angle, or hidden mechanism that the author didn't mention:\n\n"${tweet.text?.slice(0, 300)}"`
+          : `Write a REPLY to this tweet. Do NOT just agree or summarize. Instead, add ONE specific piece of information, a follow-up question that reveals deeper implications, or a concrete mechanism/pattern:\n\n"${tweet.text?.slice(0, 300)}"`
       }
     ]);
 

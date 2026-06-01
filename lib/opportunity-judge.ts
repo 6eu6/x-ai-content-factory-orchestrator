@@ -55,33 +55,33 @@ export type JudgeSummary = {
 // ═══ Constants ═══
 
 /** Minimum final_candidate_score to pass judge */
-const FINAL_SCORE_THRESHOLD = 7.8;
+const FINAL_SCORE_THRESHOLD = 7.0;
 
 /** Minimum originality_score to pass judge */
-const ORIGINALITY_THRESHOLD = 7.8;
+const ORIGINALITY_THRESHOLD = 7.0;
 
 /** Minimum usefulness_score to pass judge */
-const USEFULNESS_THRESHOLD = 7;
+const USEFULNESS_THRESHOLD = 6.5;
 
 /** Minimum evidence_safety_score to pass judge */
-const EVIDENCE_SAFETY_THRESHOLD = 8;
+const EVIDENCE_SAFETY_THRESHOLD = 7.0;
 
 /** Phase 2D.2: Minimum brief_alignment_score to pass judge */
-const BRIEF_ALIGNMENT_THRESHOLD = 7.5;
+const BRIEF_ALIGNMENT_THRESHOLD = 6.5;
 
 // ═══ Phase 2F: Near-Pass Eligibility ═══
 
 /** Minimum final_candidate_score to be considered near-pass (eligible for polish) */
-const NEAR_PASS_MIN_FINAL_SCORE = 6.8;
+const NEAR_PASS_MIN_FINAL_SCORE = 6.0;
 
-/** Maximum final_candidate_score for near-pass (must still be failing, i.e. < 7.8) */
-const NEAR_PASS_MAX_FINAL_SCORE = 7.8;
+/** Maximum final_candidate_score for near-pass (must still be failing, i.e. < 7.0) */
+const NEAR_PASS_MAX_FINAL_SCORE = 7.0;
 
 /** Minimum evidence_safety_score to be eligible for polish */
-const NEAR_PASS_MIN_EVIDENCE_SAFETY = 7.5;
+const NEAR_PASS_MIN_EVIDENCE_SAFETY = 6.5;
 
 /** Minimum niche_fit_score to be eligible for polish */
-const NEAR_PASS_MIN_NICHE_FIT = 7;
+const NEAR_PASS_MIN_NICHE_FIT = 6.0;
 
 /** Minimum crafted_text length for near-pass eligibility */
 const NEAR_PASS_MIN_TEXT_LENGTH = 40;
@@ -354,6 +354,35 @@ Weighting: originality 25%, usefulness 20%, niche_fit 15%, evidence_safety 15%, 
 
 IMPORTANT: Be strict. Most content should score 5-7. Only genuinely excellent content should score 8+.
 If the text contains generic engagement bait, unsupported claims, AI slop, or ignores the recommended angle, penalize heavily.
+
+CALIBRATION EXAMPLES (use these as anchors):
+
+SCORE 2-3 (terrible):
+"When evaluating AI for QA automation: 1) Can it generate realistic user scenarios 2) Does it integrate with execution tools 3) Can it run per-commit"
+→ originality=2, usefulness=3, niche_fit=4, clarity=7, brief_alignment=3, final=3
+(Why: Generic numbered list, no insight, reads like a summary, no original angle)
+
+"Security heuristic: When evaluating AI tools, check if their training data includes recent community-vetted scans."
+→ originality=3, usefulness=4, niche_fit=5, clarity=6, brief_alignment=4, final=4
+(Why: Generic "heuristic" framing, no specific insight, could apply to anything)
+
+SCORE 5-6 (mediocre, should NOT pass):
+"This is a great example of how AI is transforming software development workflows."
+→ originality=2, usefulness=3, niche_fit=6, clarity=7, brief_alignment=4, final=4
+(Why: Vague praise, no substance, reads like bot comment)
+
+"The next testing paradigm isn't just automation—it's simulation."
+→ originality=4, usefulness=5, niche_fit=6, clarity=7, brief_alignment=5, final=5
+(Why: Sounds clever but says nothing specific, no evidence, no actionable takeaway)
+
+SCORE 8-9 (excellent, SHOULD pass):
+"The real bottleneck isn't generating test scenarios — it's that most teams' CI pipelines can't execute browser-based validation within the commit window. Codex solves generation but the execution layer (webVNC/crabbox) is where the actual unlock lives."
+→ originality=8, usefulness=8, niche_fit=9, clarity=8, brief_alignment=9, final=8
+(Why: Specific mechanism identified, names the actual bottleneck, actionable insight, follows angle)
+
+"67K security scans open-sourced is useful, but the signal that matters is whether these scans cover attack vectors that LLMs actually exploit — not just OWASP top 10 from 2021."
+→ originality=8, usefulness=8, niche_fit=8, clarity=7, brief_alignment=9, final=8
+(Why: Counterintuitive angle, questions the premise, specific domain expertise)
 
 Do NOT claim terms to avoid: ${doNotClaim || 'none'}
 

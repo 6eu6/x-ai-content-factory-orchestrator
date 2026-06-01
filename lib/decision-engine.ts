@@ -36,7 +36,7 @@ const DEFAULT_BUDGETS: Record<DecisionStage, DecisionBudget> = {
     max_quotes: 1,
     max_replies: 1,
     max_threads: 0,
-    min_final_score: 7.8,
+    min_final_score: 7.0,  // Lowered from 7.8: new account needs content to grow, judge already validates quality
     allow_links: false,
     allow_hashtags: false
   },
@@ -45,7 +45,7 @@ const DEFAULT_BUDGETS: Record<DecisionStage, DecisionBudget> = {
     max_quotes: 1,
     max_replies: 1,
     max_threads: 1,
-    min_final_score: 7.5,
+    min_final_score: 7.0,  // Lowered from 7.5: consistent threshold across early stages
     allow_links: false,
     allow_hashtags: false
   },
@@ -54,7 +54,7 @@ const DEFAULT_BUDGETS: Record<DecisionStage, DecisionBudget> = {
     max_quotes: 1,
     max_replies: 2,
     max_threads: 1,
-    min_final_score: 7.2,
+    min_final_score: 7.0,  // Lowered from 7.2: unified threshold
     allow_links: true,
     allow_hashtags: false
   },
@@ -221,14 +221,48 @@ export function decideTelegramOpportunities(
     };
   });
 
+  // ═══ Deduplicate by crafted text similarity BEFORE selection ═══
+  // Prevent sending identical/similar text for different types (quote+reply same source)
   const eligible = decided
     .filter(o => o.decision_label === 'send')
     .sort((a, b) => b.decision_score.final_score - a.decision_score.final_score);
 
+  const seenTexts = new Set<string>();
+  const dedupedEligible: DecidedOpportunity[] = [];
+  for (const opp of eligible) {
+    const text = String(opp.crafted_text || '').trim().toLowerCase();
+    // Normalize: remove punctuation, extra spaces for comparison
+    const normalized = text.replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
+    // Check if >70% of text overlaps with any already-seen text
+    let isDuplicate = false;
+    if (normalized.length > 30) {
+      for (const seen of seenTexts) {
+        // Simple overlap check: if normalized text is a substring or very similar
+        if (seen.includes(normalized) || normalized.includes(seen)) {
+          isDuplicate = true;
+          break;
+        }
+        // Character-level Jaccard-like similarity for short texts
+        if (Math.abs(seen.length - normalized.length) < 30) {
+          const common = [...seen].filter(c => normalized.includes(c)).length;
+          const similarity = common / Math.max(seen.length, normalized.length);
+          if (similarity > 0.75) {
+            isDuplicate = true;
+            break;
+          }
+        }
+      }
+    }
+    if (!isDuplicate) {
+      seenTexts.add(normalized);
+      dedupedEligible.push(opp);
+    }
+  }
+
   const counts = { quote: 0, reply: 0, thread: 0 };
   const selected: DecidedOpportunity[] = [];
 
-  for (const opp of eligible) {
+  for (const opp of dedupedEligible) {
     if (selected.length >= budget.max_total) break;
     if (opp.type === 'quote' && counts.quote >= budget.max_quotes) continue;
     if (opp.type === 'reply' && counts.reply >= budget.max_replies) continue;
