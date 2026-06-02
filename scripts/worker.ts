@@ -33,7 +33,18 @@ const POLL_MINUTES = num('LEAN_POLL_MINUTES', 20, 5, 240);
 const DAILY_CAP = num('LEAN_DAILY_OPP_CAP', 2, 1, 50);
 // Auto-detect published posts every Nth cycle (not every cycle) to cut X reads.
 const AUTODETECT_EVERY = num('LEAN_AUTODETECT_EVERY', 3, 1, 20);
+// Immature real-time layers are OFF by default — the worker sends only the clean
+// daily digest until you explicitly enable them.
+const ENABLE_RADAR = bool('LEAN_ENABLE_RADAR', false);
+const ENABLE_DEEP_RESEARCH = bool('LEAN_ENABLE_DEEP_RESEARCH', false);
 let cycleCount = 0;
+
+function bool(name: string, fallback: boolean): boolean {
+  const v = (process.env[name] || '').toLowerCase().trim();
+  if (v === 'true' || v === '1') return true;
+  if (v === 'false' || v === '0') return false;
+  return fallback;
+}
 
 function num(name: string, fallback: number, min: number, max: number): number {
   const v = Number(process.env[name]);
@@ -56,12 +67,9 @@ async function notifiedToday(accountHandle: string): Promise<number> {
 // No "Published" button: publishing is auto-detected from your timeline.
 function opportunityKeyboard(id: string, url: string, lang: string) {
   const isAr = lang === 'ar';
-  return {
-    inline_keyboard: [[
-      { text: isAr ? '🔗 افتح التغريدة' : '🔗 Open tweet', url },
-      { text: isAr ? '🔍 بحث عميق' : '🔍 Deep research', callback_data: `res:${id}` },
-    ]],
-  };
+  const row: any[] = [{ text: isAr ? '🔗 افتح التغريدة' : '🔗 Open tweet', url }];
+  if (ENABLE_DEEP_RESEARCH) row.push({ text: isAr ? '🔍 بحث عميق' : '🔍 Deep research', callback_data: `res:${id}` });
+  return { inline_keyboard: [row] };
 }
 
 // The suggestion text is wrapped in <code> so one tap copies it on mobile.
@@ -118,6 +126,9 @@ async function cycleForProfile(profile: Profile, runAutoDetect: boolean): Promis
     }
   }
 
+  // Real-time radar is opt-in; when off the worker only delivers the daily digest.
+  if (!ENABLE_RADAR) return 0;
+
   const already = await notifiedToday(profile.accountHandle);
   if (already >= DAILY_CAP) return 0;
 
@@ -159,7 +170,7 @@ async function runOnce(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  console.log(`[worker] starting — poll every ${POLL_MINUTES}m, daily cap ${DAILY_CAP}/account`);
+  console.log(`[worker] starting — poll ${POLL_MINUTES}m · cap ${DAILY_CAP} · radar=${ENABLE_RADAR ? 'on' : 'off'} · deep_research=${ENABLE_DEEP_RESEARCH ? 'on' : 'off'}`);
   // Fail fast if core env is missing.
   if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
     throw new Error('Missing SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY');

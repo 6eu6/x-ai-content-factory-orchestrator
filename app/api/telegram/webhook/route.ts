@@ -150,8 +150,13 @@ async function handleCallback(chatId: string, callbackId: string, data: string) 
     return;
   }
 
-  // 🔍 Deep research on an opportunity card.
+  // 🔍 Deep research on an opportunity card (opt-in; off by default).
   if (kind === 'res' && parts[1]) {
+    const enableResearch = (optionalEnv('LEAN_ENABLE_DEEP_RESEARCH', 'false').toLowerCase().trim());
+    if (enableResearch !== 'true' && enableResearch !== '1') {
+      await answerCallbackQuery(callbackId, lang === 'en' ? 'Deep research is off' : 'البحث العميق معطّل');
+      return;
+    }
     const { data: opp } = await supabase.from('opportunities').select('*').eq('id', parts[1]).maybeSingle();
     if (!opp) { await answerCallbackQuery(callbackId, lang === 'en' ? 'Not found' : 'غير موجود'); return; }
     await answerCallbackQuery(callbackId, lang === 'en' ? 'Researching…' : 'يبحث…');

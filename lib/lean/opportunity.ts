@@ -123,6 +123,7 @@ export async function runOpportunityRadar(
     brain?.algorithm?.length ? 'ALGORITHM MECHANICS: ' + brain.algorithm.slice(0, 4).map((m) => m.content.slice(0, 140)).join(' | ') : '',
     brain?.avoid?.length ? 'AVOID: ' + brain.avoid.slice(0, 3).map((m) => m.content.slice(0, 120)).join(' | ') : '',
     'Some tweets include a MEDIA line describing the image/gif/video — your reply MUST make sense given that media, not just the text.',
+    'Do NOT invent a technical/business angle that is not clearly supported by the source text or MEDIA description. If a tweet is a vague meme, a one-liner, or has no clear topic, OMIT it — do not force a reply.',
     'Never re-use the source media. Recommend an ORIGINAL alternative only when media helps. Never claim we will generate media.',
     'Return ONLY JSON: {"opportunities":[{"index":<n>,"action":"reply|quote","text":"<reaction, <=280 chars>","media_recommendation":"<short>","score":<1-10>,"why":"<short>"}]}',
     'Omit any tweet not worth reacting to. Max 280 chars per text. No engagement-bait.',
@@ -164,8 +165,10 @@ export async function runOpportunityRadar(
     const score = Number(it?.score) || 0;
     if (score < opts.minScore) continue;
     if (!gateSuggestion(text, 280, cfg.tweetLanguage).ok) continue;
-    // Prefer the vision-derived original sourcing plan when we actually saw media.
     const ins = insights.get(idx);
+    // Skip vague/meme-only sources — they breed stretched, invented replies.
+    if (isVagueOpportunity(cand.text, cand.media_type, ins)) continue;
+    // Prefer the vision-derived original sourcing plan when we actually saw media.
     const mediaRec = ins?.sourcing_plan
       ? `[${ins.role}/${ins.tone}] ${ins.sourcing_plan}`
       : String(it?.media_recommendation || '').trim();
@@ -184,6 +187,27 @@ export async function runOpportunityRadar(
     });
   }
   return out;
+}
+
+/**
+ * Reject opportunities with too little real signal to reply to confidently:
+ * very short/vague source text, or meme/decorative media with no concrete topic.
+ * This is what stops the "make no mistakes" meme → invented "input validation"
+ * reply. A short tweet is allowed only if vision found a concrete demo/source.
+ */
+export function isVagueOpportunity(
+  sourceText: string,
+  mediaType: string,
+  insight?: { role: string; description: string } | null,
+): boolean {
+  const words = String(sourceText || '').trim().split(/\s+/).filter((w) => w.replace(/[^a-z0-9]/gi, '').length > 2);
+  const concreteVision = !!insight && (insight.role === 'demo' || insight.role === 'source') && (insight.description || '').length > 40;
+
+  if (words.length < 8 && !concreteVision) return true; // too little to reply to
+  if (mediaType !== 'text' && insight && ['meme_reaction', 'decorative', 'unknown'].includes(insight.role) && words.length < 12) {
+    return true; // meme/decorative-led tweet without a real topic
+  }
+  return false;
 }
 
 export type StoredOpportunity = Opportunity & { id: string };

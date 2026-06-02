@@ -49,20 +49,43 @@ export type ResearchBrief = {
   sources: string[];
 };
 
+/** A topic is researchable only if it carries enough concrete signal to ground a search. */
+export function isResearchable(topic: string): boolean {
+  const t = String(topic || '').trim();
+  if (t.length < 40) return false;
+  const words = t.split(/\s+/).filter((w) => w.replace(/[^a-z0-9]/gi, '').length > 2);
+  return words.length >= 6;
+}
+
+function notEnough(topic: string, language: string): ResearchBrief {
+  const isAr = language === 'ar';
+  return {
+    topic,
+    verified: false,
+    summary: isAr
+      ? 'سياق المصدر غير كافٍ لبحث موثوق — اختر فرصة نصّها أوضح أو موضوعها محدّد.'
+      : 'Not enough source context for reliable research — pick an opportunity with clearer, more specific text.',
+    key_points: [],
+    clip_script: [],
+    sources: [],
+  };
+}
+
 export async function researchTopic(topic: string, language = 'en'): Promise<ResearchBrief> {
+  // Guard: refuse vague memes/short fragments — they only produce hallucinated filler.
+  if (!isResearchable(topic)) return notEnough(topic, language);
+
   const hits = await webSearch(topic, 6);
-  const verified = hits.length > 0;
+  // Guard: never synthesize an "explainer" with no live sources to ground it.
+  if (!hits.length) return notEnough(topic, language);
+  const verified = true;
   const lang = languageName(language);
 
-  const sourcesBlock = hits.length
-    ? hits.map((h, i) => `[${i + 1}] ${h.title} — ${h.snippet} (${h.link})`).join('\n')
-    : '(no search results available — rely on general knowledge and mark uncertainty)';
+  const sourcesBlock = hits.map((h, i) => `[${i + 1}] ${h.title} — ${h.snippet} (${h.link})`).join('\n');
 
   const system = [
     `You produce a tight, ACCURATE explainer brief in ${lang} so the user can record their own short clip about a tool or feature.`,
-    verified
-      ? 'Ground every claim in the provided sources. Do not invent facts or numbers. If sources disagree or are thin, say so.'
-      : 'No live sources were available. Be conservative, avoid specific numbers, and do not present guesses as facts.',
+    'Ground every claim in the provided sources. Do not invent facts or numbers. If sources disagree or are thin, say so.',
     'Return ONLY JSON: {"summary":"<2-3 sentences>","key_points":["..."],"clip_script":["line the user can say, in order"],"sources":["url"]}',
     'clip_script: 4-7 short spoken lines that build a clear, original explanation. No fluff, no engagement-bait.',
   ].join('\n');
