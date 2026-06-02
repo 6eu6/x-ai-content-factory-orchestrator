@@ -27,6 +27,8 @@ export type HarvestedTweet = {
   /** engagement per hour — momentum signal for opportunity detection */
   velocity: number;
   media_type: MediaType;
+  /** Best image to "see": photo url, or the poster/thumbnail for video/gif. */
+  media_url: string | null;
   is_reply: boolean;
   is_quote: boolean;
 };
@@ -38,14 +40,14 @@ function ageHours(createdAt: string | null): number | null {
   return Math.max(0, (Date.now() - t) / 3_600_000);
 }
 
+function mediaArray(t: any): any[] {
+  const media = t?.extended_entities?.media || t?.entities?.media || t?.raw?.extendedEntities?.media || [];
+  return Array.isArray(media) ? media : [];
+}
+
 /** Detect the dominant media type from a normalized tweet's entities. */
 export function detectMediaType(t: any): MediaType {
-  const media =
-    t?.extended_entities?.media ||
-    t?.entities?.media ||
-    t?.raw?.extendedEntities?.media ||
-    [];
-  const arr = Array.isArray(media) ? media : [];
+  const arr = mediaArray(t);
   for (const m of arr) {
     const type = String(m?.type || '').toLowerCase();
     if (type === 'video') return 'video';
@@ -53,6 +55,19 @@ export function detectMediaType(t: any): MediaType {
   }
   if (arr.some((m: any) => String(m?.type || '').toLowerCase() === 'photo')) return 'photo';
   return 'text';
+}
+
+/**
+ * A still image URL we can feed to a vision model: the photo itself, or the
+ * poster/thumbnail frame for a video/gif (Twitter media_url_https is the still).
+ */
+export function extractMediaUrl(t: any): string | null {
+  const arr = mediaArray(t);
+  for (const m of arr) {
+    const url = m?.media_url_https || m?.media_url || m?.preview_image_url || m?.thumbnail_url;
+    if (url && /^https?:\/\//.test(String(url))) return String(url);
+  }
+  return null;
 }
 
 /**
@@ -93,6 +108,7 @@ export async function harvestSources(
         engagement,
         velocity: age && age > 0.5 ? Number((engagement / age).toFixed(1)) : engagement,
         media_type: detectMediaType(t),
+        media_url: extractMediaUrl(t),
         is_reply: Boolean(t.is_reply),
         is_quote: Boolean(t.is_quote_tweet),
       });

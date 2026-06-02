@@ -14,9 +14,11 @@
 import { callModel, parseModelJson } from '../model-router';
 import { recallBrainContext } from '../brain';
 import { supabaseAdmin } from '../supabase';
+import { envNumber } from '../env';
 import { harvestSources, type HarvestedTweet } from './harvest';
 import { loadSourceAccounts, languageName, type LeanConfig } from './config';
 import { gateSuggestion } from './gate';
+import { describeMedia, type MediaInsight } from './media-vision';
 import type { Profile } from './profile';
 
 export type Opportunity = {
@@ -82,6 +84,21 @@ export async function runOpportunityRadar(
   const candidates = prefilter(tweets, seen, opts);
   if (!candidates.length) return [];
 
+  // Vision: actually SEE the media on the top candidates that have it, so the
+  // reply responds to the image/gif/video — not blind text. Cost-bounded.
+  const visionCap = envNumber('MEDIA_VISION_MAX', 3, 0, 10);
+  const insights = new Map<number, MediaInsight>();
+  if (visionCap > 0) {
+    const mediaCands = candidates
+      .map((c, i) => ({ c, i }))
+      .filter((x) => x.c.media_url && x.c.media_type !== 'text')
+      .slice(0, visionCap);
+    await Promise.all(mediaCands.map(async ({ c, i }) => {
+      const ins = await describeMedia(c.media_url!, c.text, cfg.niche, cfg.tweetLanguage).catch(() => null);
+      if (ins) insights.set(i, ins);
+    }));
+  }
+
   // Brain grounding for relevance + quality.
   const recallQuery = [cfg.niche, ...candidates.slice(0, 6).map((t) => t.text)].join(' \n ').slice(0, 1500);
   const brain = await recallBrainContext(recallQuery, cfg.niche).catch(() => null);
@@ -94,13 +111,20 @@ export async function runOpportunityRadar(
     'VOICE: ' + cfg.voice,
     brain?.algorithm?.length ? 'ALGORITHM MECHANICS: ' + brain.algorithm.slice(0, 4).map((m) => m.content.slice(0, 140)).join(' | ') : '',
     brain?.avoid?.length ? 'AVOID: ' + brain.avoid.slice(0, 3).map((m) => m.content.slice(0, 120)).join(' | ') : '',
-    'For each tweet you choose, also recommend the media format (e.g. "text-only reply is enough", "pair a quote with a screenshot", "a 10s screen recording would lift this"). Never claim we will generate media.',
+    'Some tweets include a MEDIA line describing the image/gif/video — your reply MUST make sense given that media, not just the text.',
+    'Never re-use the source media. Recommend an ORIGINAL alternative only when media helps. Never claim we will generate media.',
     'Return ONLY JSON: {"opportunities":[{"index":<n>,"action":"reply|quote","text":"<reaction, <=280 chars>","media_recommendation":"<short>","score":<1-10>,"why":"<short>"}]}',
     'Omit any tweet not worth reacting to. Max 280 chars per text. No engagement-bait.',
   ].filter(Boolean).join('\n');
 
   const user = candidates
-    .map((t, i) => `[${i}] @${t.source_handle} | ${Math.round(t.age_hours || 0)}h | vel ${t.velocity} | media:${t.media_type}\n"${t.text.replace(/\s+/g, ' ').slice(0, 240)}"`)
+    .map((t, i) => {
+      const ins = insights.get(i);
+      const mediaLine = ins
+        ? `\nMEDIA (${t.media_type}, role=${ins.role}, tone=${ins.tone}): ${ins.description.replace(/\s+/g, ' ').slice(0, 200)}`
+        : '';
+      return `[${i}] @${t.source_handle} | ${Math.round(t.age_hours || 0)}h | vel ${t.velocity} | media:${t.media_type}\n"${t.text.replace(/\s+/g, ' ').slice(0, 240)}"${mediaLine}`;
+    })
     .join('\n\n');
 
   let parsed: any = {};
@@ -126,6 +150,11 @@ export async function runOpportunityRadar(
     const score = Number(it?.score) || 0;
     if (score < opts.minScore) continue;
     if (!gateSuggestion(text, 280, cfg.tweetLanguage).ok) continue;
+    // Prefer the vision-derived original sourcing plan when we actually saw media.
+    const ins = insights.get(idx);
+    const mediaRec = ins?.sourcing_plan
+      ? `[${ins.role}/${ins.tone}] ${ins.sourcing_plan}`
+      : String(it?.media_recommendation || '').trim();
     out.push({
       tweet_id: cand.tweet_id,
       source_handle: cand.source_handle,
@@ -135,7 +164,7 @@ export async function runOpportunityRadar(
       source_age_hours: cand.age_hours,
       action: action as 'reply' | 'quote',
       suggestion_text: text,
-      media_recommendation: String(it?.media_recommendation || '').trim().slice(0, 200),
+      media_recommendation: mediaRec.slice(0, 280),
       why: String(it?.why || '').trim().slice(0, 160),
       score,
     });
