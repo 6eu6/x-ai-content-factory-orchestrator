@@ -120,6 +120,7 @@ export async function runOpportunityRadar(
     `Decide which fresh tweets are worth reacting to RIGHT NOW, and write the reaction in ${lang}.`,
     'Be strict: only surface a tweet if a reply or quote from us can genuinely earn engagement and fit the niche.',
     'VOICE: ' + cfg.voice,
+    brain?.strategy?.length ? 'ACCOUNT STRATEGY (follow this): ' + brain.strategy.slice(0, 2).map((m) => m.content.slice(0, 180)).join(' | ') : '',
     brain?.algorithm?.length ? 'ALGORITHM MECHANICS: ' + brain.algorithm.slice(0, 4).map((m) => m.content.slice(0, 140)).join(' | ') : '',
     brain?.avoid?.length ? 'AVOID: ' + brain.avoid.slice(0, 3).map((m) => m.content.slice(0, 120)).join(' | ') : '',
     'Some tweets include a MEDIA line describing the image/gif/video — your reply MUST make sense given that media, not just the text.',

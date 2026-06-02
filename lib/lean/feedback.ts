@@ -22,17 +22,37 @@ export type FeedbackReport = {
   details: { url: string; engagement: number; outcome: number }[];
 };
 
-/**
- * Turn raw engagement into a 0..10 outcome score. Followers-relative would be
- * ideal; for a small account, absolute engagement bands are a sane start.
- */
-function toOutcomeScore(engagement: number): number {
+/** Absolute engagement bands — used as a cold-start fallback. */
+export function absoluteOutcomeScore(engagement: number): number {
   if (engagement <= 0) return 1;
   if (engagement < 5) return 3;
   if (engagement < 20) return 5;
   if (engagement < 60) return 7;
   if (engagement < 150) return 8.5;
   return 10;
+}
+
+/**
+ * Account-relative score: "did this beat MY usual?" — far more meaningful for a
+ * small account than absolute counts. Compares against the median of recent
+ * posts. Falls back to absolute bands until we have a few measured posts.
+ */
+export function relativeOutcomeScore(engagement: number, baselineMedian: number | null): number {
+  if (baselineMedian == null || baselineMedian <= 0) return absoluteOutcomeScore(engagement);
+  const ratio = engagement / baselineMedian;
+  if (ratio >= 3) return 10;
+  if (ratio >= 2) return 8.5;
+  if (ratio >= 1.2) return 7;
+  if (ratio >= 0.8) return 5;
+  if (ratio >= 0.4) return 3;
+  return 1;
+}
+
+function median(nums: number[]): number | null {
+  const xs = nums.filter((n) => Number.isFinite(n)).sort((a, b) => a - b);
+  if (!xs.length) return null;
+  const mid = Math.floor(xs.length / 2);
+  return xs.length % 2 ? xs[mid] : (xs[mid - 1] + xs[mid]) / 2;
 }
 
 export async function runFeedbackScan(opts?: { accountHandle?: string; limit?: number }): Promise<FeedbackReport> {
@@ -64,13 +84,23 @@ export async function runFeedbackScan(opts?: { accountHandle?: string; limit?: n
   const report: FeedbackReport = { scanned: rows.length, measured: 0, learned: 0, details: [] };
   if (!idMap.size) return report;
 
+  // Baseline = median engagement of recent already-measured posts (account-relative).
+  const { data: prior } = await supabase
+    .from('published_decisions')
+    .select('performance_payload')
+    .eq('account_handle', handle)
+    .not('outcome_score', 'is', null)
+    .order('created_at', { ascending: false })
+    .limit(30);
+  const baseline = median((prior || []).map((p: any) => Number(p?.performance_payload?.engagement)).filter((n: number) => Number.isFinite(n)));
+
   const tweets = await getTweetsByIds([...idMap.keys()]);
 
   for (const t of tweets) {
     const row = idMap.get(String(t.id));
     if (!row) continue;
     const engagement = scoreXTweet(t);
-    const outcome = toOutcomeScore(engagement);
+    const outcome = relativeOutcomeScore(engagement, baseline);
     report.measured++;
 
     await supabase

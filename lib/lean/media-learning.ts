@@ -10,15 +10,17 @@
  */
 
 import { remember } from '../brain';
-import { harvestSources } from './harvest';
+import { harvestSources, type HarvestedTweet } from './harvest';
 import { loadSourceAccounts, type LeanConfig } from './config';
 
-export async function learnMediaPatterns(cfg: LeanConfig): Promise<string | null> {
-  const sources = cfg.sourceHandles.length
-    ? cfg.sourceHandles.slice(0, cfg.sourceLimit).map((handle) => ({ handle, tier: null, category: null, followers: null }))
-    : await loadSourceAccounts(cfg.sourceLimit);
-
-  const tweets = await harvestSources(sources, cfg.tweetsPerSource);
+export async function learnMediaPatterns(cfg: LeanConfig, pre?: HarvestedTweet[]): Promise<string | null> {
+  let tweets = pre;
+  if (!tweets) {
+    const sources = cfg.sourceHandles.length
+      ? cfg.sourceHandles.slice(0, cfg.sourceLimit).map((handle) => ({ handle, tier: null, category: null, followers: null }))
+      : await loadSourceAccounts(cfg.sourceLimit);
+    tweets = await harvestSources(sources, cfg.tweetsPerSource);
+  }
   if (tweets.length < 6) return null;
 
   const buckets: Record<string, { n: number; sum: number }> = {};

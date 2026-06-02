@@ -14,7 +14,7 @@ import { remember } from '../brain';
 import { getActiveProfile } from './profile';
 import { getLeanConfig, configFromProfile } from './config';
 import { loadSourceAccounts } from './config';
-import { harvestSources } from './harvest';
+import { harvestSources, type HarvestedTweet } from './harvest';
 
 export type CrawlReport = {
   harvested: number;
@@ -22,15 +22,18 @@ export type CrawlReport = {
   patterns: string[];
 };
 
-export async function runCrawl(opts?: { accountHandle?: string }): Promise<CrawlReport> {
+export async function runCrawl(opts?: { accountHandle?: string; tweets?: HarvestedTweet[] }): Promise<CrawlReport> {
   const profile = await getActiveProfile(opts?.accountHandle).catch(() => null);
   const cfg = profile ? configFromProfile(profile) : getLeanConfig();
 
-  const sources = cfg.sourceHandles.length
-    ? cfg.sourceHandles.slice(0, cfg.sourceLimit).map((handle) => ({ handle, tier: null, category: null, followers: null }))
-    : await loadSourceAccounts(cfg.sourceLimit);
-
-  const tweets = await harvestSources(sources, cfg.tweetsPerSource);
+  // Reuse a shared harvest when given one (cost saver in the daily routine).
+  let tweets = opts?.tweets;
+  if (!tweets) {
+    const sources = cfg.sourceHandles.length
+      ? cfg.sourceHandles.slice(0, cfg.sourceLimit).map((handle) => ({ handle, tier: null, category: null, followers: null }))
+      : await loadSourceAccounts(cfg.sourceLimit);
+    tweets = await harvestSources(sources, cfg.tweetsPerSource);
+  }
   if (!tweets.length) return { harvested: 0, patterns_learned: 0, patterns: [] };
 
   // Take the strongest performers and ask the model for transferable patterns.

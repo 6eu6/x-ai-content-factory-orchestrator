@@ -11,7 +11,7 @@
 
 import { getLeanConfig, configFromProfile, loadSourceAccounts } from './config';
 import { getActiveProfile } from './profile';
-import { harvestSources } from './harvest';
+import { harvestSources, type HarvestedTweet } from './harvest';
 import { getWinningExamples, getRecentlyPublished } from './memory';
 import { generateSuggestions, type Suggestion } from './generate';
 import { gateSuggestion, isNearDuplicate } from './gate';
@@ -34,14 +34,17 @@ export type LeanRunResult = {
   suggestions: Suggestion[];
 };
 
-export async function runLeanLoop(opts?: { deliverTelegram?: boolean; runId?: string; accountHandle?: string }): Promise<LeanRunResult> {
+export async function runLeanLoop(opts?: { deliverTelegram?: boolean; runId?: string; accountHandle?: string; tweets?: HarvestedTweet[] }): Promise<LeanRunResult> {
   // Profile is the canonical config source; env config is the cold-start fallback.
   const profile = await getActiveProfile(opts?.accountHandle).catch(() => null);
   const cfg = profile ? configFromProfile(profile) : getLeanConfig();
-  const sources = cfg.sourceHandles.length
-    ? cfg.sourceHandles.slice(0, cfg.sourceLimit).map((handle) => ({ handle, tier: null, category: null, followers: null }))
-    : await loadSourceAccounts(cfg.sourceLimit);
-  const tweets = await harvestSources(sources, cfg.tweetsPerSource);
+  let tweets = opts?.tweets;
+  if (!tweets) {
+    const sources = cfg.sourceHandles.length
+      ? cfg.sourceHandles.slice(0, cfg.sourceLimit).map((handle) => ({ handle, tier: null, category: null, followers: null }))
+      : await loadSourceAccounts(cfg.sourceLimit);
+    tweets = await harvestSources(sources, cfg.tweetsPerSource);
+  }
   const examples = await getWinningExamples(cfg.accountHandle, 6);
   const recent = await getRecentlyPublished(cfg.accountHandle, 25);
 

@@ -41,6 +41,11 @@ function buildSystemPrompt(cfg: LeanConfig, examples: WinningExample[], brain: B
   // Ground the model in the brain: algorithm mechanics, the account's proven
   // winners, and patterns to avoid. This is what makes output follow the mind.
   if (brain) {
+    if (brain.strategy?.length) {
+      lines.push('');
+      lines.push('ACCOUNT GROWTH STRATEGY (highest priority — follow this):');
+      for (const m of brain.strategy.slice(0, 3)) lines.push(`- ${m.content.replace(/\s+/g, ' ').slice(0, 240)}`);
+    }
     if (brain.algorithm.length) {
       lines.push('');
       lines.push('HOW THE X ALGORITHM ACTUALLY REWARDS CONTENT (apply these mechanics):');

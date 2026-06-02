@@ -129,15 +129,18 @@ export async function recallBrainContext(query: string, niche?: string | null, a
   voice: Recalled[];
   winners: Recalled[];
   avoid: Recalled[];
+  strategy: Recalled[];
 }> {
   // account scoping: global rows (null) + this account's rows are returned;
   // other accounts' private voice/outcome/anti_pattern never leak in.
-  const [algorithm, patterns, voice, winners, avoid] = await Promise.all([
+  const [algorithm, patterns, voice, winners, avoid, strategy] = await Promise.all([
     recall(query, { kind: 'algorithm', niche, account, matchCount: 5, minWeight: 3, markUsage: false }),
     recall(query, { kind: 'source_pattern', niche, account, matchCount: 4, markUsage: false }),
     recall(query, { kind: 'voice', niche, account, matchCount: 3, markUsage: false }),
     recall(query, { kind: 'outcome', niche, account, matchCount: 4, markUsage: false }),
     recall(query, { kind: 'anti_pattern', niche, account, matchCount: 3, markUsage: false }),
+    // The account's own strategy/insights — highest-leverage, so weight-gated.
+    recall(query, { kind: 'insight', niche, account, matchCount: 3, minWeight: 6, markUsage: false }),
   ]);
-  return { algorithm, patterns, voice, winners, avoid };
+  return { algorithm, patterns, voice, winners, avoid, strategy };
 }

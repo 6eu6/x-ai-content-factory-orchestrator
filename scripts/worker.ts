@@ -19,7 +19,8 @@ loadEnv();
 import { supabaseAdmin } from '../lib/supabase';
 import { sendTelegramMessage, allowedChatId, htmlEscape } from '../lib/telegram';
 import { listProfiles } from '../lib/lean/profile';
-import { configFromProfile } from '../lib/lean/config';
+import { configFromProfile, loadSourceAccounts } from '../lib/lean/config';
+import { harvestSources } from '../lib/lean/harvest';
 import { runOpportunityRadar, persistOpportunities, type Opportunity } from '../lib/lean/opportunity';
 import { autoDetectPublished } from '../lib/lean/auto-detect';
 import { learnMediaPatterns } from '../lib/lean/media-learning';
@@ -28,6 +29,8 @@ import { enrichFromWeb } from '../lib/lean/web-enrich';
 import { runFeedbackScan } from '../lib/lean/feedback';
 import { runLeanLoop } from '../lib/lean/run';
 import { pruneBrain } from '../lib/brain/prune';
+import { claimDailyTask, cleanupWorkerState } from '../lib/lean/daily-guard';
+import { snapshotAccount, runPerformanceReview } from '../lib/lean/growth-review';
 import type { Profile } from '../lib/lean/profile';
 
 const POLL_MINUTES = num('LEAN_POLL_MINUTES', 20, 5, 240);
@@ -94,50 +97,6 @@ function formatOpportunity(o: Opportunity, lang: string): string {
 
 let lastDailyDay = -1;
 
-function normalizeHandle(handle: string): string {
-  return String(handle || '').replace(/^@/, '');
-}
-
-function utcDateKey(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
-async function dailyDigestAlreadySent(accountHandle: string, dateKey = utcDateKey()): Promise<boolean> {
-  const supabase = supabaseAdmin();
-  const handle = normalizeHandle(accountHandle);
-  const { data, error } = await supabase
-    .from('telegram_bot_state')
-    .select('updated_at')
-    .eq('chat_id', 'worker')
-    .eq('user_id', handle)
-    .eq('current_flow', 'daily_digest_sent')
-    .eq('last_message', dateKey)
-    .limit(1)
-    .maybeSingle();
-  if (error) {
-    console.error('[worker] daily digest state check:', error.message);
-    return false;
-  }
-  return Boolean(data);
-}
-
-async function markDailyDigestSent(accountHandle: string, dateKey = utcDateKey()): Promise<void> {
-  const supabase = supabaseAdmin();
-  const handle = normalizeHandle(accountHandle);
-  const now = new Date().toISOString();
-  const { error } = await supabase.from('telegram_bot_state').insert({
-    chat_id: 'worker',
-    user_id: handle,
-    username: handle,
-    current_flow: 'daily_digest_sent',
-    flow_payload: { date: dateKey, source: 'oracle_worker' },
-    last_message: dateKey,
-    created_at: now,
-    updated_at: now,
-  });
-  if (error) console.error('[worker] daily digest state mark:', error.message);
-}
-
 /**
  * Heavier once-a-day routine, centralised here so nothing depends on Vercel's
  * 300s limit: outward learning (crawl), inward learning (feedback), media
@@ -145,30 +104,53 @@ async function markDailyDigestSent(accountHandle: string, dateKey = utcDateKey()
  */
 async function dailyRoutine(profile: Profile): Promise<void> {
   const cfg = configFromProfile(profile);
-  try { await learnMediaPatterns(cfg); } catch (e: any) { console.error('[worker] media-learn:', e?.message); }
-  try { await runCrawl({ accountHandle: profile.accountHandle }); } catch (e: any) { console.error('[worker] crawl:', e?.message); }
+  const acct = profile.accountHandle;
+
+  // Track the true-north metric (followers over time) — once per day.
+  try { if (await claimDailyTask(acct, 'snapshot')) await snapshotAccount(profile); } catch (e: any) { console.error('[worker] snapshot:', e?.message); }
+
+  // ONE shared harvest feeds digest + crawl + media-learning (cost saver: was 3
+  // separate harvests of the same sources — same quality, ~⅔ fewer X reads).
+  let shared: any[] = [];
+  try {
+    const sources = cfg.sourceHandles.length
+      ? cfg.sourceHandles.slice(0, cfg.sourceLimit).map((handle) => ({ handle, tier: null, category: null, followers: null }))
+      : await loadSourceAccounts(cfg.sourceLimit);
+    shared = await harvestSources(sources, cfg.tweetsPerSource);
+  } catch (e: any) { console.error('[worker] harvest:', e?.message); }
+
+  try { await learnMediaPatterns(cfg, shared); } catch (e: any) { console.error('[worker] media-learn:', e?.message); }
+  try { await runCrawl({ accountHandle: acct, tweets: shared }); } catch (e: any) { console.error('[worker] crawl:', e?.message); }
   if (ENABLE_WEB_ENRICH) {
-    try { const e = await enrichFromWeb(cfg); if (e.learned) console.log(`[worker] @${profile.accountHandle}: web-enrich learned ${e.learned} angle(s)`); }
+    try { const e = await enrichFromWeb(cfg); if (e.learned) console.log(`[worker] @${acct}: web-enrich learned ${e.learned} angle(s)`); }
     catch (e: any) { console.error('[worker] web-enrich:', e?.message); }
   }
-  try { await runFeedbackScan({ accountHandle: profile.accountHandle }); } catch (e: any) { console.error('[worker] feedback:', e?.message); }
-  // Morning digest (standalone ideas + mix) delivered to Telegram. Guarded in DB
-  // so PM2/server restarts do not resend the same digest again on the same UTC day.
+  try { await runFeedbackScan({ accountHandle: acct }); } catch (e: any) { console.error('[worker] feedback:', e?.message); }
+
+  // Daily digest — DB-guarded so a PM2 restart can't re-send it the same day.
   try {
-    const digestDate = utcDateKey();
-    if (await dailyDigestAlreadySent(profile.accountHandle, digestDate)) {
-      console.log(`[worker] @${profile.accountHandle}: daily digest already sent, skipping`);
+    if (await claimDailyTask(acct, 'digest')) {
+      await runLeanLoop({ deliverTelegram: true, accountHandle: acct, tweets: shared });
     } else {
-      await runLeanLoop({ deliverTelegram: true, accountHandle: profile.accountHandle });
-      await markDailyDigestSent(profile.accountHandle, digestDate);
+      console.log(`[worker] @${acct}: daily digest already sent, skipping`);
     }
   } catch (e: any) { console.error('[worker] digest:', e?.message); }
-  // Keep the dedup table small (loadSeen only reads the last 24h).
+
+  // Housekeeping.
   try {
     await supabaseAdmin().from('evaluated_tweets').delete().lt('evaluated_at', new Date(Date.now() - 48 * 3_600_000).toISOString());
-  } catch (e: any) { console.error('[worker] evaluated cleanup:', e?.message); }
+    await cleanupWorkerState(14);
+  } catch (e: any) { console.error('[worker] cleanup:', e?.message); }
+
+  // Weekly: forget stale memory + review performance and write next week's strategy.
   if (new Date().getUTCDay() === 0) {
     try { await pruneBrain(); } catch (e: any) { console.error('[worker] prune:', e?.message); }
+    if (await claimDailyTask(acct, 'review').catch(() => true)) {
+      try {
+        const r = await runPerformanceReview(profile);
+        console.log(`[worker] @${acct}: review — ${r.measured_posts} posts, follower Δ ${r.follower_delta ?? '?'}${r.strategy ? ', new strategy stored' : ''}`);
+      } catch (e: any) { console.error('[worker] review:', e?.message); }
+    }
   }
 }
 
