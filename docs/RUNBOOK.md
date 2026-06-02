@@ -100,8 +100,9 @@ First-log expectation:
 
 - Within the first cycle (~minutes), if fresh high-momentum niche tweets exist,
   you get **opportunity cards** in Telegram: source + age + media type + why,
-  the suggested reply/quote, a media tip, and **✅ Published / 🔍 Deep research**
-  buttons.
+  the suggested reply/quote (tap-to-copy), a media tip, and **🔗 Open tweet /
+  🔍 Deep research** buttons. There is no "Published" button — when you post
+  manually, the worker **auto-detects** it from your timeline and logs/learns.
 - Once per day: a **digest** (standalone ideas + mix) plus background
   crawl/feedback/media-learning; weekly pruning on Sundays.
 - Quiet periods are normal — the daily cap and freshness filter mean it only
@@ -119,18 +120,20 @@ First-log expectation:
 | No flooding | Telegram | ≤ `LEAN_DAILY_OPP_CAP` cards/day |
 | No auto-post | your X profile | nothing posted automatically |
 | Fresh sources | opportunity card age | replies ≤48h, quotes ≤168h |
-| Buttons work | tap ✅ on a card | `opportunities.status='published'`, a `voice` memory appears |
-| Learning closes | after publishing real posts + tapping ✅ | `brain_memory kind='voice'` count rises |
+| Auto-detect works | post one suggestion manually, wait a cycle | matched `opportunities.status='published'`, a `published_decisions` row with `detection_source='auto_detected'`, a `voice` memory appears |
+| Learning closes | keep publishing | `brain_memory kind='voice'` count rises |
 
 ## 8) Daily usage
 
-1. Opportunity card arrives → if you like it, post it manually on X.
-2. Tap **✅ Published** (logs it, teaches the brain your taste).
+1. Opportunity card arrives → if you like it, tap 🔗 Open and post it manually
+   on X (copy the suggestion text with one tap; edit freely).
+2. That's it — the worker auto-detects your post next cycle, logs it, and the
+   brain learns your taste. No button to tap.
 3. For a tool/feature you want to explain on video, tap **🔍 Deep research** →
    get a sourced brief + clip script → record your own clip.
-4. Optional: send `published <your post url>` to enable real engagement
-   measurement (feedback loop scores it and feeds the brain).
-5. Change settings anytime in chat: `niche <text>`, `lang en|ar`, `bot en|ar`.
+4. Change settings from the **⚙️ Settings** card (tap the inline buttons to
+   switch UI/tweet language or mix preset — it saves and applies), or type
+   `niche <text>` / `lang en|ar` / `bot en|ar` / `mix R Q S`.
 
 ## 9) Tuning
 

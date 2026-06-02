@@ -50,16 +50,14 @@ async function notifiedToday(accountHandle: string): Promise<number> {
   return count ?? 0;
 }
 
+// No "Published" button: publishing is auto-detected from your timeline.
 function opportunityKeyboard(id: string, url: string, lang: string) {
   const isAr = lang === 'ar';
   return {
-    inline_keyboard: [
-      [{ text: isAr ? '🔗 افتح التغريدة' : '🔗 Open tweet', url }],
-      [
-        { text: isAr ? '✅ نشرت' : '✅ Published', callback_data: `pub:${id}` },
-        { text: isAr ? '🔍 بحث عميق' : '🔍 Deep research', callback_data: `res:${id}` },
-      ],
-    ],
+    inline_keyboard: [[
+      { text: isAr ? '🔗 افتح التغريدة' : '🔗 Open tweet', url },
+      { text: isAr ? '🔍 بحث عميق' : '🔍 Deep research', callback_data: `res:${id}` },
+    ]],
   };
 }
 
