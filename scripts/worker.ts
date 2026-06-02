@@ -38,8 +38,9 @@ const AUTODETECT_EVERY = num('LEAN_AUTODETECT_EVERY', 3, 1, 20);
 // daily digest until you explicitly enable them.
 const ENABLE_RADAR = bool('LEAN_ENABLE_RADAR', false);
 const ENABLE_DEEP_RESEARCH = bool('LEAN_ENABLE_DEEP_RESEARCH', false);
-// Reddit/YouTube/web enrichment feeds the brain silently — safe to keep on.
-const ENABLE_WEB_ENRICH = bool('LEAN_ENABLE_WEB_ENRICH', true);
+// OFF by default too: validate the clean daily digest first, then opt in so
+// web angles don't pollute the brain before we've seen the account's tone.
+const ENABLE_WEB_ENRICH = bool('LEAN_ENABLE_WEB_ENRICH', false);
 let cycleCount = 0;
 
 function bool(name: string, fallback: boolean): boolean {

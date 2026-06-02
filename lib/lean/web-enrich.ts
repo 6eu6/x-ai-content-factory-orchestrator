@@ -63,8 +63,10 @@ export async function enrichFromWeb(cfg: LeanConfig): Promise<EnrichReport> {
     const content = why ? `${angle} (why: ${why})` : angle;
     const id = await remember({
       kind: 'source_pattern',
+      // Unproven web angle: start below proven account memories so it informs
+      // but never dominates; it earns weight only if it actually performs.
       content,
-      weight: 5,
+      weight: 4,
       niche,
       language: cfg.tweetLanguage,
       source: `web_enrich:${src}`,
