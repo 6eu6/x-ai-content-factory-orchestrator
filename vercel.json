@@ -1,5 +1,4 @@
 {
-  "_comment": "The Oracle worker (npm run worker) drives the continuous loop. No Vercel cron, so nothing duplicates its notifications. /api/lean-* routes remain for manual/backup triggering.",
   "headers": [
     {
       "source": "/api/(.*)",
