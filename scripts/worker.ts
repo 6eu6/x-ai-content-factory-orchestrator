@@ -21,6 +21,7 @@ import { sendTelegramMessage, allowedChatId, htmlEscape } from '../lib/telegram'
 import { listProfiles } from '../lib/lean/profile';
 import { configFromProfile } from '../lib/lean/config';
 import { runOpportunityRadar, persistOpportunities, type Opportunity } from '../lib/lean/opportunity';
+import { autoDetectPublished } from '../lib/lean/auto-detect';
 import { learnMediaPatterns } from '../lib/lean/media-learning';
 import { runCrawl } from '../lib/lean/crawl';
 import { runFeedbackScan } from '../lib/lean/feedback';
@@ -100,6 +101,15 @@ async function dailyRoutine(profile: Profile): Promise<void> {
 async function cycleForProfile(profile: Profile): Promise<number> {
   const cfg = configFromProfile(profile);
   const chatId = allowedChatId();
+
+  // Auto-detect anything we published manually since last cycle (closes the
+  // learning loop without the user logging it). Cheap: one timeline read.
+  try {
+    const det = await autoDetectPublished(profile);
+    if (det.logged > 0) console.log(`[worker] @${profile.accountHandle}: auto-logged ${det.logged} published post(s)`);
+  } catch (e: any) {
+    console.error('[worker] auto-detect:', e?.message);
+  }
 
   const already = await notifiedToday(profile.accountHandle);
   if (already >= DAILY_CAP) return 0;
