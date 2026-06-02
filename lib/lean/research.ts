@@ -11,34 +11,9 @@
  * On demand only (triggered by a Telegram button) to keep cost low.
  */
 
-import { optionalEnv } from '../env';
 import { callModel, parseModelJson } from '../model-router';
 import { languageName } from './config';
-
-type SearchHit = { title: string; snippet: string; link: string };
-
-/** Web search via Serper (google). Returns [] if no key or on failure. */
-async function webSearch(query: string, n = 6): Promise<SearchHit[]> {
-  const key = optionalEnv('SERPER_API_KEY');
-  if (!key) return [];
-  try {
-    const res = await fetch('https://google.serper.dev/search', {
-      method: 'POST',
-      headers: { 'X-API-KEY': key, 'content-type': 'application/json' },
-      body: JSON.stringify({ q: query, num: n }),
-    });
-    if (!res.ok) return [];
-    const json: any = await res.json();
-    const organic: any[] = Array.isArray(json?.organic) ? json.organic : [];
-    return organic.slice(0, n).map((o) => ({
-      title: String(o?.title || ''),
-      snippet: String(o?.snippet || ''),
-      link: String(o?.link || ''),
-    }));
-  } catch {
-    return [];
-  }
-}
+import { webSearch } from './web-search';
 
 export type ResearchBrief = {
   topic: string;
@@ -75,7 +50,7 @@ export async function researchTopic(topic: string, language = 'en'): Promise<Res
   // Guard: refuse vague memes/short fragments — they only produce hallucinated filler.
   if (!isResearchable(topic)) return notEnough(topic, language);
 
-  const hits = await webSearch(topic, 6);
+  const hits = await webSearch(topic, { num: 6 });
   // Guard: never synthesize an "explainer" with no live sources to ground it.
   if (!hits.length) return notEnough(topic, language);
   const verified = true;

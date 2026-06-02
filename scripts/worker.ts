@@ -24,6 +24,7 @@ import { runOpportunityRadar, persistOpportunities, type Opportunity } from '../
 import { autoDetectPublished } from '../lib/lean/auto-detect';
 import { learnMediaPatterns } from '../lib/lean/media-learning';
 import { runCrawl } from '../lib/lean/crawl';
+import { enrichFromWeb } from '../lib/lean/web-enrich';
 import { runFeedbackScan } from '../lib/lean/feedback';
 import { runLeanLoop } from '../lib/lean/run';
 import { pruneBrain } from '../lib/brain/prune';
@@ -37,6 +38,8 @@ const AUTODETECT_EVERY = num('LEAN_AUTODETECT_EVERY', 3, 1, 20);
 // daily digest until you explicitly enable them.
 const ENABLE_RADAR = bool('LEAN_ENABLE_RADAR', false);
 const ENABLE_DEEP_RESEARCH = bool('LEAN_ENABLE_DEEP_RESEARCH', false);
+// Reddit/YouTube/web enrichment feeds the brain silently — safe to keep on.
+const ENABLE_WEB_ENRICH = bool('LEAN_ENABLE_WEB_ENRICH', true);
 let cycleCount = 0;
 
 function bool(name: string, fallback: boolean): boolean {
@@ -99,6 +102,10 @@ async function dailyRoutine(profile: Profile): Promise<void> {
   const cfg = configFromProfile(profile);
   try { await learnMediaPatterns(cfg); } catch (e: any) { console.error('[worker] media-learn:', e?.message); }
   try { await runCrawl({ accountHandle: profile.accountHandle }); } catch (e: any) { console.error('[worker] crawl:', e?.message); }
+  if (ENABLE_WEB_ENRICH) {
+    try { const e = await enrichFromWeb(cfg); if (e.learned) console.log(`[worker] @${profile.accountHandle}: web-enrich learned ${e.learned} angle(s)`); }
+    catch (e: any) { console.error('[worker] web-enrich:', e?.message); }
+  }
   try { await runFeedbackScan({ accountHandle: profile.accountHandle }); } catch (e: any) { console.error('[worker] feedback:', e?.message); }
   // Morning digest (standalone ideas + mix) delivered to Telegram.
   try { await runLeanLoop({ deliverTelegram: true, accountHandle: profile.accountHandle }); } catch (e: any) { console.error('[worker] digest:', e?.message); }
