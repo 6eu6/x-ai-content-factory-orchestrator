@@ -94,6 +94,50 @@ function formatOpportunity(o: Opportunity, lang: string): string {
 
 let lastDailyDay = -1;
 
+function normalizeHandle(handle: string): string {
+  return String(handle || '').replace(/^@/, '');
+}
+
+function utcDateKey(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+async function dailyDigestAlreadySent(accountHandle: string, dateKey = utcDateKey()): Promise<boolean> {
+  const supabase = supabaseAdmin();
+  const handle = normalizeHandle(accountHandle);
+  const { data, error } = await supabase
+    .from('telegram_bot_state')
+    .select('updated_at')
+    .eq('chat_id', 'worker')
+    .eq('user_id', handle)
+    .eq('current_flow', 'daily_digest_sent')
+    .eq('last_message', dateKey)
+    .limit(1)
+    .maybeSingle();
+  if (error) {
+    console.error('[worker] daily digest state check:', error.message);
+    return false;
+  }
+  return Boolean(data);
+}
+
+async function markDailyDigestSent(accountHandle: string, dateKey = utcDateKey()): Promise<void> {
+  const supabase = supabaseAdmin();
+  const handle = normalizeHandle(accountHandle);
+  const now = new Date().toISOString();
+  const { error } = await supabase.from('telegram_bot_state').insert({
+    chat_id: 'worker',
+    user_id: handle,
+    username: handle,
+    current_flow: 'daily_digest_sent',
+    flow_payload: { date: dateKey, source: 'oracle_worker' },
+    last_message: dateKey,
+    created_at: now,
+    updated_at: now,
+  });
+  if (error) console.error('[worker] daily digest state mark:', error.message);
+}
+
 /**
  * Heavier once-a-day routine, centralised here so nothing depends on Vercel's
  * 300s limit: outward learning (crawl), inward learning (feedback), media
@@ -108,8 +152,17 @@ async function dailyRoutine(profile: Profile): Promise<void> {
     catch (e: any) { console.error('[worker] web-enrich:', e?.message); }
   }
   try { await runFeedbackScan({ accountHandle: profile.accountHandle }); } catch (e: any) { console.error('[worker] feedback:', e?.message); }
-  // Morning digest (standalone ideas + mix) delivered to Telegram.
-  try { await runLeanLoop({ deliverTelegram: true, accountHandle: profile.accountHandle }); } catch (e: any) { console.error('[worker] digest:', e?.message); }
+  // Morning digest (standalone ideas + mix) delivered to Telegram. Guarded in DB
+  // so PM2/server restarts do not resend the same digest again on the same UTC day.
+  try {
+    const digestDate = utcDateKey();
+    if (await dailyDigestAlreadySent(profile.accountHandle, digestDate)) {
+      console.log(`[worker] @${profile.accountHandle}: daily digest already sent, skipping`);
+    } else {
+      await runLeanLoop({ deliverTelegram: true, accountHandle: profile.accountHandle });
+      await markDailyDigestSent(profile.accountHandle, digestDate);
+    }
+  } catch (e: any) { console.error('[worker] digest:', e?.message); }
   // Keep the dedup table small (loadSeen only reads the last 24h).
   try {
     await supabaseAdmin().from('evaluated_tweets').delete().lt('evaluated_at', new Date(Date.now() - 48 * 3_600_000).toISOString());
