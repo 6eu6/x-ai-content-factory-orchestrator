@@ -35,6 +35,26 @@ const ARABIC = /[؀-ۿ]/;
 // English content was requested.
 const NON_LATIN_WORD = /[؀-ۿЀ-ӿ一-鿿぀-ヿ가-힯]/;
 
+// Fabricated-statistic patterns. Kept deliberately narrow (only the clearest
+// invented-number phrasings) so we do not repeat the legacy mistake of
+// rejecting everything numeric. A source-backed reply can still cite the source
+// tweet's own numbers; this targets unsupported claims the model invents.
+const FABRICATED_STAT_PATTERNS: RegExp[] = [
+  /\b(?:studies|research|data|surveys?)\s+(?:show|shows|prove|proves|confirm|confirms|reveal|reveals)\b/i,
+  /\b\d{1,3}%\s+of\s+(?:people|users|developers|companies|startups|teams)\b/i,
+  /\b(?:increased|decreased|grew|dropped|boosted|reduced|cut|improved|saved)\s+(?:by\s+)?\d{1,3}%/i,
+  /\b\d+x\s+(?:faster|better|more|higher|cheaper|productive)\b/i,
+  /\b(?:millions?|billions?)\s+of\s+(?:people|users|developers|dollars)\b/i,
+];
+
+/** True when the text states an invented-sounding statistic with no cited source/link. */
+export function hasUnsupportedNumericClaim(text: string): boolean {
+  const t = String(text || '');
+  const hasSource = /https?:\/\/\S+/i.test(t); // a linked source excuses the number
+  if (hasSource) return false;
+  return FABRICATED_STAT_PATTERNS.some((re) => re.test(t));
+}
+
 /**
  * @param language expected publish language ('en', 'ar', ...). Language checks
  *   are only enforced for 'en' (must be latin script). For non-English profiles
@@ -62,6 +82,8 @@ export function gateSuggestion(text: string, maxLen = 280, language = 'en'): Gat
   for (const re of BAIT_PATTERNS) {
     if (re.test(t)) return { ok: false, reason: 'engagement_bait' };
   }
+
+  if (hasUnsupportedNumericClaim(t)) return { ok: false, reason: 'unsupported_numeric_claim' };
 
   return { ok: true };
 }

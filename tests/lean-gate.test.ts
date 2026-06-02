@@ -42,6 +42,16 @@ describe('lean gate', () => {
     expect(gateSuggestion('Pretty interesting stuff happening here. thoughts?').ok).toBe(false);
   });
 
+  it('blocks fabricated statistics with no source', () => {
+    expect(gateSuggestion('Studies show AI agents cut support costs dramatically for teams').ok).toBe(false);
+    expect(gateSuggestion('This makes engineers 10x faster at writing boilerplate code').ok).toBe(false);
+    expect(gateSuggestion('Productivity increased by 40% after switching their whole stack').ok).toBe(false);
+  });
+
+  it('allows a numeric claim when a source link is present', () => {
+    expect(gateSuggestion('Adoption grew by 30% per their report https://example.com/report here').ok).toBe(true);
+  });
+
   it('detects near duplicates', () => {
     const recent = ['Most AI agents are just a for loop with extra steps honestly'];
     expect(isNearDuplicate('Most AI agents are just a for loop with extra steps honestly', recent)).toBe(true);

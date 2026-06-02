@@ -63,10 +63,12 @@ function formatOpportunity(o: Opportunity, lang: string): string {
   const isAr = lang === 'ar';
   const head = isAr ? '🎯 فرصة الآن' : '🎯 Opportunity';
   const act = o.action === 'quote' ? (isAr ? 'اقتباس' : 'Quote') : (isAr ? 'رد' : 'Reply');
+  const age = o.source_age_hours != null ? `${Math.round(o.source_age_hours)}h` : '?';
   return [
     `<b>${head}</b> · ${act} · ${o.score}/10`,
-    `↳ @${htmlEscape(o.source_handle)} (${htmlEscape(o.source_media_type)})`,
+    `↳ @${htmlEscape(o.source_handle)} · ${age} · ${htmlEscape(o.source_media_type)}`,
     `${htmlEscape(o.source_url)}`,
+    o.why ? `<i>${isAr ? 'السبب' : 'Why'}: ${htmlEscape(o.why)}</i>` : '',
     '',
     `<b>${isAr ? 'المقترح' : 'Suggested'}:</b>`,
     htmlEscape(o.suggestion_text),

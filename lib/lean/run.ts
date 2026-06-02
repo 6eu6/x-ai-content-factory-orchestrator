@@ -15,7 +15,12 @@ import { harvestSources } from './harvest';
 import { getWinningExamples, getRecentlyPublished } from './memory';
 import { generateSuggestions, type Suggestion } from './generate';
 import { gateSuggestion, isNearDuplicate } from './gate';
+import { envNumber } from '../env';
 import { sendTelegramMessage, htmlEscape, shortText, allowedChatId } from '../telegram';
+
+// A reply/quote to a stale tweet is dead on arrival. Hard freshness limits.
+const REPLY_MAX_HOURS = envNumber('LEAN_REPLY_MAX_HOURS', 48, 1, 336);
+const QUOTE_MAX_HOURS = envNumber('LEAN_QUOTE_MAX_HOURS', 168, 1, 720);
 
 export type LeanRunResult = {
   ok: boolean;
@@ -44,11 +49,29 @@ export async function runLeanLoop(opts?: { deliverTelegram?: boolean; runId?: st
 
   const accepted: Suggestion[] = [];
   const rejected: { reason: string; text: string }[] = [];
+  const usedSources = new Set<string>(); // one suggestion per source tweet per batch
   for (const s of generated) {
     const gate = gateSuggestion(s.text, 280, cfg.tweetLanguage);
     if (!gate.ok) {
       rejected.push({ reason: gate.reason, text: s.text });
       continue;
+    }
+    // Freshness: reply/quote must target a recent source.
+    if (s.type !== 'standalone') {
+      if (!s.source_url) {
+        rejected.push({ reason: 'reply_quote_missing_source', text: s.text });
+        continue;
+      }
+      const limit = s.type === 'reply' ? REPLY_MAX_HOURS : QUOTE_MAX_HOURS;
+      if (s.source_age_hours != null && s.source_age_hours > limit) {
+        rejected.push({ reason: `source_too_old_for_${s.type}`, text: s.text });
+        continue;
+      }
+      if (usedSources.has(s.source_url)) {
+        rejected.push({ reason: 'source_already_used_in_batch', text: s.text });
+        continue;
+      }
+      usedSources.add(s.source_url);
     }
     if (isNearDuplicate(s.text, recent)) {
       rejected.push({ reason: 'near_duplicate_of_recent', text: s.text });
@@ -101,7 +124,11 @@ export function formatForTelegram(r: LeanRunResult): string {
     lines.push(`<b>${g.title}</b>`);
     for (const s of items) {
       lines.push(`${n}. ${htmlEscape(s.text)}`);
-      if (s.source_url) lines.push(`   ↳ ${htmlEscape(s.source_url)}`);
+      if (s.source_handle || s.source_age_hours != null) {
+        const age = s.source_age_hours != null ? `${Math.round(s.source_age_hours)}h` : '?';
+        const who = s.source_handle ? `@${htmlEscape(s.source_handle)}` : '';
+        lines.push(`   ↳ ${who} ${who ? '·' : ''} ${age} ${s.source_url ? '· ' + htmlEscape(s.source_url) : ''}`.trim());
+      }
       if (s.rationale) lines.push(`   <i>${htmlEscape(shortText(s.rationale, 120))}</i>`);
       lines.push('');
       n++;

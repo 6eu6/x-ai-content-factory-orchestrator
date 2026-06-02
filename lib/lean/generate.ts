@@ -21,6 +21,7 @@ export type Suggestion = {
   text: string;
   source_url: string | null;
   source_handle: string | null;
+  source_age_hours: number | null;
   rationale: string;
 };
 
@@ -146,6 +147,7 @@ export async function generateSuggestions(
       text,
       source_url: sourceUrl,
       source_handle: matched?.source_handle || null,
+      source_age_hours: matched?.age_hours ?? null,
       rationale: String(s?.rationale || '').trim().slice(0, 160),
     });
   }

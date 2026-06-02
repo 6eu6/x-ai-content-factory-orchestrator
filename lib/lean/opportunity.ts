@@ -25,9 +25,11 @@ export type Opportunity = {
   source_url: string;
   source_text: string;
   source_media_type: string;
+  source_age_hours: number | null;
   action: 'reply' | 'quote';
   suggestion_text: string;
   media_recommendation: string;
+  why: string;
   score: number;
 };
 
@@ -130,9 +132,11 @@ export async function runOpportunityRadar(
       source_url: cand.tweet_url,
       source_text: cand.text,
       source_media_type: cand.media_type,
+      source_age_hours: cand.age_hours,
       action: action as 'reply' | 'quote',
       suggestion_text: text,
       media_recommendation: String(it?.media_recommendation || '').trim().slice(0, 200),
+      why: String(it?.why || '').trim().slice(0, 160),
       score,
     });
   }
