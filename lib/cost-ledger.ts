@@ -20,6 +20,16 @@
 
 import { supabaseAdmin } from './supabase';
 
+/**
+ * Cost ledger is OFF by default in Lean Core — the legacy pipeline_cost_ledger
+ * table lives in the `legacy` schema now, so writing to it would only produce
+ * noise. Set COST_LEDGER_ENABLED=true (and provide the table) to re-enable.
+ */
+export function ledgerEnabled(): boolean {
+  const v = (process.env.COST_LEDGER_ENABLED || '').toLowerCase().trim();
+  return v === 'true' || v === '1';
+}
+
 // ═══ Types ═══
 
 export type CostProvider = 'twitterapi_io' | 'openrouter' | 'openai' | 'local';
@@ -81,6 +91,7 @@ export function estimateCostUsd(
  * Never throws.
  */
 export async function startCostEvent(input: CostEventInput): Promise<string | null> {
+  if (!ledgerEnabled()) return null;
   try {
     const supabase = supabaseAdmin();
     const row = {
@@ -121,7 +132,7 @@ export async function completeCostEvent(
   eventId: string | null,
   completion: CostEventComplete
 ): Promise<void> {
-  if (!eventId) return;
+  if (!eventId || !ledgerEnabled()) return;
   try {
     // Calculate cost if not provided
     let costUsd = completion.estimated_cost_usd;
@@ -171,7 +182,7 @@ export async function failCostEvent(
   eventId: string | null,
   errorMessage: string
 ): Promise<void> {
-  if (!eventId) return;
+  if (!eventId || !ledgerEnabled()) return;
   try {
     const supabase = supabaseAdmin();
     const { error } = await supabase
@@ -206,6 +217,7 @@ export async function recordCostEvent(
     status?: 'completed' | 'failed';
   }
 ): Promise<string | null> {
+  if (!ledgerEnabled()) return null;
   try {
     const status = input.status || (input.error ? 'failed' : 'completed');
     const costUsd = input.estimated_cost_usd ?? estimateCostUsd(
@@ -257,6 +269,7 @@ export async function recordCostEvent(
  * Returns empty array on failure.
  */
 export async function getCostEventsByRun(runId: string): Promise<any[]> {
+  if (!ledgerEnabled()) return [];
   try {
     const supabase = supabaseAdmin();
     const { data, error } = await supabase
