@@ -35,19 +35,38 @@ export type RememberInput = {
 
 // Account-private kinds (your style + your results); the rest are shared
 // (algorithm = global, source_pattern/insight = shared by niche).
-const ACCOUNT_SCOPED: ReadonlySet<MemoryKind> = new Set(['voice', 'outcome', 'anti_pattern']);
+export const ACCOUNT_SCOPED: ReadonlySet<MemoryKind> = new Set(['voice', 'outcome', 'anti_pattern']);
+
+export type ScopeDecision = { store: boolean; account: string | null; reason?: string };
+
+/**
+ * Decide the account scope for a write. Account-private kinds MUST carry an
+ * accountHandle — otherwise we refuse the write rather than silently storing it
+ * as global (which would leak one account's voice/results into every account).
+ * Shared kinds (algorithm/source_pattern/insight) stay global (null).
+ */
+export function resolveMemoryScope(kind: MemoryKind, accountHandle?: string | null): ScopeDecision {
+  const account = accountHandle ? String(accountHandle).replace(/^@/, '') : null;
+  if (ACCOUNT_SCOPED.has(kind)) {
+    if (!account) return { store: false, account: null, reason: 'account_scoped_without_handle' };
+    return { store: true, account };
+  }
+  return { store: true, account: null }; // shared kinds are global by design
+}
 
 /** Add knowledge. Computes embedding when possible; safe to call without one. */
 export async function remember(input: RememberInput): Promise<string | null> {
   const content = String(input.content || '').replace(/\s+/g, ' ').trim();
   if (content.length < 8) return null;
 
+  const scope = resolveMemoryScope(input.kind, input.accountHandle);
+  if (!scope.store) {
+    console.warn(`[brain] refusing ${input.kind} write without accountHandle (would leak across accounts)`);
+    return null;
+  }
+
   const supabase = supabaseAdmin();
   const vec = await embed(content);
-  // Account-scoped kinds are stored under the account; shared kinds stay global.
-  const account = input.accountHandle !== undefined
-    ? input.accountHandle
-    : (ACCOUNT_SCOPED.has(input.kind) ? null : null);
   const row: Record<string, any> = {
     kind: input.kind,
     content,
@@ -55,7 +74,7 @@ export async function remember(input: RememberInput): Promise<string | null> {
     niche: input.niche ?? null,
     language: input.language ?? 'en',
     source: input.source ?? null,
-    account_handle: account,
+    account_handle: scope.account,
     metadata: input.metadata ?? {},
   };
   if (vec) row.embedding = toVectorLiteral(vec);

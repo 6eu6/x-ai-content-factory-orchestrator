@@ -8,6 +8,6 @@
  */
 
 export { embed, embedMany, embeddingsEnabled, EMBEDDING_DIM } from './embed';
-export { remember, reinforce, contradict, recordOutcome, markUsed, type MemoryKind, type RememberInput } from './store';
+export { remember, reinforce, contradict, recordOutcome, markUsed, resolveMemoryScope, ACCOUNT_SCOPED, type MemoryKind, type RememberInput, type ScopeDecision } from './store';
 export { recall, recallBrainContext, type Recalled, type RecallOptions } from './retrieve';
 export { pruneBrain, type PruneReport } from './prune';
