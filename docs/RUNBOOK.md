@@ -46,7 +46,7 @@ Vercel.
 | `ORCHESTRATOR_SECRET` | Vercel | protects `/api/*` |
 | `PUBLIC_BASE_URL` = `https://x-ai-content-factory-orchestrator.vercel.app` | Vercel | webhook URL |
 | `LEAN_POLL_MINUTES` (default 20) | Oracle | radar interval |
-| `LEAN_DAILY_OPP_CAP` (default 5) | Oracle | max opportunity pushes/day |
+| `LEAN_DAILY_OPP_CAP` (default 2) | Oracle | max opportunity pushes/day |
 
 ## 3) One-time setup (after env is set, Vercel is READY)
 
@@ -91,7 +91,7 @@ pm2 logs x-growth-worker
 
 First-log expectation:
 ```
-[worker] starting — poll every 20m, daily cap 5/account
+[worker] starting — poll every 20m, daily cap 2/account
 [worker] @30piq: surfaced N opportunity(ies)
 [worker] cycle done in Xs — sleeping ...
 ```
@@ -135,7 +135,7 @@ First-log expectation:
 ## 9) Tuning
 
 - More replies / fewer standalone for a small account: already set to
-  `replies:8, quotes:2, standalone:1`.
+  `replies:2, quotes:1, standalone:0` (change anytime via the Telegram `mix 2 1 0` command).
 - Too many/few pings: adjust `LEAN_DAILY_OPP_CAP`.
 - Slower/faster radar: adjust `LEAN_POLL_MINUTES`.
 - Freshness windows: `LEAN_REPLY_MAX_HOURS` (48), `LEAN_QUOTE_MAX_HOURS` (168).

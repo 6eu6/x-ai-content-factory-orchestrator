@@ -14,7 +14,7 @@ create table if not exists profiles (
   tweet_language text not null default 'en',
   bot_language text not null default 'ar',
   voice text,
-  mix jsonb not null default '{"replies":6,"quotes":3,"standalone":4}'::jsonb,
+  mix jsonb not null default '{"replies":2,"quotes":1,"standalone":0}'::jsonb,
   source_handles text[] not null default '{}',
   active boolean not null default true,
   is_default boolean not null default false,

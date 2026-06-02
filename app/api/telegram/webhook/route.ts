@@ -5,7 +5,7 @@ import { assertTelegramChat, extractHandles, extractTweetUrl, htmlEscape, sendTe
 import { tweetIdFromUrl } from '../../../../lib/x';
 import { getActiveProfile, updateProfile } from '../../../../lib/lean/profile';
 import { languageName } from '../../../../lib/lean/config';
-import { runLeanLoop, formatForTelegram } from '../../../../lib/lean/run';
+import { runLeanLoop } from '../../../../lib/lean/run';
 import { remember } from '../../../../lib/brain';
 import { researchTopic, formatBrief } from '../../../../lib/lean/research';
 
@@ -157,15 +157,28 @@ async function handleMessage(chatId: string, text: string) {
       return;
     }
 
-    // Suggest (run the lean+brain loop)
+    // Suggest (run the lean+brain loop). Delivery is handled inside (clean
+    // per-suggestion, tap-to-copy messages).
     if (text.includes('اقتراح') || text.includes('تشغيل') || lower.includes('suggest') || lower === 'run') {
       await send(t(lang, 'suggest_started'));
       try {
-        const result = await runLeanLoop({ deliverTelegram: false });
-        await sendTelegramMessage(chatId, formatForTelegram(result), keyboard(lang));
+        await runLeanLoop({ deliverTelegram: true });
       } catch (e: any) {
         await send(`${t(lang, 'suggest_failed')}: ${htmlEscape(e?.message || '')}`);
       }
+      return;
+    }
+
+    // Change daily mix:  "mix 2 1 0"  (replies quotes standalone)
+    const mixMatch = text.match(/^mix\s+(\d+)\s+(\d+)\s+(\d+)/i);
+    if (mixMatch && profile) {
+      const mix = {
+        replies: Math.min(20, Number(mixMatch[1])),
+        quotes: Math.min(20, Number(mixMatch[2])),
+        standalone: Math.min(20, Number(mixMatch[3])),
+      };
+      await updateProfile(profile.accountHandle, { mix });
+      await send(`${lang === 'en' ? '✅ Mix set' : '✅ تم ضبط المزيج'}: ${mix.replies}/${mix.quotes}/${mix.standalone} (replies/quotes/standalone)`);
       return;
     }
 

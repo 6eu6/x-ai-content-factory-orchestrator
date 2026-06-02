@@ -67,8 +67,15 @@ function buildSystemPrompt(cfg: LeanConfig, examples: WinningExample[], brain: B
   lines.push('WHAT MAKES A POST WORTH SUGGESTING:');
   lines.push('- It says something a knowledgeable person would actually think but most people would not bother to write.');
   lines.push('- Replies should add a specific angle, caveat, example, or counterpoint — not "great point" or "so true".');
-  lines.push('- Quotes should reframe the original with your own take, not just restate it.');
+  lines.push('- Quotes should reframe the original with your own take. Write ONLY your take — do NOT quote or echo the source\'s words, and do not start with "\\"...\\" →".');
   lines.push('- Standalone posts should be a sharp observation or useful tip from the niche, self-contained.');
+  lines.push('');
+  lines.push('BANNED FILLER — never use these formula phrases, they read as empty:');
+  lines.push('  "the real win", "the underrated win", "the real innovation", "ultimate moat",');
+  lines.push('  "most miss that", "the gap isn\'t just", "here\'s the thing", "plot twist".');
+  lines.push('  Make the concrete claim directly instead of announcing that you have an insight.');
+  lines.push('NEVER speculate about internal hardware/model capabilities you cannot verify');
+  lines.push('  (no "they\'ve likely cracked...", "must have solved...", "means they cracked...").');
 
   if (examples.length) {
     lines.push('');

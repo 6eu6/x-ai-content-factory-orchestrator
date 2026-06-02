@@ -81,9 +81,10 @@ export function getLeanConfig(): LeanConfig {
     voice: optionalEnv('LEAN_VOICE', DEFAULT_VOICE),
     rules: rulesForLanguage(lang),
     mix: {
-      replies: envNumber('LEAN_REPLIES', 6, 0, 30),
-      quotes: envNumber('LEAN_QUOTES', 3, 0, 30),
-      standalone: envNumber('LEAN_STANDALONE', 4, 0, 30),
+      // Small-account default: a couple of high-quality candidates, not a feed.
+      replies: envNumber('LEAN_REPLIES', 2, 0, 30),
+      quotes: envNumber('LEAN_QUOTES', 1, 0, 30),
+      standalone: envNumber('LEAN_STANDALONE', 0, 0, 30),
     },
     sourceLimit: envNumber('LEAN_SOURCE_LIMIT', 8, 1, 40),
     tweetsPerSource: envNumber('LEAN_TWEETS_PER_SOURCE', 5, 1, 20),

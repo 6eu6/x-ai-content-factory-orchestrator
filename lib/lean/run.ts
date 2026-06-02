@@ -50,6 +50,7 @@ export async function runLeanLoop(opts?: { deliverTelegram?: boolean; runId?: st
   const accepted: Suggestion[] = [];
   const rejected: { reason: string; text: string }[] = [];
   const usedSources = new Set<string>(); // one suggestion per source tweet per batch
+  const usedHandles = new Set<string>(); // and one per source account per batch (diversity)
   for (const s of generated) {
     const gate = gateSuggestion(s.text, 280, cfg.tweetLanguage);
     if (!gate.ok) {
@@ -72,6 +73,15 @@ export async function runLeanLoop(opts?: { deliverTelegram?: boolean; runId?: st
         continue;
       }
       usedSources.add(s.source_url);
+    }
+    // Diversity: at most one suggestion per source account per batch.
+    if (s.source_handle) {
+      const h = s.source_handle.toLowerCase();
+      if (usedHandles.has(h)) {
+        rejected.push({ reason: 'source_handle_already_used_in_batch', text: s.text });
+        continue;
+      }
+      usedHandles.add(h);
     }
     if (isNearDuplicate(s.text, recent)) {
       rejected.push({ reason: 'near_duplicate_of_recent', text: s.text });
@@ -98,45 +108,53 @@ export async function runLeanLoop(opts?: { deliverTelegram?: boolean; runId?: st
 
   if (opts?.deliverTelegram) {
     const chatId = allowedChatId();
-    if (chatId) await sendTelegramMessage(chatId, formatForTelegram(result));
+    const lang = profile?.botLanguage === 'en' ? 'en' : 'ar';
+    if (chatId) await deliverSuggestions(chatId, result, lang);
   }
 
   return result;
 }
 
-export function formatForTelegram(r: LeanRunResult): string {
-  const lines: string[] = [];
-  lines.push(`<b>اقتراحات اليوم — @${htmlEscape(r.accountHandle)}</b>`);
-  lines.push(`النيش: ${htmlEscape(r.niche)}`);
-  lines.push(`مصادر مسحوبة: ${r.harvested} · أمثلة تعلّم: ${r.examplesUsed} · مقبولة: ${r.accepted}/${r.generated}`);
-  lines.push('');
+const TYPE_LABEL: Record<string, { ar: string; en: string }> = {
+  reply: { ar: '💬 رد', en: '💬 Reply' },
+  quote: { ar: '🔁 اقتباس', en: '🔁 Quote' },
+  standalone: { ar: '✍️ تغريدة', en: '✍️ Tweet' },
+};
 
-  const groups: { key: Suggestion['type']; title: string }[] = [
-    { key: 'reply', title: '💬 ردود' },
-    { key: 'quote', title: '🔁 اقتباسات' },
-    { key: 'standalone', title: '✍️ تغريدات أصلية' },
-  ];
+/**
+ * Clean Telegram UX: a short header that makes clear these are CANDIDATES (pick
+ * one, don't publish all), then ONE message per suggestion. The post text is
+ * wrapped in <code> so a single tap copies it; the source link is a tappable
+ * inline button so a tap opens the tweet to reply/quote.
+ */
+export async function deliverSuggestions(chatId: string, r: LeanRunResult, lang: 'ar' | 'en'): Promise<void> {
+  const isAr = lang === 'ar';
+  if (!r.suggestions.length) {
+    await sendTelegramMessage(chatId, isAr
+      ? 'لا توجد اقتراحات مقبولة هذه المرة — الفلتر رفض الضعيف. جرّب لاحقاً.'
+      : 'No suggestions passed the filter this time. Try again later.');
+    return;
+  }
+
+  const header = isAr
+    ? `<b>مرشّحات اليوم — @${htmlEscape(r.accountHandle)}</b>\nاختر <b>واحدة</b> فقط وانشرها يدوياً — هذه مرشّحات لا جدول نشر. (${r.suggestions.length})`
+    : `<b>Today's candidates — @${htmlEscape(r.accountHandle)}</b>\nPick <b>one</b>, publish it manually. These are candidates, not a publishing schedule. (${r.suggestions.length})`;
+  await sendTelegramMessage(chatId, header);
 
   let n = 1;
-  for (const g of groups) {
-    const items = r.suggestions.filter((s) => s.type === g.key);
-    if (!items.length) continue;
-    lines.push(`<b>${g.title}</b>`);
-    for (const s of items) {
-      lines.push(`${n}. ${htmlEscape(s.text)}`);
-      if (s.source_handle || s.source_age_hours != null) {
-        const age = s.source_age_hours != null ? `${Math.round(s.source_age_hours)}h` : '?';
-        const who = s.source_handle ? `@${htmlEscape(s.source_handle)}` : '';
-        lines.push(`   ↳ ${who} ${who ? '·' : ''} ${age} ${s.source_url ? '· ' + htmlEscape(s.source_url) : ''}`.trim());
-      }
-      if (s.rationale) lines.push(`   <i>${htmlEscape(shortText(s.rationale, 120))}</i>`);
-      lines.push('');
-      n++;
-    }
+  for (const s of r.suggestions) {
+    const label = (TYPE_LABEL[s.type] || TYPE_LABEL.standalone)[lang];
+    const age = s.source_age_hours != null ? ` · ${Math.round(s.source_age_hours)}h` : '';
+    const who = s.source_handle ? ` · @${htmlEscape(s.source_handle)}` : '';
+    const lines = [
+      `${n}/${r.suggestions.length} · ${label}${who}${age}`,
+      `<code>${htmlEscape(s.text)}</code>`,
+    ];
+    if (s.rationale) lines.push(`<i>${htmlEscape(shortText(s.rationale, 120))}</i>`);
+    const markup = s.source_url
+      ? { inline_keyboard: [[{ text: isAr ? '🔗 افتح التغريدة' : '🔗 Open tweet', url: s.source_url }]] }
+      : undefined;
+    await sendTelegramMessage(chatId, lines.join('\n'), markup).catch(() => {});
+    n++;
   }
-
-  if (!r.suggestions.length) {
-    lines.push('لا توجد اقتراحات مقبولة هذه المرة — جرّب تشغيلاً آخر أو وسّع قائمة المصادر.');
-  }
-  return lines.join('\n').slice(0, 4000);
 }

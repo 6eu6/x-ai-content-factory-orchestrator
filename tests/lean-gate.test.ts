@@ -52,6 +52,26 @@ describe('lean gate', () => {
     expect(gateSuggestion('Adoption grew by 30% per their report https://example.com/report here').ok).toBe(true);
   });
 
+  it('blocks generic insight clichés', () => {
+    expect(gateSuggestion('The real win here is eliminating context switching for focus').ok).toBe(false);
+    expect(gateSuggestion('Personal brand is the ultimate moat in the AI era for builders').ok).toBe(false);
+    expect(gateSuggestion('Most miss that scaling content works because of friction filtering').ok).toBe(false);
+  });
+
+  it('blocks unsupported capability speculation', () => {
+    expect(gateSuggestion('Running 200B params locally means they have likely cracked memory bandwidth').ok).toBe(false);
+    expect(gateSuggestion('They must have solved the attention bottleneck to ship this so fast').ok).toBe(false);
+  });
+
+  it('blocks quotes that echo the source text', () => {
+    expect(gateSuggestion('"there was a point..." → Most scaling works because of friction').ok).toBe(false);
+    expect(gateSuggestion("'your content is not growing' -> optimize for customers not peers").ok).toBe(false);
+  });
+
+  it('allows a clean concrete take', () => {
+    expect(gateSuggestion('API key tracking is the floor. Cost prediction before execution is the useful part.').ok).toBe(true);
+  });
+
   it('detects near duplicates', () => {
     const recent = ['Most AI agents are just a for loop with extra steps honestly'];
     expect(isNearDuplicate('Most AI agents are just a for loop with extra steps honestly', recent)).toBe(true);

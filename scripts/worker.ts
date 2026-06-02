@@ -29,7 +29,7 @@ import { pruneBrain } from '../lib/brain/prune';
 import type { Profile } from '../lib/lean/profile';
 
 const POLL_MINUTES = num('LEAN_POLL_MINUTES', 20, 5, 240);
-const DAILY_CAP = num('LEAN_DAILY_OPP_CAP', 5, 1, 50);
+const DAILY_CAP = num('LEAN_DAILY_OPP_CAP', 2, 1, 50);
 
 function num(name: string, fallback: number, min: number, max: number): number {
   const v = Number(process.env[name]);
@@ -49,16 +49,20 @@ async function notifiedToday(accountHandle: string): Promise<number> {
   return count ?? 0;
 }
 
-function opportunityKeyboard(id: string, lang: string) {
+function opportunityKeyboard(id: string, url: string, lang: string) {
   const isAr = lang === 'ar';
   return {
-    inline_keyboard: [[
-      { text: isAr ? '✅ نشرت' : '✅ Published', callback_data: `pub:${id}` },
-      { text: isAr ? '🔍 بحث عميق' : '🔍 Deep research', callback_data: `res:${id}` },
-    ]],
+    inline_keyboard: [
+      [{ text: isAr ? '🔗 افتح التغريدة' : '🔗 Open tweet', url }],
+      [
+        { text: isAr ? '✅ نشرت' : '✅ Published', callback_data: `pub:${id}` },
+        { text: isAr ? '🔍 بحث عميق' : '🔍 Deep research', callback_data: `res:${id}` },
+      ],
+    ],
   };
 }
 
+// The suggestion text is wrapped in <code> so one tap copies it on mobile.
 function formatOpportunity(o: Opportunity, lang: string): string {
   const isAr = lang === 'ar';
   const head = isAr ? '🎯 فرصة الآن' : '🎯 Opportunity';
@@ -67,11 +71,9 @@ function formatOpportunity(o: Opportunity, lang: string): string {
   return [
     `<b>${head}</b> · ${act} · ${o.score}/10`,
     `↳ @${htmlEscape(o.source_handle)} · ${age} · ${htmlEscape(o.source_media_type)}`,
-    `${htmlEscape(o.source_url)}`,
     o.why ? `<i>${isAr ? 'السبب' : 'Why'}: ${htmlEscape(o.why)}</i>` : '',
     '',
-    `<b>${isAr ? 'المقترح' : 'Suggested'}:</b>`,
-    htmlEscape(o.suggestion_text),
+    `<code>${htmlEscape(o.suggestion_text)}</code>`,
     o.media_recommendation ? `\n🎬 ${htmlEscape(o.media_recommendation)}` : '',
   ].filter(Boolean).join('\n');
 }
@@ -113,7 +115,7 @@ async function cycleForProfile(profile: Profile): Promise<number> {
   if (chatId) {
     for (const o of inserted) {
       try {
-        await sendTelegramMessage(chatId, formatOpportunity(o, profile.botLanguage), opportunityKeyboard(o.id, profile.botLanguage));
+        await sendTelegramMessage(chatId, formatOpportunity(o, profile.botLanguage), opportunityKeyboard(o.id, o.source_url, profile.botLanguage));
       } catch { /* keep going */ }
     }
   }

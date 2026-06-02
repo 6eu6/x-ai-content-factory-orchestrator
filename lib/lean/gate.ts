@@ -55,6 +55,33 @@ export function hasUnsupportedNumericClaim(text: string): boolean {
   return FABRICATED_STAT_PATTERNS.some((re) => re.test(t));
 }
 
+// Generic "insight-shaped" clichés that read as filler. The model leans on these
+// formulas; rejecting them forces a concrete claim instead.
+const CLICHE_PATTERNS: RegExp[] = [
+  /\bthe real win\b/i,
+  /\bthe underrated win\b/i,
+  /\bthe real innovation\b/i,
+  /\bultimate moat\b/i,
+  /\bmost (?:people )?miss that\b/i,
+  /\bthe gap isn'?t just\b/i,
+  /\bwhat (?:people|most) (?:miss|don'?t get)\b/i,
+  /\bhere'?s the thing\b/i,
+  /\bplot twist\b/i,
+];
+
+// Unsupported capability speculation (especially hardware/model claims). The
+// model guesses internals it cannot know; these phrasings are the tell.
+const SPECULATION_PATTERNS: RegExp[] = [
+  /\b(?:likely|probably|must have|they'?ve (?:likely )?)?\s*cracked\b/i,
+  /\bmust have (?:solved|figured out|cracked)\b/i,
+  /\bmeans they'?ve (?:likely )?(?:cracked|solved)\b/i,
+  /\bthey'?ve (?:likely|probably) (?:cracked|solved|built)\b/i,
+];
+
+// A quote suggestion must be OUR take, not an echo of the source text. Catches
+// outputs like:  "there was a point..." → our take
+const QUOTE_ECHO_PATTERN = /^\s*["'“”‘’].{0,100}["'“”‘’]\s*(?:→|->|=>)/;
+
 /**
  * @param language expected publish language ('en', 'ar', ...). Language checks
  *   are only enforced for 'en' (must be latin script). For non-English profiles
@@ -71,6 +98,9 @@ export function gateSuggestion(text: string, maxLen = 280, language = 'en'): Gat
   if (/^[[{]/.test(t) && /[\]}]\s*$/.test(t)) return { ok: false, reason: 'looks_like_json' };
   if (/"(text|reply|quote|content)"\s*:/.test(t)) return { ok: false, reason: 'json_field_leak' };
 
+  // A quote that opens by echoing the source's words is not our take.
+  if (QUOTE_ECHO_PATTERN.test(t)) return { ok: false, reason: 'quote_echoes_source' };
+
   // Language enforcement (English profiles must be latin script).
   if (language === 'en') {
     if (ARABIC.test(t)) return { ok: false, reason: 'arabic_in_english_profile' };
@@ -81,6 +111,12 @@ export function gateSuggestion(text: string, maxLen = 280, language = 'en'): Gat
 
   for (const re of BAIT_PATTERNS) {
     if (re.test(t)) return { ok: false, reason: 'engagement_bait' };
+  }
+  for (const re of CLICHE_PATTERNS) {
+    if (re.test(t)) return { ok: false, reason: 'generic_cliche' };
+  }
+  for (const re of SPECULATION_PATTERNS) {
+    if (re.test(t)) return { ok: false, reason: 'unsupported_speculation' };
   }
 
   if (hasUnsupportedNumericClaim(t)) return { ok: false, reason: 'unsupported_numeric_claim' };
