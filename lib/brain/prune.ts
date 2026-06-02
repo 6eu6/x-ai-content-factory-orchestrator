@@ -1,10 +1,19 @@
 /**
- * Brain — Self-pruning (forgetting)
+ * Brain — Self-pruning (intelligent forgetting)
  *
- * A real brain forgets. This decays the weight of memories that have not been
- * useful, archives the weakest and the contradicted ones, and keeps the proven
- * core. Run on a schedule (cron) so the memory stays sharp instead of bloating
- * into the 3,000-row noise pile the legacy system became.
+ * A real brain forgets on purpose. Criterion for "what matters":
+ *   importance = weight (raised by reinforcement + good outcomes, lowered by
+ *   time decay + contradictions) + recency of use.
+ *
+ * Forgetting is KIND-AWARE:
+ *   - durable kinds (algorithm, voice) barely decay — proven, timeless.
+ *   - time-sensitive kinds (source_pattern, insight) decay fast — niche trends
+ *     go stale quickly.
+ *   - outcome / anti_pattern decay moderately.
+ * Plus a per-kind cap so no layer grows unbounded: beyond the cap we archive the
+ * weakest. Heavily contradicted memories are archived regardless.
+ *
+ * Run on a schedule (the worker does this weekly).
  */
 
 import { supabaseAdmin } from '../supabase';
@@ -13,65 +22,89 @@ export type PruneReport = {
   decayed: number;
   archived_low_weight: number;
   archived_contradicted: number;
+  archived_over_cap: number;
   active_remaining: number;
 };
 
-export async function pruneBrain(opts?: {
-  decayPerRun?: number;     // weight subtracted from stale memories
-  staleDays?: number;       // not used in N days = stale
-  archiveBelow?: number;    // weight threshold to archive
-}): Promise<PruneReport> {
+type KindPolicy = { staleDays: number; decay: number; cap: number; protect: boolean };
+
+// Tuned per layer. protect = never decays purely from age (only contradictions).
+export const KIND_POLICY: Record<string, KindPolicy> = {
+  algorithm:      { staleDays: 365, decay: 0.0, cap: 800, protect: true },
+  voice:          { staleDays: 120, decay: 0.1, cap: 150, protect: false },
+  outcome:        { staleDays: 60,  decay: 0.3, cap: 200, protect: false },
+  anti_pattern:   { staleDays: 60,  decay: 0.3, cap: 200, protect: false },
+  source_pattern: { staleDays: 14,  decay: 0.8, cap: 150, protect: false },
+  insight:        { staleDays: 14,  decay: 0.8, cap: 80,  protect: false },
+};
+const DEFAULT_POLICY: KindPolicy = { staleDays: 30, decay: 0.3, cap: 200, protect: false };
+const ARCHIVE_BELOW = 1.5;
+
+export async function pruneBrain(): Promise<PruneReport> {
   const supabase = supabaseAdmin();
-  const decay = opts?.decayPerRun ?? 0.3;
-  const staleDays = opts?.staleDays ?? 30;
-  const archiveBelow = opts?.archiveBelow ?? 1.5;
+  const report: PruneReport = { decayed: 0, archived_low_weight: 0, archived_contradicted: 0, archived_over_cap: 0, active_remaining: 0 };
 
-  const staleCutoff = new Date(Date.now() - staleDays * 86_400_000).toISOString();
-
-  // 1) Decay stale, never-reinforced memories (protect proven ones: support_count>0).
-  const { data: stale } = await supabase
-    .from('brain_memory')
-    .select('id, weight')
-    .eq('status', 'active')
-    .eq('support_count', 0)
-    .or(`last_used_at.is.null,last_used_at.lt.${staleCutoff}`)
-    .lt('created_at', staleCutoff)
-    .limit(1000);
-
-  let decayed = 0;
-  for (const r of (stale || []) as any[]) {
-    await supabase
+  for (const [kind, policy] of Object.entries(KIND_POLICY) as [string, KindPolicy][]) {
+    if (policy.protect) continue; // durable layers: skip age decay
+    const staleCutoff = new Date(Date.now() - policy.staleDays * 86_400_000).toISOString();
+    // Decay stale, never-reinforced memories of this kind.
+    const { data: stale } = await supabase
       .from('brain_memory')
-      .update({ weight: Math.max(0, Number(r.weight || 0) - decay), updated_at: new Date().toISOString() })
-      .eq('id', r.id);
-    decayed++;
+      .select('id, weight')
+      .eq('status', 'active')
+      .eq('kind', kind)
+      .eq('support_count', 0)
+      .or(`last_used_at.is.null,last_used_at.lt.${staleCutoff}`)
+      .lt('created_at', staleCutoff)
+      .limit(2000);
+    for (const r of (stale || []) as any[]) {
+      await supabase.from('brain_memory')
+        .update({ weight: Math.max(0, Number(r.weight || 0) - policy.decay), updated_at: new Date().toISOString() })
+        .eq('id', r.id);
+      report.decayed++;
+    }
   }
 
-  // 2) Archive anything that decayed below the floor.
+  // Archive anything that decayed below the floor.
   const { data: low } = await supabase
     .from('brain_memory')
     .update({ status: 'archived', updated_at: new Date().toISOString() })
     .eq('status', 'active')
-    .lt('weight', archiveBelow)
+    .lt('weight', ARCHIVE_BELOW)
     .select('id');
+  report.archived_low_weight = (low || []).length;
 
-  // 3) Archive heavily contradicted memories regardless of weight.
+  // Archive heavily contradicted memories regardless of weight.
   const { data: contradicted } = await supabase
     .from('brain_memory')
     .update({ status: 'archived', updated_at: new Date().toISOString() })
     .eq('status', 'active')
     .gte('contradiction_count', 3)
     .select('id');
+  report.archived_contradicted = (contradicted || []).length;
+
+  // Per-kind cap: keep the strongest, archive the weakest beyond the cap.
+  for (const kind of Object.keys({ ...KIND_POLICY })) {
+    const cap = (KIND_POLICY[kind] || DEFAULT_POLICY).cap;
+    const { data: rows } = await supabase
+      .from('brain_memory')
+      .select('id')
+      .eq('status', 'active')
+      .eq('kind', kind)
+      .order('weight', { ascending: false })
+      .order('last_used_at', { ascending: false, nullsFirst: false })
+      .range(cap, cap + 2000);
+    const overflow = (rows || []).map((r: any) => r.id);
+    if (overflow.length) {
+      await supabase.from('brain_memory').update({ status: 'archived', updated_at: new Date().toISOString() }).in('id', overflow);
+      report.archived_over_cap += overflow.length;
+    }
+  }
 
   const { count } = await supabase
     .from('brain_memory')
     .select('*', { count: 'exact', head: true })
     .eq('status', 'active');
-
-  return {
-    decayed,
-    archived_low_weight: (low || []).length,
-    archived_contradicted: (contradicted || []).length,
-    active_remaining: count ?? 0,
-  };
+  report.active_remaining = count ?? 0;
+  return report;
 }

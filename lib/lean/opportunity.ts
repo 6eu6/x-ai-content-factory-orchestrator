@@ -112,7 +112,7 @@ export async function runOpportunityRadar(
 
   // Brain grounding for relevance + quality.
   const recallQuery = [cfg.niche, ...candidates.slice(0, 6).map((t) => t.text)].join(' \n ').slice(0, 1500);
-  const brain = await recallBrainContext(recallQuery, cfg.niche).catch(() => null);
+  const brain = await recallBrainContext(recallQuery, cfg.niche, cfg.accountHandle).catch(() => null);
 
   const lang = languageName(cfg.tweetLanguage);
   const system = [

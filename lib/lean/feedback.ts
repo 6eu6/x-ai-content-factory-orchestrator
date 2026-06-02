@@ -90,6 +90,7 @@ export async function runFeedbackScan(opts?: { accountHandle?: string; limit?: n
       outcomeScore: outcome,
       niche: profile?.niche ?? null,
       language: profile?.tweetLanguage ?? 'en',
+      accountHandle: handle,
     });
     report.learned++;
     report.details.push({ url: row.published_url, engagement: Math.round(engagement), outcome });

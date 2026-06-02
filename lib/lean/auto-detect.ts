@@ -155,6 +155,7 @@ export async function autoDetectPublished(profile: Profile): Promise<AutoDetectR
       weight: 6,
       niche: profile.niche,
       language: profile.tweetLanguage,
+      accountHandle: handle,
       source: 'auto_detected_publish',
     }).catch(() => {});
     report.logged++;

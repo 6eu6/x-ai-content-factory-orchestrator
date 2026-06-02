@@ -118,7 +118,7 @@ export async function generateSuggestions(
   const recallQuery = [cfg.niche, ...tweets.slice(0, 8).map((t) => t.text)].join(' \n ').slice(0, 2000);
   let brain: BrainContext | null = null;
   try {
-    brain = await recallBrainContext(recallQuery, cfg.niche);
+    brain = await recallBrainContext(recallQuery, cfg.niche, cfg.accountHandle);
   } catch {
     brain = null; // brain is optional; never block generation on it
   }

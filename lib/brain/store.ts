@@ -28,8 +28,14 @@ export type RememberInput = {
   niche?: string | null;
   language?: string;
   source?: string;
+  /** Account this memory belongs to. Auto-derived per kind if omitted. */
+  accountHandle?: string | null;
   metadata?: Record<string, any>;
 };
+
+// Account-private kinds (your style + your results); the rest are shared
+// (algorithm = global, source_pattern/insight = shared by niche).
+const ACCOUNT_SCOPED: ReadonlySet<MemoryKind> = new Set(['voice', 'outcome', 'anti_pattern']);
 
 /** Add knowledge. Computes embedding when possible; safe to call without one. */
 export async function remember(input: RememberInput): Promise<string | null> {
@@ -38,6 +44,10 @@ export async function remember(input: RememberInput): Promise<string | null> {
 
   const supabase = supabaseAdmin();
   const vec = await embed(content);
+  // Account-scoped kinds are stored under the account; shared kinds stay global.
+  const account = input.accountHandle !== undefined
+    ? input.accountHandle
+    : (ACCOUNT_SCOPED.has(input.kind) ? null : null);
   const row: Record<string, any> = {
     kind: input.kind,
     content,
@@ -45,6 +55,7 @@ export async function remember(input: RememberInput): Promise<string | null> {
     niche: input.niche ?? null,
     language: input.language ?? 'en',
     source: input.source ?? null,
+    account_handle: account,
     metadata: input.metadata ?? {},
   };
   if (vec) row.embedding = toVectorLiteral(vec);
@@ -127,6 +138,7 @@ export async function recordOutcome(input: {
   outcomeScore: number; // 0..10
   niche?: string | null;
   language?: string;
+  accountHandle?: string | null;
 }): Promise<void> {
   const good = input.outcomeScore >= 7;
   const summary = good
@@ -138,6 +150,7 @@ export async function recordOutcome(input: {
     weight: good ? Math.min(10, 5 + input.outcomeScore / 2) : 3,
     niche: input.niche ?? null,
     language: input.language ?? 'en',
+    accountHandle: input.accountHandle ?? null,
     source: 'published_outcome',
     metadata: { outcome_score: input.outcomeScore, content_type: input.type },
   });

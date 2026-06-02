@@ -25,6 +25,7 @@ export type Recalled = {
 export type RecallOptions = {
   kind?: string;
   niche?: string | null;
+  account?: string | null;
   matchCount?: number;
   minWeight?: number;
   markUsage?: boolean;
@@ -46,6 +47,7 @@ export async function recall(query: string, opts: RecallOptions = {}): Promise<R
       filter_kind: opts.kind ?? null,
       filter_niche: opts.niche ?? null,
       min_weight: minWeight,
+      filter_account: opts.account ?? null,
     });
     if (!error && data) {
       results = (data as any[]).map((r) => ({
@@ -121,19 +123,21 @@ async function lexicalRecall(
  * balanced slice across the kinds that matter for writing on-brand, original
  * content, and returns it grouped.
  */
-export async function recallBrainContext(query: string, niche?: string | null): Promise<{
+export async function recallBrainContext(query: string, niche?: string | null, account?: string | null): Promise<{
   algorithm: Recalled[];
   patterns: Recalled[];
   voice: Recalled[];
   winners: Recalled[];
   avoid: Recalled[];
 }> {
+  // account scoping: global rows (null) + this account's rows are returned;
+  // other accounts' private voice/outcome/anti_pattern never leak in.
   const [algorithm, patterns, voice, winners, avoid] = await Promise.all([
-    recall(query, { kind: 'algorithm', niche, matchCount: 5, minWeight: 3, markUsage: false }),
-    recall(query, { kind: 'source_pattern', niche, matchCount: 4, markUsage: false }),
-    recall(query, { kind: 'voice', niche, matchCount: 3, markUsage: false }),
-    recall(query, { kind: 'outcome', niche, matchCount: 4, markUsage: false }),
-    recall(query, { kind: 'anti_pattern', niche, matchCount: 3, markUsage: false }),
+    recall(query, { kind: 'algorithm', niche, account, matchCount: 5, minWeight: 3, markUsage: false }),
+    recall(query, { kind: 'source_pattern', niche, account, matchCount: 4, markUsage: false }),
+    recall(query, { kind: 'voice', niche, account, matchCount: 3, markUsage: false }),
+    recall(query, { kind: 'outcome', niche, account, matchCount: 4, markUsage: false }),
+    recall(query, { kind: 'anti_pattern', niche, account, matchCount: 3, markUsage: false }),
   ]);
   return { algorithm, patterns, voice, winners, avoid };
 }
