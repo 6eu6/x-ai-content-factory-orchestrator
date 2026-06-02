@@ -18,7 +18,10 @@ every ~20 min (continuous opportunity radar)
   harvest fresh niche tweets
   → free deterministic prefilter (fresh + momentum + unseen)   ← keeps cost low
   → one batched model call scores the best, writes ready reply/quote + media tip
-  → push an instant Telegram notification (link + suggestion)  ← seize the moment
+  → push an instant Telegram notification (link + suggestion + media tip)
+     each card has two buttons:
+       ✅ Published    → one tap closes the loop (marks used, feeds the brain)
+       🔍 Deep research → on-demand web search → verified brief + clip script
   (strict daily cap per account — quality over quantity, no flooding)
 
 once a day (heavier routine, same worker)
@@ -92,6 +95,14 @@ Each account is a row in `profiles` (handle, niche, languages, voice, mix). The
 same engine runs any profile, so adding an account or a language needs data, not
 code. Prove growth on one account first, then generalize. See
 `docs/LEAN_ARCHITECTURE.md`.
+
+## Media policy
+
+The system **detects** source media (text/photo/video/gif), **learns** which
+format wins in the niche, and **recommends** what to attach — including, on
+demand, a verified research brief + a clip script so you can record your **own**
+original clip. It deliberately does **not** download or re-post other people's
+media (copyright / account-suspension risk).
 
 ## What the tool does not do
 

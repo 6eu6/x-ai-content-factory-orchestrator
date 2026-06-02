@@ -49,6 +49,16 @@ async function notifiedToday(accountHandle: string): Promise<number> {
   return count ?? 0;
 }
 
+function opportunityKeyboard(id: string, lang: string) {
+  const isAr = lang === 'ar';
+  return {
+    inline_keyboard: [[
+      { text: isAr ? '✅ نشرت' : '✅ Published', callback_data: `pub:${id}` },
+      { text: isAr ? '🔍 بحث عميق' : '🔍 Deep research', callback_data: `res:${id}` },
+    ]],
+  };
+}
+
 function formatOpportunity(o: Opportunity, lang: string): string {
   const isAr = lang === 'ar';
   const head = isAr ? '🎯 فرصة الآن' : '🎯 Opportunity';
@@ -100,7 +110,9 @@ async function cycleForProfile(profile: Profile): Promise<number> {
 
   if (chatId) {
     for (const o of inserted) {
-      try { await sendTelegramMessage(chatId, formatOpportunity(o, profile.botLanguage)); } catch { /* keep going */ }
+      try {
+        await sendTelegramMessage(chatId, formatOpportunity(o, profile.botLanguage), opportunityKeyboard(o.id, profile.botLanguage));
+      } catch { /* keep going */ }
     }
   }
   return inserted.length;

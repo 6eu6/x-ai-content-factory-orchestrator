@@ -47,10 +47,20 @@ export async function setTelegramWebhook(url: string, secretToken: string) {
   const res = await fetch(`https://api.telegram.org/bot${token}/setWebhook`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ url, secret_token: secretToken, allowed_updates: ['message'] })
+    body: JSON.stringify({ url, secret_token: secretToken, allowed_updates: ['message', 'callback_query'] })
   });
   if (!res.ok) throw new Error(`Telegram setWebhook failed: ${res.status} ${await res.text()}`);
   return res.json();
+}
+
+/** Acknowledge an inline-button tap (stops Telegram's loading spinner). */
+export async function answerCallbackQuery(callbackQueryId: string, text = '') {
+  const token = telegramToken();
+  await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ callback_query_id: callbackQueryId, text: text.slice(0, 200) })
+  }).catch(() => {});
 }
 
 export function htmlEscape(value: any) {

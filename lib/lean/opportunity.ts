@@ -139,13 +139,15 @@ export async function runOpportunityRadar(
   return out;
 }
 
-/** Persist surfaced opportunities (deduped by unique constraint). Returns inserted rows. */
-export async function persistOpportunities(accountHandle: string, opps: Opportunity[]): Promise<Opportunity[]> {
+export type StoredOpportunity = Opportunity & { id: string };
+
+/** Persist surfaced opportunities (deduped by unique constraint). Returns inserted rows with ids. */
+export async function persistOpportunities(accountHandle: string, opps: Opportunity[]): Promise<StoredOpportunity[]> {
   if (!opps.length) return [];
   const supabase = supabaseAdmin();
-  const inserted: Opportunity[] = [];
+  const inserted: StoredOpportunity[] = [];
   for (const o of opps) {
-    const { error } = await supabase.from('opportunities').insert({
+    const { data, error } = await supabase.from('opportunities').insert({
       account_handle: accountHandle,
       tweet_id: o.tweet_id,
       source_handle: o.source_handle,
@@ -157,8 +159,8 @@ export async function persistOpportunities(accountHandle: string, opps: Opportun
       media_recommendation: o.media_recommendation,
       score: o.score,
       notified_at: new Date().toISOString(),
-    });
-    if (!error) inserted.push(o); // unique violation => already seen => skip silently
+    }).select('id').maybeSingle();
+    if (!error && data) inserted.push({ ...o, id: (data as any).id }); // unique violation => already seen => skip
   }
   return inserted;
 }

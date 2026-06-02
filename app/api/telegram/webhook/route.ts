@@ -1,11 +1,13 @@
 import { runBackground } from '../../../../lib/background';
 import { optionalEnv } from '../../../../lib/env';
 import { supabaseAdmin } from '../../../../lib/supabase';
-import { assertTelegramChat, extractHandles, extractTweetUrl, htmlEscape, sendTelegramMessage } from '../../../../lib/telegram';
+import { assertTelegramChat, extractHandles, extractTweetUrl, htmlEscape, sendTelegramMessage, answerCallbackQuery } from '../../../../lib/telegram';
 import { tweetIdFromUrl } from '../../../../lib/x';
 import { getActiveProfile, updateProfile } from '../../../../lib/lean/profile';
 import { languageName } from '../../../../lib/lean/config';
 import { runLeanLoop, formatForTelegram } from '../../../../lib/lean/run';
+import { remember } from '../../../../lib/brain';
+import { researchTopic, formatBrief } from '../../../../lib/lean/research';
 
 const VERSION = 'telegram-webhook-lean-v1';
 export const maxDuration = 300;
@@ -63,6 +65,18 @@ export async function POST(req: Request) {
       return Response.json({ ok: false, error: 'Unauthorized' }, { status: 401 });
     }
     const update = await req.json();
+
+    // Inline-button taps (✅ Published / 🔍 Deep research) on opportunity cards.
+    if (update?.callback_query) {
+      const cb = update.callback_query;
+      const chatId = String(cb?.message?.chat?.id || '');
+      if (chatId) {
+        assertTelegramChat(chatId);
+        runBackground(handleCallback(chatId, String(cb.id), String(cb.data || '')));
+      }
+      return Response.json({ ok: true, version: VERSION });
+    }
+
     const message = update?.message;
     const chatId = String(message?.chat?.id || '');
     const text = String(message?.text || '').trim();
@@ -77,6 +91,52 @@ export async function POST(req: Request) {
 
 export async function GET() {
   return Response.json({ ok: true, endpoint: VERSION });
+}
+
+async function handleCallback(chatId: string, callbackId: string, data: string) {
+  const supabase = supabaseAdmin();
+  const profile = await getActiveProfile().catch(() => null);
+  const lang: Lang = (profile?.botLanguage === 'en' ? 'en' : 'ar');
+  const send = (msg: string) => sendTelegramMessage(chatId, msg, keyboard(lang));
+
+  const [kind, id] = data.split(':');
+  if (!id) { await answerCallbackQuery(callbackId); return; }
+
+  const { data: opp } = await supabase.from('opportunities').select('*').eq('id', id).maybeSingle();
+  if (!opp) { await answerCallbackQuery(callbackId, lang === 'en' ? 'Not found' : 'غير موجود'); return; }
+
+  if (kind === 'pub') {
+    // One-tap close-the-loop: mark used + feed the endorsed text back as a voice
+    // exemplar so future generations match what the human actually publishes.
+    await supabase.from('opportunities').update({ status: 'published' }).eq('id', id);
+    await remember({
+      kind: 'voice',
+      content: String((opp as any).suggestion_text || ''),
+      weight: 6,
+      niche: profile?.niche ?? null,
+      language: profile?.tweetLanguage ?? 'en',
+      source: 'used_suggestion',
+    }).catch(() => {});
+    await answerCallbackQuery(callbackId, lang === 'en' ? 'Logged ✅' : 'تم التسجيل ✅');
+    await send(lang === 'en'
+      ? '✅ Logged as published. The brain learned from it.\n(To measure real engagement, send: published <your post url>)'
+      : '✅ سُجّل كمنشور وتعلّم منه العقل.\n(لقياس التفاعل الحقيقي أرسل: نشرت <رابط منشورك>)');
+    return;
+  }
+
+  if (kind === 'res') {
+    await answerCallbackQuery(callbackId, lang === 'en' ? 'Researching…' : 'يبحث…');
+    const topic = String((opp as any).source_text || (opp as any).suggestion_text || '').slice(0, 280);
+    try {
+      const brief = await researchTopic(topic, profile?.tweetLanguage || 'en');
+      await send(formatBrief(brief, lang));
+    } catch (e: any) {
+      await send(`❌ ${htmlEscape(e?.message || 'research failed')}`);
+    }
+    return;
+  }
+
+  await answerCallbackQuery(callbackId);
 }
 
 async function handleMessage(chatId: string, text: string) {
