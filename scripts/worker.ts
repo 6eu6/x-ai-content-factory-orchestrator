@@ -31,6 +31,9 @@ import type { Profile } from '../lib/lean/profile';
 
 const POLL_MINUTES = num('LEAN_POLL_MINUTES', 20, 5, 240);
 const DAILY_CAP = num('LEAN_DAILY_OPP_CAP', 2, 1, 50);
+// Auto-detect published posts every Nth cycle (not every cycle) to cut X reads.
+const AUTODETECT_EVERY = num('LEAN_AUTODETECT_EVERY', 3, 1, 20);
+let cycleCount = 0;
 
 function num(name: string, fallback: number, min: number, max: number): number {
   const v = Number(process.env[name]);
@@ -91,22 +94,28 @@ async function dailyRoutine(profile: Profile): Promise<void> {
   try { await runFeedbackScan({ accountHandle: profile.accountHandle }); } catch (e: any) { console.error('[worker] feedback:', e?.message); }
   // Morning digest (standalone ideas + mix) delivered to Telegram.
   try { await runLeanLoop({ deliverTelegram: true, accountHandle: profile.accountHandle }); } catch (e: any) { console.error('[worker] digest:', e?.message); }
+  // Keep the dedup table small (loadSeen only reads the last 24h).
+  try {
+    await supabaseAdmin().from('evaluated_tweets').delete().lt('evaluated_at', new Date(Date.now() - 48 * 3_600_000).toISOString());
+  } catch (e: any) { console.error('[worker] evaluated cleanup:', e?.message); }
   if (new Date().getUTCDay() === 0) {
     try { await pruneBrain(); } catch (e: any) { console.error('[worker] prune:', e?.message); }
   }
 }
 
-async function cycleForProfile(profile: Profile): Promise<number> {
+async function cycleForProfile(profile: Profile, runAutoDetect: boolean): Promise<number> {
   const cfg = configFromProfile(profile);
   const chatId = allowedChatId();
 
-  // Auto-detect anything we published manually since last cycle (closes the
-  // learning loop without the user logging it). Cheap: one timeline read.
-  try {
-    const det = await autoDetectPublished(profile);
-    if (det.logged > 0) console.log(`[worker] @${profile.accountHandle}: auto-logged ${det.logged} published post(s)`);
-  } catch (e: any) {
-    console.error('[worker] auto-detect:', e?.message);
+  // Auto-detect manually published posts (closes the learning loop). Runs every
+  // Nth cycle to limit X reads — a published post is still caught within minutes.
+  if (runAutoDetect) {
+    try {
+      const det = await autoDetectPublished(profile);
+      if (det.logged > 0) console.log(`[worker] @${profile.accountHandle}: auto-logged ${det.logged} published post(s)`);
+    } catch (e: any) {
+      console.error('[worker] auto-detect:', e?.message);
+    }
   }
 
   const already = await notifiedToday(profile.accountHandle);
@@ -134,11 +143,13 @@ async function runOnce(): Promise<void> {
   const profiles = (await listProfiles()).filter((p) => p.active);
   const day = new Date().getUTCDate();
   const runDaily = day !== lastDailyDay;
+  cycleCount++;
+  const runAutoDetect = cycleCount % AUTODETECT_EVERY === 1 || AUTODETECT_EVERY === 1;
 
   for (const p of profiles) {
     try {
       if (runDaily) await dailyRoutine(p);
-      const n = await cycleForProfile(p);
+      const n = await cycleForProfile(p, runAutoDetect);
       console.log(`[worker] @${p.accountHandle}: surfaced ${n} opportunity(ies)`);
     } catch (e: any) {
       console.error(`[worker] @${p.accountHandle} error:`, e?.message || e);

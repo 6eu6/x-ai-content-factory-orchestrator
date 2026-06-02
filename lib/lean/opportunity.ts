@@ -52,15 +52,26 @@ function prefilter(tweets: HarvestedTweet[], seen: Set<string>, opts: Required<R
     .slice(0, opts.maxCandidates);
 }
 
+// "Seen" = anything already surfaced AND anything already scored by the model,
+// so a fresh tweet that scored below threshold is not re-evaluated every cycle.
 async function loadSeen(accountHandle: string): Promise<Set<string>> {
   const supabase = supabaseAdmin();
-  const { data } = await supabase
-    .from('opportunities')
-    .select('tweet_id')
-    .eq('account_handle', accountHandle)
-    .order('created_at', { ascending: false })
-    .limit(500);
-  return new Set((data || []).map((r: any) => String(r.tweet_id)));
+  const seen = new Set<string>();
+  const [opps, evaluated] = await Promise.all([
+    supabase.from('opportunities').select('tweet_id').eq('account_handle', accountHandle).order('created_at', { ascending: false }).limit(500),
+    supabase.from('evaluated_tweets').select('tweet_id').eq('account_handle', accountHandle).gte('evaluated_at', new Date(Date.now() - 24 * 3_600_000).toISOString()).limit(2000),
+  ]);
+  for (const r of (opps.data || []) as any[]) seen.add(String(r.tweet_id));
+  for (const r of (evaluated.data || []) as any[]) seen.add(String(r.tweet_id));
+  return seen;
+}
+
+/** Record the tweets we just sent to the model so we never re-pay for them. */
+async function markEvaluated(accountHandle: string, tweetIds: string[]): Promise<void> {
+  if (!tweetIds.length) return;
+  const supabase = supabaseAdmin();
+  const rows = tweetIds.filter(Boolean).map((tweet_id) => ({ account_handle: accountHandle, tweet_id }));
+  await supabase.from('evaluated_tweets').upsert(rows, { onConflict: 'account_handle,tweet_id', ignoreDuplicates: true });
 }
 
 export async function runOpportunityRadar(
@@ -137,6 +148,9 @@ export async function runOpportunityRadar(
   } catch {
     return [];
   }
+
+  // We just paid to score these — remember them so future cycles skip them.
+  await markEvaluated(profile.accountHandle, candidates.map((c) => c.tweet_id)).catch(() => {});
 
   const items: any[] = Array.isArray(parsed?.opportunities) ? parsed.opportunities : [];
   const out: Opportunity[] = [];
