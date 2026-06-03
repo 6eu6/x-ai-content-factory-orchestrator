@@ -1,16 +1,16 @@
 import { optionalEnv, requiredEnv } from './env';
 import { fetchWithRetry } from './retry';
 
-export const MAIN_KEYBOARD = {
-  keyboard: [
-    [{ text: '🧠 تشغيل كامل' }, { text: '🧾 حالة التشغيل' }],
-    [{ text: '🔄 إعادة تشغيل' }, { text: '⏸ إيقاف التشغيل' }],
-    [{ text: '➕ إضافة حساب' }, { text: '📋 قائمة الحسابات' }],
-    [{ text: '✅ سجل منشور' }, { text: '🧩 محتويات العقل' }]
-  ],
-  resize_keyboard: true,
-  one_time_keyboard: false
-};
+/**
+ * The single source of truth for the bot's reply keyboard. Bilingual, clean —
+ * no legacy pipeline buttons. Use this everywhere a persistent keyboard is shown.
+ */
+export function mainTelegramKeyboard(lang: 'ar' | 'en' = 'ar') {
+  const labels = lang === 'en'
+    ? [['🧠 Suggest', '🧠 Brain'], ['➕ Add account', '📋 Accounts'], ['⚙️ Settings']]
+    : [['🧠 اقتراحات', '🧠 العقل'], ['➕ إضافة حساب', '📋 الحسابات'], ['⚙️ إعدادات']];
+  return { keyboard: labels.map((row) => row.map((text) => ({ text }))), resize_keyboard: true, one_time_keyboard: false };
+}
 
 export function telegramToken() {
   return requiredEnv('TELEGRAM_BOT_TOKEN');
@@ -25,7 +25,10 @@ export function assertTelegramChat(chatId: string) {
   if (allowed && String(chatId) !== String(allowed)) throw new Error('Unauthorized Telegram chat');
 }
 
-export async function sendTelegramMessage(chatId: string, text: string, replyMarkup: any = MAIN_KEYBOARD) {
+// Default replyMarkup is undefined — callers pass mainTelegramKeyboard(lang)
+// explicitly when they want the persistent keyboard. This prevents a stale
+// legacy keyboard from leaking onto messages that omit the markup.
+export async function sendTelegramMessage(chatId: string, text: string, replyMarkup?: any) {
   const token = telegramToken();
   const res = await fetchWithRetry(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: 'POST',
@@ -35,7 +38,7 @@ export async function sendTelegramMessage(chatId: string, text: string, replyMar
       text,
       parse_mode: 'HTML',
       disable_web_page_preview: true,
-      reply_markup: replyMarkup
+      ...(replyMarkup ? { reply_markup: replyMarkup } : {})
     })
   }, { label: 'telegram sendMessage' });
   if (!res.ok) throw new Error(`Telegram sendMessage failed: ${res.status} ${await res.text()}`);
@@ -134,7 +137,7 @@ export function extractGitHubRepo(text: string) {
 /**
  * إرسال صورة لتليجرام عبر URL
  */
-export async function sendTelegramPhoto(chatId: string, photoUrl: string, caption: string = '', replyMarkup: any = MAIN_KEYBOARD) {
+export async function sendTelegramPhoto(chatId: string, photoUrl: string, caption: string = '', replyMarkup?: any) {
   const token = telegramToken();
   const res = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
     method: 'POST',
@@ -155,7 +158,7 @@ export async function sendTelegramPhoto(chatId: string, photoUrl: string, captio
 /**
  * إرسال فيديو لتليجرام عبر URL
  */
-export async function sendTelegramVideo(chatId: string, videoUrl: string, caption: string = '', replyMarkup: any = MAIN_KEYBOARD) {
+export async function sendTelegramVideo(chatId: string, videoUrl: string, caption: string = '', replyMarkup?: any) {
   const token = telegramToken();
   const res = await fetch(`https://api.telegram.org/bot${token}/sendVideo`, {
     method: 'POST',
@@ -175,7 +178,7 @@ export async function sendTelegramVideo(chatId: string, videoUrl: string, captio
 /**
  * إرسال GIF/رسوم متحركة لتليجرام عبر URL
  */
-export async function sendTelegramAnimation(chatId: string, animationUrl: string, caption: string = '', replyMarkup: any = MAIN_KEYBOARD) {
+export async function sendTelegramAnimation(chatId: string, animationUrl: string, caption: string = '', replyMarkup?: any) {
   const token = telegramToken();
   const res = await fetch(`https://api.telegram.org/bot${token}/sendAnimation`, {
     method: 'POST',

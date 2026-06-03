@@ -1,7 +1,7 @@
 import { runBackground } from '../../../../lib/background';
 import { optionalEnv } from '../../../../lib/env';
 import { supabaseAdmin } from '../../../../lib/supabase';
-import { assertTelegramChat, extractHandles, htmlEscape, sendTelegramMessage, answerCallbackQuery } from '../../../../lib/telegram';
+import { assertTelegramChat, extractHandles, htmlEscape, sendTelegramMessage, answerCallbackQuery, mainTelegramKeyboard } from '../../../../lib/telegram';
 import { getActiveProfile, updateProfile, type Profile } from '../../../../lib/lean/profile';
 import { languageName } from '../../../../lib/lean/config';
 import { runLeanLoop } from '../../../../lib/lean/run';
@@ -45,12 +45,8 @@ function t(lang: Lang, key: string): string {
   return (lang === 'en' ? en : ar)[key] || '';
 }
 
-function keyboard(lang: Lang) {
-  const labels = lang === 'en'
-    ? [['🧠 Suggest', '🧠 Brain'], ['➕ Add account', '📋 Accounts'], ['⚙️ Settings']]
-    : [['🧠 اقتراحات', '🧠 العقل'], ['➕ إضافة حساب', '📋 الحسابات'], ['⚙️ إعدادات']];
-  return { keyboard: labels.map((row) => row.map((text) => ({ text }))), resize_keyboard: true, one_time_keyboard: false };
-}
+// Single shared keyboard (no local duplicate).
+const keyboard = (lang: Lang) => mainTelegramKeyboard(lang);
 
 // ── Interactive settings card ───────────────────────────────────────────────
 function settingsView(p: Profile | null, lang: Lang): { text: string; markup: any } {

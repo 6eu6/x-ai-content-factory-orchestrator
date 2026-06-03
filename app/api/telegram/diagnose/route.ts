@@ -1,5 +1,5 @@
 import { optionalEnv, requiredEnv, assertAuthorized } from '../../../../lib/env';
-import { setTelegramWebhook, sendTelegramMessage, MAIN_KEYBOARD } from '../../../../lib/telegram';
+import { setTelegramWebhook, sendTelegramMessage, mainTelegramKeyboard } from '../../../../lib/telegram';
 
 /**
  * GET /api/telegram/diagnose
@@ -27,7 +27,7 @@ export async function GET(req: Request) {
       if (!chatId) return Response.json({ ok: false, error: 'TELEGRAM_ALLOWED_CHAT_ID not set' }, { status: 500 });
       
       try {
-        await sendTelegramMessage(chatId, '✅ تم تحديث لوحة التحكم:', MAIN_KEYBOARD);
+        await sendTelegramMessage(chatId, '✅ تم تحديث لوحة التحكم:', mainTelegramKeyboard('ar'));
         return Response.json({ ok: true, message: 'Keyboard refreshed successfully', chat_id: chatId });
       } catch (e: any) {
         return Response.json({ ok: false, error: e.message }, { status: 500 });

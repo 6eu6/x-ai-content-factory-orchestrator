@@ -16,7 +16,7 @@ import { getWinningExamples, getRecentlyPublished } from './memory';
 import { generateSuggestions, type Suggestion } from './generate';
 import { gateSuggestion, isNearDuplicate } from './gate';
 import { envNumber } from '../env';
-import { sendTelegramMessage, htmlEscape, shortText, allowedChatId } from '../telegram';
+import { sendTelegramMessage, htmlEscape, shortText, allowedChatId, mainTelegramKeyboard } from '../telegram';
 
 // A reply/quote to a stale tweet is dead on arrival. Hard freshness limits.
 const REPLY_MAX_HOURS = envNumber('LEAN_REPLY_MAX_HOURS', 48, 1, 336);
@@ -135,14 +135,14 @@ export async function deliverSuggestions(chatId: string, r: LeanRunResult, lang:
   if (!r.suggestions.length) {
     await sendTelegramMessage(chatId, isAr
       ? 'لا توجد اقتراحات مقبولة هذه المرة — الفلتر رفض الضعيف. جرّب لاحقاً.'
-      : 'No suggestions passed the filter this time. Try again later.');
+      : 'No suggestions passed the filter this time. Try again later.', mainTelegramKeyboard(lang));
     return;
   }
 
   const header = isAr
     ? `<b>مرشّحات اليوم — @${htmlEscape(r.accountHandle)}</b>\nاختر <b>واحدة</b> فقط وانشرها يدوياً — هذه مرشّحات لا جدول نشر. (${r.suggestions.length})`
     : `<b>Today's candidates — @${htmlEscape(r.accountHandle)}</b>\nPick <b>one</b>, publish it manually. These are candidates, not a publishing schedule. (${r.suggestions.length})`;
-  await sendTelegramMessage(chatId, header);
+  await sendTelegramMessage(chatId, header, mainTelegramKeyboard(lang));
 
   let n = 1;
   for (const s of r.suggestions) {
