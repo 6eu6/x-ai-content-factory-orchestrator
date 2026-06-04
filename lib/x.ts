@@ -177,16 +177,64 @@ export async function searchXTweets(query: string, queryType: 'Latest' | 'Top' =
   return extractTweets(json).slice(0, safeMax).map(normalizeTwitterApiTweet);
 }
 
-export async function getXUserTimeline(user: string | XAccountSnapshot, maxResults = 5, includeReplies = false) {
-  const username = typeof user === 'string' ? user : user.username;
-  const safeMax = Math.min(Math.max(Number(maxResults) || 5, 5), 20);
+/** One last_tweets attempt (by userName or userId). Returns normalized tweets + raw diagnostics. */
+async function fetchLastTweets(params: { userName?: string; userId?: string; includeReplies: boolean }) {
   const url = new URL(`${twitterApiBase()}/twitter/user/last_tweets`);
-  url.searchParams.set('userName', username.replace(/^@/, ''));
-  url.searchParams.set('includeReplies', String(Boolean(includeReplies)));
-  const json = await fetchTwitterApiJson(url.toString());
-  const fromTimeline = extractTweets(json).slice(0, safeMax).map(normalizeTwitterApiTweet);
-  if (fromTimeline.length > 0) return fromTimeline;
-  return searchXTweets(`from:${username.replace(/^@/, '')}`, 'Latest', safeMax);
+  if (params.userId) url.searchParams.set('userId', params.userId);
+  if (params.userName) url.searchParams.set('userName', params.userName.replace(/^@/, ''));
+  url.searchParams.set('includeReplies', String(Boolean(params.includeReplies)));
+  const json = await fetchTwitterApiJson(url.toString(), { task_type: 'user_timeline' });
+  const raw = extractTweets(json);
+  return { tweets: raw.map(normalizeTwitterApiTweet), rawKeys: json && typeof json === 'object' ? Object.keys(json) : [], count: raw.length };
+}
+
+/**
+ * Recent posts (incl. replies/quotes) for a user. Robust path for small/new
+ * accounts: try last_tweets by userName, then by resolved numeric userId
+ * (more reliable than search, which does not index brand-new 0-follower
+ * accounts), then advanced_search as a last resort. Logs diagnostics when empty.
+ */
+export async function getXUserTimeline(user: string | XAccountSnapshot, maxResults = 5, includeReplies = false) {
+  const username = (typeof user === 'string' ? user : user.username).replace(/^@/, '');
+  const knownId = typeof user === 'string' ? '' : String(user.id || '');
+  const safeMax = Math.min(Math.max(Number(maxResults) || 5, 5), 20);
+  const diag: string[] = [];
+
+  // 1) last_tweets by userName
+  try {
+    const r = await fetchLastTweets({ userName: username, includeReplies });
+    diag.push(`last_tweets?userName keys=[${r.rawKeys.join(',')}] count=${r.count}`);
+    if (r.tweets.length) return r.tweets.slice(0, safeMax);
+  } catch (e: any) { diag.push(`last_tweets?userName error=${e?.message?.slice(0, 120)}`); }
+
+  // 2) last_tweets by resolved numeric userId (most reliable for tiny accounts)
+  try {
+    let userId = knownId;
+    if (!userId) {
+      const info = await getXUserByUsername(username);
+      userId = String(info.id || '');
+    }
+    if (userId) {
+      const r = await fetchLastTweets({ userId, includeReplies });
+      diag.push(`last_tweets?userId=${userId} keys=[${r.rawKeys.join(',')}] count=${r.count}`);
+      if (r.tweets.length) return r.tweets.slice(0, safeMax);
+    } else {
+      diag.push('userId unresolved');
+    }
+  } catch (e: any) { diag.push(`last_tweets?userId error=${e?.message?.slice(0, 120)}`); }
+
+  // 3) advanced_search fallback (Latest then Top)
+  try {
+    const latest = await searchXTweets(`from:${username}`, 'Latest', safeMax);
+    diag.push(`search:Latest count=${latest.length}`);
+    if (latest.length) return latest;
+    const top = await searchXTweets(`from:${username}`, 'Top', safeMax);
+    diag.push(`search:Top count=${top.length}`);
+    if (top.length) return top;
+  } catch (e: any) { diag.push(`search error=${e?.message?.slice(0, 120)}`); }
+
+  console.warn(`[x] getXUserTimeline EMPTY handle=@${username} includeReplies=${includeReplies} → ${diag.join(' | ')}`);
+  return [];
 }
 
 export async function getXUserAndTimeline(username: string, maxResults = 5, includeReplies = false) {
