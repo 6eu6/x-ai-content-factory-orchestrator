@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { matchPostToOpportunity, textSimilarity } from '../lib/lean/auto-detect';
+import { matchPostToOpportunity, textSimilarity, postContentType } from '../lib/lean/auto-detect';
+import { digestTweetId } from '../lib/lean/run';
+
+const mkSuggestion = (over: any) => ({ type: 'standalone', text: 't', source_url: null, source_handle: null, source_age_hours: null, rationale: '', ...over });
 
 const opps = [
   { id: 'o1', tweet_id: '111', source_url: 'https://x.com/a/status/111', action: 'reply', suggestion_text: 'API key tracking is the floor. Cost prediction before execution is the useful part.' },
@@ -34,5 +37,32 @@ describe('auto-detect matcher', () => {
   it('similarity is 1 for identical text and 0 for disjoint', () => {
     expect(textSimilarity('hello world foo', 'hello world foo')).toBe(1);
     expect(textSimilarity('alpha beta', 'gamma delta')).toBe(0);
+  });
+});
+
+describe('digest suggestion tracking', () => {
+  it('classifies a published post type from flags', () => {
+    expect(postContentType({ is_reply: true, is_quote: false })).toBe('reply');
+    expect(postContentType({ is_reply: false, is_quote: true })).toBe('quote');
+    expect(postContentType({ is_reply: false, is_quote: false })).toBe('standalone');
+  });
+
+  it('digest reply/quote uses the source tweet id (enables strong match after publish)', () => {
+    expect(digestTweetId(mkSuggestion({ type: 'reply', source_url: 'https://x.com/a/status/12345' }))).toBe('12345');
+  });
+
+  it('digest standalone uses a stable content hash (dedupe), not the source', () => {
+    const a = digestTweetId(mkSuggestion({ type: 'standalone', text: 'A sharp original take' }));
+    const b = digestTweetId(mkSuggestion({ type: 'standalone', text: 'A sharp original take' }));
+    expect(a).toBe(b);
+    expect(a.startsWith('digest:')).toBe(true);
+    expect(a).not.toBe(digestTweetId(mkSuggestion({ type: 'standalone', text: 'A different take' })));
+  });
+
+  it('a published digest reply then strong-matches its opportunity', () => {
+    // opportunity persisted from a digest reply carries the source tweet id
+    const oppFromDigest = [{ id: 'd1', tweet_id: digestTweetId(mkSuggestion({ type: 'reply', source_url: 'https://x.com/a/status/999' })), source_url: 'https://x.com/a/status/999', action: 'reply', suggestion_text: 'my take' }];
+    const post = { id: 'p1', text: 'my edited take', is_reply: true, in_reply_to_tweet_id: '999', is_quote: false, quoted_tweet_id: null };
+    expect(matchPostToOpportunity(post, oppFromDigest)?.opp.id).toBe('d1');
   });
 });

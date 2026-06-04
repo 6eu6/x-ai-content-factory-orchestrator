@@ -9,6 +9,7 @@
  * worker / durable queue required for the lean path.
  */
 
+import { createHash } from 'crypto';
 import { getLeanConfig, configFromProfile, loadSourceAccounts } from './config';
 import { getActiveProfile } from './profile';
 import { harvestSources, type HarvestedTweet } from './harvest';
@@ -16,6 +17,8 @@ import { getWinningExamples, getRecentlyPublished } from './memory';
 import { generateSuggestions, type Suggestion } from './generate';
 import { gateSuggestion, isNearDuplicate } from './gate';
 import { envNumber } from '../env';
+import { supabaseAdmin } from '../supabase';
+import { tweetIdFromUrl } from '../x';
 import { sendTelegramMessage, htmlEscape, shortText, allowedChatId, mainTelegramKeyboard } from '../telegram';
 
 // A reply/quote to a stale tweet is dead on arrival. Hard freshness limits.
@@ -109,6 +112,10 @@ export async function runLeanLoop(opts?: { deliverTelegram?: boolean; runId?: st
     suggestions: accepted,
   };
 
+  // Persist accepted suggestions as trackable opportunities (origin=daily_digest)
+  // so the human publishing one can be auto-detected and learned from.
+  try { await persistDigestSuggestions(cfg.accountHandle, accepted); } catch { /* non-fatal */ }
+
   if (opts?.deliverTelegram) {
     const chatId = allowedChatId();
     const lang = profile?.botLanguage === 'en' ? 'en' : 'ar';
@@ -116,6 +123,37 @@ export async function runLeanLoop(opts?: { deliverTelegram?: boolean; runId?: st
   }
 
   return result;
+}
+
+/** Stable id for a digest suggestion: source tweet id for reply/quote, else a content hash. */
+export function digestTweetId(s: Suggestion): string {
+  const fromSource = s.source_url ? tweetIdFromUrl(s.source_url) : '';
+  if (fromSource) return fromSource;
+  return 'digest:' + createHash('md5').update(s.text.toLowerCase().trim()).digest('hex').slice(0, 16);
+}
+
+/** Insert accepted daily-digest suggestions into opportunities (deduped). */
+export async function persistDigestSuggestions(accountHandle: string, suggestions: Suggestion[]): Promise<number> {
+  if (!suggestions.length) return 0;
+  const supabase = supabaseAdmin();
+  const handle = accountHandle.replace(/^@/, '');
+  let inserted = 0;
+  for (const s of suggestions) {
+    const { data, error } = await supabase.from('opportunities').insert({
+      account_handle: handle,
+      tweet_id: digestTweetId(s),
+      source_handle: s.source_handle,
+      source_url: s.source_url,
+      source_text: '',
+      action: s.type,
+      suggestion_text: s.text,
+      score: 0,
+      status: 'suggested',
+      origin: 'daily_digest',
+    }).select('id').maybeSingle();
+    if (!error && data) inserted++; // unique(account_handle, tweet_id) => dedupe
+  }
+  return inserted;
 }
 
 const TYPE_LABEL: Record<string, { ar: string; en: string }> = {

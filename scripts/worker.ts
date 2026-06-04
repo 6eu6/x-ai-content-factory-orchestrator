@@ -162,8 +162,8 @@ async function cycleForProfile(profile: Profile, runAutoDetect: boolean): Promis
   // Nth cycle to limit X reads — a published post is still caught within minutes.
   if (runAutoDetect) {
     try {
-      const det = await autoDetectPublished(profile);
-      if (det.logged > 0) console.log(`[worker] @${profile.accountHandle}: auto-logged ${det.logged} published post(s)`);
+      const d = await autoDetectPublished(profile);
+      console.log(`[worker] @${profile.accountHandle}: auto-detect — scanned=${d.scanned} matched=${d.matched} inserted=${d.inserted} dupes=${d.skipped_duplicates} unmatched=${d.unmatched} manual=${d.manual_logged}`);
     } catch (e: any) {
       console.error('[worker] auto-detect:', e?.message);
     }
