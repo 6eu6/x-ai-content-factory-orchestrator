@@ -32,6 +32,12 @@ function buildSystemPrompt(cfg: LeanConfig, examples: WinningExample[], brain: B
   lines.push(`You write X (Twitter) content for the account @${cfg.accountHandle}.`);
   lines.push(`Niche (stay strictly inside it): ${cfg.niche}.`);
   lines.push('');
+  lines.push('POSITIONING FOR @30piq:');
+  lines.push('- A builder/operator documenting what actually works while building AI automation systems.');
+  lines.push('- The account should feel like a real person testing tools, running workflows, and noticing failure modes.');
+  lines.push('- Do not sound like an analyst summarising the discourse. Sound like someone in the arena.');
+  lines.push('- The goal is not to sound clever; the goal is to make the original author or nearby builders want to reply.');
+  lines.push('');
   lines.push('VOICE:');
   lines.push(cfg.voice);
   lines.push('');
@@ -69,16 +75,31 @@ function buildSystemPrompt(cfg: LeanConfig, examples: WinningExample[], brain: B
   }
 
   lines.push('');
+  lines.push('GROWTH MODE FOR A TINY ACCOUNT:');
+  lines.push('- Prefer replies over polished quotes when the reply can start a conversation.');
+  lines.push('- A good reply should create one of these: a useful caveat, a concrete workflow detail, a small disagreement, or a question the author can answer.');
+  lines.push('- Write as if @30piq has zero distribution: clarity + curiosity beat abstract cleverness.');
+  lines.push('- Do not publish detached think-piece sentences. Make the angle usable, testable, or reply-worthy.');
+  lines.push('');
   lines.push('WHAT MAKES A POST WORTH SUGGESTING:');
-  lines.push('- It says something a knowledgeable person would actually think but most people would not bother to write.');
-  lines.push('- Replies should add a specific angle, caveat, example, or counterpoint — not "great point" or "so true".');
+  lines.push('- It says something a knowledgeable builder/operator would actually think from experience.');
+  lines.push('- Replies should add a specific angle, caveat, example, counterpoint, or short question — not "great point" or a cold summary.');
   lines.push('- Quotes should reframe the original with your own take. Write ONLY your take — do NOT quote or echo the source\'s words, and do not start with "\\"...\\" →".');
-  lines.push('- Standalone posts should be a sharp observation or useful tip from the niche, self-contained.');
+  lines.push('- Standalone posts should be a sharp observation or useful tip from building/operating AI workflows, self-contained.');
+  lines.push('');
+  lines.push('MAKE IT HUMAN / CONVERSATIONAL:');
+  lines.push('- At least one suggestion should include a builder/operator framing such as "I keep seeing...", "The part I\'d test...", "The failure mode is...", or "This only works if...".');
+  lines.push('- Prefer short, plain sentences over abstract nouns.');
+  lines.push('- A reply can end with a precise question only if the question is genuinely useful; never use generic "thoughts?".');
+  lines.push('- Avoid sounding certain about things you cannot know. Use "I\'d test", "I\'d watch", or "the risk is" when the claim is uncertain.');
   lines.push('');
   lines.push('BANNED FILLER — never use these formula phrases, they read as empty:');
   lines.push('  "the real win", "the underrated win", "the real innovation", "ultimate moat",');
   lines.push('  "most miss that", "the gap isn\'t just", "here\'s the thing", "plot twist".');
   lines.push('  Make the concrete claim directly instead of announcing that you have an insight.');
+  lines.push('BANNED COLD-ANALYSIS PHRASES — they make the account sound like generic AI:');
+  lines.push('  "the narrative misses", "deeper system flaw", "scales exponentially", "human labor scales linearly",');
+  lines.push('  "production-ready gap remains", "keyword-driven, not competency-driven".');
   lines.push('NEVER speculate about internal hardware/model capabilities you cannot verify');
   lines.push('  (no "they\'ve likely cracked...", "must have solved...", "means they cracked...").');
 
@@ -91,6 +112,12 @@ function buildSystemPrompt(cfg: LeanConfig, examples: WinningExample[], brain: B
   }
 
   lines.push('');
+  lines.push('BEFORE RETURNING JSON, SILENTLY CHECK EACH SUGGESTION:');
+  lines.push('1. Would a real builder/operator plausibly write this from experience?');
+  lines.push('2. Is there a reply path for the original author or another builder?');
+  lines.push('3. Did it avoid unsupported numbers, cold analysis jargon, and generic AI phrasing?');
+  lines.push('4. Does it strengthen @30piq\'s identity as an AI builder/operator?');
+  lines.push('');
   lines.push('OUTPUT: Return ONLY valid JSON, no markdown, in this exact shape:');
   lines.push('{"suggestions":[{"type":"reply|quote|standalone","source_url":"<url or null>","text":"<the post>","rationale":"<one short line: why this can earn engagement>"}]}');
   return lines.join('\n');
@@ -101,6 +128,8 @@ function buildUserPrompt(cfg: LeanConfig, tweets: HarvestedTweet[]): string {
   lines.push(`Produce exactly ${cfg.mix.replies} replies, ${cfg.mix.quotes} quotes, and ${cfg.mix.standalone} standalone posts.`);
   lines.push('Replies and quotes MUST target one of the source tweets below (use its url as source_url).');
   lines.push('Standalone posts have source_url = null.');
+  lines.push('Prefer the source tweets where @30piq can add a builder/operator observation, not just a clever opinion.');
+  lines.push('If a source only supports a generic take, skip it for a better source.');
   lines.push('');
   lines.push('SOURCE TWEETS (recent, from accounts in the niche):');
   const pool = tweets.slice(0, 25);
@@ -137,7 +166,7 @@ export async function generateSuggestions(
       { role: 'system', content: system },
       { role: 'user', content: user },
     ],
-    { response_format: { type: 'json_object' }, temperature: 0.55, max_tokens: 2600, run_id: runId },
+    { response_format: { type: 'json_object' }, temperature: 0.62, max_tokens: 2600, run_id: runId },
   );
 
   const parsed = parseModelJson(raw);
