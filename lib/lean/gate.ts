@@ -69,6 +69,20 @@ const CLICHE_PATTERNS: RegExp[] = [
   /\bplot twist\b/i,
 ];
 
+// Cold analysis language that may sound clever but does not help a zero-reach
+// account start conversations. These patterns came directly from early manual
+// review of @30piq suggestions that felt generic/AI-written.
+const COLD_ANALYSIS_PATTERNS: RegExp[] = [
+  /\bthe narrative misses\b/i,
+  /\bdeeper system flaw\b/i,
+  /\bhuman labor scales linearly\b/i,
+  /\bAI scales exponentially\b/i,
+  /\bproduction-ready gap remains\b/i,
+  /\bkeyword-driven,? not competency-driven\b/i,
+  /\bexposes a deeper\b/i,
+  /\bfactor in consistency and audit trails\b/i,
+];
+
 // Unsupported capability speculation (especially hardware/model claims). The
 // model guesses internals it cannot know; these phrasings are the tell.
 const SPECULATION_PATTERNS: RegExp[] = [
@@ -114,6 +128,9 @@ export function gateSuggestion(text: string, maxLen = 280, language = 'en'): Gat
   }
   for (const re of CLICHE_PATTERNS) {
     if (re.test(t)) return { ok: false, reason: 'generic_cliche' };
+  }
+  for (const re of COLD_ANALYSIS_PATTERNS) {
+    if (re.test(t)) return { ok: false, reason: 'cold_generic_analysis' };
   }
   for (const re of SPECULATION_PATTERNS) {
     if (re.test(t)) return { ok: false, reason: 'unsupported_speculation' };
